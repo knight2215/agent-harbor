@@ -49,6 +49,7 @@ use crate::registry::ProviderFactory;
 pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
 /// The Gemini `generateContent` translation shim.
+#[derive(Debug)]
 pub struct GeminiAdapter {
     id: String,
     client: HttpSseClient,

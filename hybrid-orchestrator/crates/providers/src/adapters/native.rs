@@ -96,6 +96,7 @@ impl Routing {
 
 /// The shared native OpenAI-compatible adapter. Built by each provider module
 /// with its own base_url + auth + routing and default capabilities.
+#[derive(Debug)]
 pub struct NativeAdapter {
     id: String,
     client: HttpSseClient,
@@ -154,11 +155,9 @@ impl NativeAdapter {
             obj.insert("stream".to_string(), serde_json::Value::Bool(stream));
             // `extra` is an internal passthrough container, not an OpenAI field;
             // splice its members up to the top level and drop the wrapper.
-            if let Some(extra) = obj.remove("extra") {
-                if let serde_json::Value::Object(extra_obj) = extra {
-                    for (k, v) in extra_obj {
-                        obj.insert(k, v);
-                    }
+            if let Some(serde_json::Value::Object(extra_obj)) = obj.remove("extra") {
+                for (k, v) in extra_obj {
+                    obj.insert(k, v);
                 }
             }
         }

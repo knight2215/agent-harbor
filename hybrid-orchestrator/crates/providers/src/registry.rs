@@ -295,7 +295,8 @@ mod tests {
         let cfg = config("openai", None);
         match reg.build_from_config(&cfg, &store) {
             Err(ProviderError::Other(msg)) => assert!(msg.contains("no factory")),
-            other => panic!("expected Other error, got {other:?}"),
+            Err(other) => panic!("expected Other error, got {other:?}"),
+            Ok(_) => panic!("expected Other error, got Ok"),
         }
     }
 

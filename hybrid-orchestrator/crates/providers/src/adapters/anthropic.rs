@@ -57,6 +57,7 @@ pub const DEFAULT_ANTHROPIC_VERSION: &str = "2023-06-01";
 const DEFAULT_MAX_TOKENS: u32 = 4096;
 
 /// The Anthropic Messages API translation shim.
+#[derive(Debug)]
 pub struct AnthropicAdapter {
     id: String,
     client: HttpSseClient,

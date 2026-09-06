@@ -92,6 +92,7 @@ impl ModelFamily {
 }
 
 /// The Bedrock translation shim.
+#[derive(Debug)]
 pub struct BedrockAdapter {
     id: String,
     base_url: String,
@@ -705,8 +706,8 @@ where
                 None => {
                     // Byte stream ended. Any leftover bytes that are not a full
                     // frame are dropped (a well-formed Bedrock stream ends on a
-                    // frame boundary).
-                    state.done = true;
+                    // frame boundary). The stream terminates here, so `state`
+                    // is not returned and needs no further mutation.
                     return None;
                 }
             }
