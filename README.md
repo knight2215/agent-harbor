@@ -11,7 +11,7 @@ The authoritative design lives in the specs:
 
 ## Implementation status
 
-Phases 0 through 3 are implemented and merged; Phases 4 through 6 are pending.
+Phases 0 through 4 are implemented and merged; Phases 5 and 6 are pending.
 
 - **Phase 0 - Scaffold**: DONE. Full crate layout, a launching Tauri shell, a
   rendering React frontend, and CI.
@@ -25,7 +25,13 @@ Phases 0 through 3 are implemented and merged; Phases 4 through 6 are pending.
 - **Phase 3 - MCP client**: DONE. stdio + HTTP/SSE transports, server lifecycle,
   tool discovery, the function-calling bridge, and Ask/Allow/Deny tool
   permissions.
-- **Phase 4 - Routing policy engine + full message pipeline**: PENDING.
+- **Phase 4 - Routing policy engine + full message pipeline**: DONE. The
+  pluggable `RoutingPolicy` trait with complexity/privacy/cost signals, the
+  automatic default policy and manual-override precedence, and the
+  `PolicyRegistry`, plus the end-to-end
+  `message -> route -> provider -> tool loop -> persist` pipeline
+  (`orchestrator_core::run_turn`) and the `send_message` command that drives it
+  and streams over the core-event bridge.
 - **Phase 5 - UI surfaces**: PENDING.
 - **Phase 6 - Security hardening + extensibility validation**: PENDING.
 
@@ -44,7 +50,7 @@ agent-harbor/
     │   ├── orchestrator-core/      # Session manager + command/event skeleton
     │   ├── providers/              # ChatProvider contract, registry, adapters
     │   ├── mcp-client/             # MCP transports, lifecycle, tools, permissions
-    │   ├── routing/                # Routing policies + signals (Phase 4, offline member)
+    │   ├── routing/                # Routing policies + signals (Phase 4, CI-verified)
     │   ├── persistence/            # SQLite DB, repositories, config
     │   ├── secrets/                # Secret keystore (keyring-backed)
     │   └── tauri-app/              # Tauri v2 desktop shell (binary)
@@ -76,7 +82,7 @@ agent-harbor/
 
 ```sh
 cd hybrid-orchestrator
-cargo build                                   # build the offline member crate (routing)
+cargo build                                   # no-op offline: every crate is now excluded (see note)
 cargo test                                    # run the crate smoke tests
 cargo clippy --all-targets -- -D warnings     # lint (warnings are errors)
 cargo fmt --all --check                       # check formatting
@@ -117,13 +123,16 @@ sandbox** where crates.io and registry.npmjs.org are unreachable. This still
 shapes the workspace layout as feature crates gained real dependencies through
 Phases 1 through 3:
 
-- **`routing`** is the sole crate that remains dependency-free, so it stays a
-  `[workspace] members` entry and builds, tests, and lints **fully offline**
-  with the bare `cargo` commands above.
-- The crates that now carry crates.io dependencies (`domain`,
-  `orchestrator-core`, `persistence`, `secrets`, `providers`, `mcp-client`, and
-  `tauri-app`) are unreachable offline, so they are placed under
-  `[workspace] exclude` and **validated in CI**, where network access exists.
+- In Phase 4 the `routing` crate gained path deps on `providers` and `domain`,
+  which pull in the crates.io HTTP/DB/keyring stack transitively, so it is no
+  longer dependency-free. It **joined the excluded set** and is **validated in
+  CI** like every other crate; its own unit tests still use no live network.
+- Every crate now carries crates.io dependencies (directly or transitively):
+  `domain`, `orchestrator-core`, `persistence`, `secrets`, `providers`,
+  `mcp-client`, `routing`, and `tauri-app` are all under `[workspace] exclude`
+  and **validated in CI**, where network access exists. No crate remains an
+  offline-buildable `members` entry, so the `members` array is empty and the
+  bare `cargo` commands above build nothing offline.
 - The frontend depends on the npm registry and is likewise validated in CI.
 
 ### Workspace `exclude` arrangement for the networked crates
@@ -134,8 +143,10 @@ in crates.io dependencies (for example `tauri`/`tauri-build`, `sqlx`, `keyring`,
 `reqwest`, `tokio`, `aws-sigv4`) that are unreachable offline, listing them under
 `members` would make **every** bare cargo command fail. To keep the offline
 baseline green, they are placed under `[workspace] exclude` in
-`hybrid-orchestrator/Cargo.toml` (not `members`); only the dependency-free
-`routing` crate remains a `members` entry.
+`hybrid-orchestrator/Cargo.toml` (not `members`). As of Phase 4 that includes
+`routing` (it gained crates.io deps transitively through its `providers`/`domain`
+path deps), so no crate remains a `members` entry and the `members` array is
+empty.
 
 A consequence: `cargo build --workspace` and `cargo build -p <crate>` do **not**
 see the excluded crates. CI therefore builds/tests/clippies each one explicitly

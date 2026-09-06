@@ -19,6 +19,7 @@ import {
   updatePersona,
   deletePersona,
   setProviderSecret,
+  sendMessage,
 } from "./commands";
 
 describe("ipc/commands wrappers", () => {
@@ -104,6 +105,24 @@ describe("ipc/commands wrappers", () => {
     expect(invoke).toHaveBeenCalledWith("set_provider_secret", {
       providerId: "openai",
       secret: "sk-do-not-leak",
+    });
+  });
+
+  it("sendMessage forwards conversationId + content + overrideRoute", async () => {
+    // Automatic routing: overrideRoute is undefined.
+    await sendMessage("c-1", "hello");
+    expect(invoke).toHaveBeenCalledWith("send_message", {
+      conversationId: "c-1",
+      content: "hello",
+      overrideRoute: undefined,
+    });
+
+    // Manual override forwarded verbatim.
+    await sendMessage("c-1", "hello", { providerId: "openai", model: "gpt-4o" });
+    expect(invoke).toHaveBeenLastCalledWith("send_message", {
+      conversationId: "c-1",
+      content: "hello",
+      overrideRoute: { providerId: "openai", model: "gpt-4o" },
     });
   });
 });

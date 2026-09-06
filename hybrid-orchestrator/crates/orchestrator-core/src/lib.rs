@@ -3,8 +3,9 @@
 //! Framework-agnostic (no Tauri dependency). Coordinates routing, providers,
 //! MCP, and persistence. Phase 1 provides the Section 7.1 domain models (see
 //! [`models`]), the [`session::SessionManager`] (Section 7.5), and the
-//! [`events::CoreEvent`] surface (Section 8). The streaming pipeline lands in a
-//! later phase.
+//! [`events::CoreEvent`] surface (Section 8). Phase 4 (FEAT-002) fills in the
+//! end-to-end streaming pipeline (see [`pipeline::run_turn`], Section 2.2):
+//! `message -> route -> provider -> tool loop -> persist`.
 //!
 //! ## Domain models live in the leaf `domain` crate
 //!
@@ -49,6 +50,11 @@ pub use session::{ConversationInit, SessionError, SessionManager};
 // ORDERED.
 pub use permission::{Decision, PermissionGate, PermissionOutcome, PermissionRegistry};
 pub use tools_bridge::{validate_arguments, ToolBridge};
+
+// Phase 4 (FEAT-002): the end-to-end message pipeline (architecture.md Section
+// 2.2, P4.6) that assembles route -> provider -> tool loop -> persist. Re-exports
+// kept ALPHABETICALLY ORDERED.
+pub use pipeline::{run_turn, PipelineError, TurnContext, MAX_TOOL_LOOP_ITERATIONS};
 
 #[cfg(test)]
 mod tests {

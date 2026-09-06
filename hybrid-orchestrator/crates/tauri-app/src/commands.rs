@@ -13,8 +13,8 @@
 //! seam) is never surfaced here.
 
 use orchestrator_core::{
-    AgentPersona, Conversation, ConversationInit, Decision, ManualRoute, ModelParameters,
-    PrivacyTag, ProviderConfig, RoutingHint, SecretRef,
+    run_turn, AgentPersona, Conversation, ConversationInit, Decision, ManualRoute, ModelParameters,
+    PermissionGate, PrivacyTag, ProviderConfig, RoutingHint, SecretRef, TurnContext,
 };
 use persistence::config::{AppConfig, PricingConfig};
 use persistence::ProviderRepo;
@@ -33,6 +33,10 @@ const MAX_SYSTEM_PROMPT_LEN: usize = 32_768;
 const MAX_SECRET_LEN: usize = 8_192;
 const MAX_PROVIDER_ID_LEN: usize = 128;
 const MAX_TAGS: usize = 64;
+/// Upper bound on a single user chat message (architecture.md Section 9.2
+/// "bounds"). 128 KiB is generous for a chat turn while guarding the core
+/// against unbounded input.
+const MAX_MESSAGE_LEN: usize = 131_072;
 
 /// A structured error returned across the IPC boundary when a command rejects
 /// its input or the core fails. Serialized as `{ "code": ..., "message": ... }`.
@@ -493,6 +497,94 @@ fn pricing_table_from_config(config: &PricingConfig) -> PricingTable {
     table
 }
 
+// --- Message pipeline (P4.6 / Section 2.2 / 8.1) ---------------------------
+
+/// Send a user message and drive the end-to-end pipeline (architecture.md
+/// Section 8.1 signature): `message -> route -> provider -> tool loop ->
+/// persist`. The assistant response is delivered by STREAMING
+/// [`orchestrator_core::CoreEvent`]s over the existing core-event bridge
+/// (`events.rs`), NOT by holding this command open (Section 2.2): the command
+/// validates its arguments, kicks off the pipeline turn on a spawned task, and
+/// returns.
+///
+/// `overrideRoute` is the optional per-message manual override (Section 6.3,
+/// highest precedence). When present it must name a provider/model; validation
+/// rejects a malformed route before the pipeline runs.
+#[tauri::command]
+pub async fn send_message(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+    content: String,
+    override_route: Option<ManualRoute>,
+) -> Result<(), CommandError> {
+    send_message_inner(&state, &conversation_id, &content, override_route).await
+}
+
+/// The full validate-then-drive body of [`send_message`], factored out so it can
+/// be driven directly in tests without a live Tauri `State` (the established
+/// `_inner` testability pattern). It validates the id/content/override, assembles
+/// the [`TurnContext`] inputs from [`AppState`] (session manager, routing policy
+/// registry, a freshly-built provider registry + candidate models, the
+/// permission gate over the shared registry, the core-event sender, and the MCP
+/// handles), and spawns the pipeline turn so other conversations are not blocked
+/// (Section 7.5 concurrency). Streaming is delivered via `core_events`.
+async fn send_message_inner(
+    state: &AppState,
+    conversation_id: &str,
+    content: &str,
+    override_route: Option<ManualRoute>,
+) -> Result<(), CommandError> {
+    let conversation_id = parse_uuid("conversationId", conversation_id)?;
+    validate_nonempty("content", content, MAX_MESSAGE_LEN)?;
+    if let Some(route) = &override_route {
+        validate_manual_route(route)?;
+    }
+
+    // Build the provider registry + candidate model list from the persisted
+    // config rows + pricing, mirroring `list_available_models_inner`. Doing this
+    // per turn keeps the routing candidate set current with configuration.
+    let db = state.session_manager.db();
+    let configs: Vec<ProviderConfig> = ProviderRepo::new(db)
+        .list()
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let app_config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let pricing = pricing_table_from_config(&app_config.pricing);
+    let registry = providers::build_registry(configs.iter(), state.secret_store.as_ref())
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let available = list_models(&registry, &configs, &pricing)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // Clone the shared subsystems into the spawned task so the command returns
+    // immediately and the streamed events arrive over the bridge.
+    let session_manager = state.session_manager.clone();
+    let policies = state.policies.clone();
+    let gate = PermissionGate::new(state.core_events.clone(), state.permission_registry.clone());
+    let events = state.core_events.clone();
+    let servers = state.mcp_servers.as_ref().clone();
+    let content = content.to_string();
+
+    tokio::spawn(async move {
+        let ctx = TurnContext {
+            session_manager: &session_manager,
+            policies: &policies,
+            providers: &registry,
+            servers,
+            gate,
+            events,
+            available,
+        };
+        // The pipeline emits MessageError + persists an Error-status message on
+        // failure, so the returned error is already surfaced; nothing to do here.
+        let _ = run_turn(&ctx, conversation_id, content, override_route).await;
+    });
+
+    Ok(())
+}
+
 // --- MCP tool permissions (P3.5 / Section 9.4) ------------------------------
 
 /// Resolve a pending `Ask`-mode tool-permission request (architecture.md
@@ -670,6 +762,47 @@ mod tests {
         // Well-formed but unknown id -> false (nothing awaiting it).
         let unknown = Uuid::new_v4().to_string();
         assert!(!resolve_permission_inner(&state, &unknown, Decision::allow()).unwrap());
+    }
+
+    /// `send_message` REJECTS invalid input before touching the core: a
+    /// malformed conversation id, empty content, an over-long message, and an
+    /// override route with an empty provider id all error with
+    /// `InvalidArgument`. This mirrors the `set_provider_secret_inner` rejection
+    /// tests and drives the extracted inner fn exactly as the `#[tauri::command]`
+    /// wrapper does.
+    #[tokio::test]
+    async fn send_message_inner_rejects_invalid_input() {
+        let state = test_state().await;
+
+        // Malformed conversation id -> InvalidArgument.
+        let err = send_message_inner(&state, "not-a-uuid", "hi", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // Empty content -> InvalidArgument.
+        let valid_id = Uuid::new_v4().to_string();
+        let err = send_message_inner(&state, &valid_id, "   ", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // Over-long content -> InvalidArgument.
+        let too_long = "x".repeat(MAX_MESSAGE_LEN + 1);
+        let err = send_message_inner(&state, &valid_id, &too_long, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // Override route with an empty provider id -> InvalidArgument.
+        let bad_route = ManualRoute {
+            provider_id: "".to_string(),
+            model: "gpt-4o".to_string(),
+        };
+        let err = send_message_inner(&state, &valid_id, "hi", Some(bad_route))
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
     }
 
     /// Empty provider id / secret are rejected by validation before the store.
