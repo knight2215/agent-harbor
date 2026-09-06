@@ -2,12 +2,30 @@ name: CI
 
 # CI pipeline (tasks.md P0.6, extended in Phase 1 / P1.1).
 #
-# Runs the full workspace build/test/clippy, the frontend vitest suite, and a
-# `tauri build` on a matrix of target operating systems. Unlike the offline
-# sandbox, GitHub Actions has network access, so this is the authoritative place
-# where the FULL build is exercised: the offline-buildable library crates AND
-# the crates that carry crates.io dependencies (which are unreachable offline),
-# plus the npm dependencies for the frontend.
+# TWO-JOB STRUCTURE (introduced to keep the routine per-push signal fast):
+#
+#   1. `build` (routine gate) - runs on EVERY push and pull_request across the
+#      ubuntu + windows matrix. It is the authoritative correctness gate:
+#      `cargo fmt --check`, `cargo build/test/clippy` over the workspace AND
+#      every `[workspace] exclude`d crate (via `--manifest-path`), plus the
+#      frontend install / ESLint / Prettier / vitest suite. It does NOT bundle a
+#      Tauri installer, so it finishes in a few minutes instead of ~40.
+#
+#   2. `tauri-bundle` (gated release check) - runs ONLY on manual dispatch
+#      (`workflow_dispatch`) and on version-tag pushes (`tags: ['v*']`). It
+#      installs a PREBUILT Tauri v2 CLI (via taiki-e/install-action, avoiding the
+#      ~10-15 min source compile of `cargo install tauri-cli`) and runs
+#      `cargo tauri build` on the ubuntu + windows matrix to validate the full
+#      installer bundle. This is the slow step that used to run on every push;
+#      it now runs only when a release bundle is actually wanted.
+#
+# Both jobs are independent (each re-does its own checkout / toolchain / Linux
+# system deps / node / cargo cache).
+#
+# Unlike the offline sandbox, GitHub Actions has network access, so this is the
+# authoritative place where the FULL build is exercised: the offline-buildable
+# library crate AND the crates that carry crates.io dependencies (which are
+# unreachable offline), plus the npm dependencies for the frontend.
 #
 # IMPORTANT WORKSPACE ARRANGEMENT:
 #   Some crates are under `[workspace] exclude` in hybrid-orchestrator/
@@ -30,12 +48,14 @@ name: CI
 #                                   + async-trait + thiserror
 #                                   (Phase 3 / FEAT-001; stdio tests spawn a
 #                                   bundled cross-platform mock MCP server bin)
+#   The only crate that remains an offline-buildable `members` entry is the
+#   still dependency-free `routing`.
 #   Cargo resolves the whole `members` dependency graph to build Cargo.lock, so
 #   an excluded crate is invisible to `cargo build --workspace` (and to
 #   `cargo build -p <crate>`). Therefore CI builds/tests/clippies each excluded
-#   crate EXPLICITLY via `--manifest-path crates/<crate>/Cargo.toml`. The final
-#   `tauri build` step compiles tauri-app (and, transitively, orchestrator-core)
-#   as part of bundling the installer as well.
+#   crate EXPLICITLY via `--manifest-path crates/<crate>/Cargo.toml`. The gated
+#   `tauri-bundle` job's `tauri build` step compiles tauri-app (and,
+#   transitively, orchestrator-core) as part of bundling the installer as well.
 #
 #   DEPENDENCY GRAPH (strictly downward, acyclic - architecture.md Section 3.3):
 #   the Section 7.1 domain DTOs live in the leaf `domain` crate; both
@@ -55,7 +75,18 @@ name: CI
 
 on:
   push:
+    # Routine `build` runs on pushes to any branch. Listing `branches` here is
+    # required because once a `tags` filter is present, GitHub would otherwise
+    # only fire the push event for matching tags.
+    branches:
+      - "**"
+    # Version-tag pushes additionally trigger the gated `tauri-bundle` job.
+    tags:
+      - "v*"
   pull_request:
+  # Manual trigger, primarily so the gated `tauri-bundle` job can be run on
+  # demand without cutting a release tag.
+  workflow_dispatch:
 
 # Cancel superseded runs on the same ref to save CI minutes.
 concurrency:
@@ -93,8 +124,9 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      # Tauri v2 Linux system dependencies. Required to compile tauri-app and to
-      # run `tauri build` on ubuntu. Windows ships the needed webview
+      # Tauri v2 Linux system dependencies. Required to COMPILE tauri-app on
+      # ubuntu (the `cargo build --manifest-path crates/tauri-app/...` step below
+      # still runs in this routine job). Windows ships the needed webview
       # (WebView2) so it does not need this step.
       - name: Install Tauri v2 Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
@@ -139,7 +171,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # --- Rust: workspace (the six library crates) ---------------------------
+      # --- Rust: workspace (the offline-buildable `routing` member) -----------
       - name: cargo fmt (check, workspace members)
         run: cargo fmt --all --check
 
@@ -285,6 +317,8 @@ jobs:
       # --- Rust: tauri-app (excluded from the workspace, built explicitly) ----
       # tauri-app is under `[workspace] exclude`, so the `--workspace` commands
       # above do NOT touch it. Build/test/clippy it directly via its manifest.
+      # (The full installer bundle is validated separately in the gated
+      # `tauri-bundle` job, not here.)
       - name: cargo build (tauri-app)
         run: cargo build --manifest-path crates/tauri-app/Cargo.toml
 
@@ -316,12 +350,86 @@ jobs:
         working-directory: hybrid-orchestrator/frontend
         run: npm run test
 
-      # --- Tauri: build the installer -----------------------------------------
-      # Installs the Tauri v2 CLI and bundles the app. This compiles tauri-app
-      # and the frontend production build, catching bundling / capability /
-      # COPY-path issues that unit tests miss (tasks.md P0.6).
-      - name: Install Tauri CLI (v2)
-        run: cargo install tauri-cli --version "^2" --locked
+  # --- Gated Tauri installer bundle ----------------------------------------
+  # This job carries the two expensive steps that used to run on every push and
+  # dominated the ~40 min CI time: installing the Tauri v2 CLI and running
+  # `cargo tauri build` to bundle a full installer. It is gated so it only runs
+  # when a release bundle is actually wanted:
+  #   - `workflow_dispatch` (manual, on-demand), and
+  #   - `push` of a version tag (`v*`, e.g. `v0.1.0`).
+  # It runs on the ubuntu + windows matrix so cross-platform bundling is
+  # validated at release / manual time. The job is independent of `build`: it
+  # re-does its own checkout / toolchain / Linux system deps / node / cargo
+  # cache.
+  tauri-bundle:
+    name: tauri-bundle (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        # Match the routine job's matrix: no macOS (see the note there).
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
 
+    defaults:
+      run:
+        working-directory: hybrid-orchestrator
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # Same Tauri v2 Linux system deps as the routine job; required both to
+      # compile tauri-app and to run `tauri build` on ubuntu. Windows ships
+      # WebView2, so it does not need this step.
+      - name: Install Tauri v2 Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+        working-directory: .
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            hybrid-orchestrator/target
+          key: ${{ runner.os }}-cargo-bundle-${{ hashFiles('hybrid-orchestrator/**/Cargo.lock', 'hybrid-orchestrator/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bundle-
+            ${{ runner.os }}-cargo-
+
+      # Install a PREBUILT Tauri v2 CLI instead of `cargo install tauri-cli`,
+      # which compiles the CLI from source (~10-15 min per OS). taiki-e's
+      # install-action fetches a prebuilt `cargo-tauri` binary in seconds.
+      - name: Install Tauri CLI (v2, prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2.1.0
+
+      # Bundles the app. This compiles tauri-app and the frontend production
+      # build, catching bundling / capability / COPY-path issues that unit tests
+      # miss (tasks.md P0.6).
       - name: tauri build
         run: cargo tauri build --config crates/tauri-app/tauri.conf.json
