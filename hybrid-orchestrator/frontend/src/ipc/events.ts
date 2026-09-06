@@ -1,20 +1,24 @@
 import { listen, type Event, type UnlistenFn } from "@tauri-apps/api/event";
+import type { CoreEvent } from "../types";
 
 /**
  * Typed listeners over the Tauri event API.
  *
  * The Rust shell forwards `orchestrator-core` domain events onto a single
- * channel (see `crates/tauri-app/src/events.rs`). Phase 0 provides the typed
- * shape only; no events are emitted yet. Later phases define the concrete
- * `CoreEvent` union (mirrored from the core DTOs in `../types/`) and richer
- * per-variant listeners.
+ * channel (see `crates/tauri-app/src/events.rs`). The payload is the real
+ * {@link CoreEvent} discriminated union mirrored from the core DTOs in
+ * `../types` (a `type`-tagged union matching the Rust serde representation), so
+ * callers can `switch (event.payload.type)` with full type narrowing.
+ *
+ * Event hygiene (architecture.md Section 9.1 / 9.2): payloads carry only
+ * display-safe data (ids, deltas, statuses, rationales), never secrets.
  */
 
 /** Name of the channel core events are forwarded onto. Mirrors the Rust `CORE_EVENT_CHANNEL`. */
 export const CORE_EVENT_CHANNEL = "core://event";
 
-/** Placeholder payload for a forwarded core event. Replaced with the real union in later phases. */
-export type CoreEvent = unknown;
+/** Re-export the real event union so consumers can import it from the ipc layer. */
+export type { CoreEvent } from "../types";
 
 /**
  * Subscribe to forwarded core events.
