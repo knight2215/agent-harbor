@@ -46,6 +46,7 @@ pub enum McpConnectionState {
 pub enum CoreEvent {
     /// A chunk of streamed assistant output (Section 7.4). `delta` is the new
     /// text appended to the message identified by `messageId`.
+    #[serde(rename_all = "camelCase")]
     MessageDelta {
         conversation_id: Uuid,
         message_id: Uuid,
@@ -53,6 +54,7 @@ pub enum CoreEvent {
     },
     /// A message finished streaming; final status, route, and usage are
     /// attached (Section 7.4).
+    #[serde(rename_all = "camelCase")]
     MessageComplete {
         conversation_id: Uuid,
         message_id: Uuid,
@@ -62,26 +64,33 @@ pub enum CoreEvent {
     },
     /// A message failed. `message` is a display-safe error string (never a raw
     /// provider response or credentials).
+    #[serde(rename_all = "camelCase")]
     MessageError {
         conversation_id: Uuid,
         message_id: Uuid,
         message: String,
     },
     /// A conversation's metadata changed (title, tags, route pin, persona).
+    #[serde(rename_all = "camelCase")]
     ConversationUpdated { conversation_id: Uuid },
     /// A new conversation was created.
+    #[serde(rename_all = "camelCase")]
     ConversationCreated { conversation_id: Uuid },
     /// A conversation was deleted.
+    #[serde(rename_all = "camelCase")]
     ConversationDeleted { conversation_id: Uuid },
     /// An MCP server's connection state or tool list changed (Section 8.3).
+    #[serde(rename_all = "camelCase")]
     McpStateChanged {
         server_id: Uuid,
         state: McpConnectionState,
     },
     /// An MCP server reported an error. `message` is display-safe.
+    #[serde(rename_all = "camelCase")]
     McpError { server_id: Uuid, message: String },
     /// A tool invocation requires user approval in `Ask` mode (Section 9.4).
     /// The frontend resolves it via `resolve_permission(requestId, decision)`.
+    #[serde(rename_all = "camelCase")]
     PermissionRequested {
         request_id: Uuid,
         server_id: Uuid,
