@@ -5,9 +5,12 @@ edition.workspace = true
 license.workspace = true
 
 # NOTE: This crate depends on the external `tauri` crate (plus serde/serde_json),
-# which resolves only where crates.io is reachable (CI). It is intentionally
-# excluded from the workspace `default-members`, so bare offline cargo commands
-# do not attempt to build it. Build explicitly in CI with `cargo build -p tauri-app`.
+# which resolves only where crates.io is reachable (CI). During the offline
+# Phase 0 sandbox it is placed under `[workspace] exclude` in the root
+# Cargo.toml (NOT under `members`), so bare offline cargo commands never try to
+# resolve `tauri`. Because it is excluded from the workspace, `cargo build -p
+# tauri-app` from the workspace root will NOT find it; CI builds it directly via
+# `cargo build --manifest-path crates/tauri-app/Cargo.toml`.
 
 [dependencies]
 orchestrator-core = { path = "../orchestrator-core" }

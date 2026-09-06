@@ -1,0 +1,5 @@
+# Rustfmt configuration for the hybrid-orchestrator workspace.
+# These are conservative, stable-channel-safe defaults that match the
+# scaffolded code so `cargo fmt --all --check` stays green.
+edition = "2021"
+max_width = 100
