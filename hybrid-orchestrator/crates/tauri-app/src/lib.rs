@@ -55,6 +55,7 @@ pub fn run() {
             commands::update_persona,
             commands::delete_persona,
             commands::set_provider_secret,
+            commands::list_available_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

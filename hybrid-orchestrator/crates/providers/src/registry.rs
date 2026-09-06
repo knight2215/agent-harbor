@@ -101,6 +101,14 @@ impl ProviderRegistry {
         Ok(())
     }
 
+    /// Insert an already-built provider instance under its [`ChatProvider::id`],
+    /// bypassing a factory. Used when an instance is constructed out of band
+    /// (and by tests injecting a fake provider so `list_available_models` needs
+    /// no live network). An existing instance with the same id is replaced.
+    pub fn insert_instance(&mut self, instance: Arc<dyn ChatProvider>) {
+        self.instances.insert(instance.id().to_string(), instance);
+    }
+
     /// Get a live provider instance by its id.
     pub fn get(&self, id: &str) -> Option<Arc<dyn ChatProvider>> {
         self.instances.get(id).map(Arc::clone)

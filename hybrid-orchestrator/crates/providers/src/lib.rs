@@ -12,6 +12,7 @@
 //! `--manifest-path crates/providers/Cargo.toml` (the offline sandbox cannot
 //! resolve those deps). Its tests use mocked HTTP + SSE, never live network.
 
+pub mod builtins;
 pub mod capability;
 pub mod contract;
 pub mod registry;
@@ -48,6 +49,15 @@ pub use contract::{
     ToolCallDelta, ToolSpec, Usage,
 };
 pub use registry::{ProviderFactory, ProviderRegistry};
+
+// Built-in registry wiring + the model-selector data source (FEAT-004 / P2.10):
+// `builtin_registry` registers all seven factories, `build_registry`
+// instantiates from persisted config, and `list_available_models` returns
+// provider/model/capabilities/price (Section 4.5 / 6.1 / 8.2).
+pub use builtins::{
+    build_registry, builtin_registry, list_available_models, AvailableModel, PricingTable,
+    TokenPrice,
+};
 
 // Native OpenAI-compatible adapter factories (FEAT-002). Registering these on a
 // `ProviderRegistry` wires up the OpenAI / LM Studio / generic / Azure kinds.

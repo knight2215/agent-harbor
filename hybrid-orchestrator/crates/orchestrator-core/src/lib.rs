@@ -43,14 +43,18 @@ pub use session::{ConversationInit, SessionError, SessionManager};
 
 #[cfg(test)]
 mod tests {
-    /// Smoke test that references an item from the still-placeholder library
-    /// crates orchestrator-core depends on, proving the dependency edges
-    /// compile. `persistence` and `secrets` now expose real APIs (exercised by
-    /// their own crates' tests and by the session manager tests here), so they
-    /// no longer expose a `placeholder()`.
+    /// Smoke test that references an item from the library crates
+    /// orchestrator-core depends on, proving the dependency edges compile.
+    /// `persistence` and `secrets` now expose real APIs (exercised by their own
+    /// crates' tests and by the session manager tests here), so they no longer
+    /// expose a `placeholder()`. `providers` likewise now exposes real APIs
+    /// (the registry + `ChatProvider` contract), so we reference its built-in
+    /// registry constructor instead of a placeholder; `mcp-client` and
+    /// `routing` are still placeholder crates.
     #[test]
     fn smoke() {
-        providers::placeholder();
+        let registry = providers::builtin_registry();
+        assert!(registry.has_factory(providers::ProviderKind::OpenAI));
         mcp_client::placeholder();
         routing::placeholder();
     }
