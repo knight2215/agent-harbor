@@ -13,8 +13,8 @@
 //! seam) is never surfaced here.
 
 use orchestrator_core::{
-    AgentPersona, Conversation, ConversationInit, ManualRoute, ModelParameters, PrivacyTag,
-    ProviderConfig, RoutingHint, SecretRef,
+    AgentPersona, Conversation, ConversationInit, Decision, ManualRoute, ModelParameters,
+    PrivacyTag, ProviderConfig, RoutingHint, SecretRef,
 };
 use persistence::config::{AppConfig, PricingConfig};
 use persistence::ProviderRepo;
@@ -493,6 +493,45 @@ fn pricing_table_from_config(config: &PricingConfig) -> PricingTable {
     table
 }
 
+// --- MCP tool permissions (P3.5 / Section 9.4) ------------------------------
+
+/// Resolve a pending `Ask`-mode tool-permission request (architecture.md
+/// Sections 5.6 / 9.4). When the core emits a
+/// [`orchestrator_core::CoreEvent::PermissionRequested`] it BLOCKS the pending
+/// tool invocation until the user answers; the frontend calls this command with
+/// the request's `requestId` and the user's [`Decision`] to unblock it.
+///
+/// The `decision` carries `allow` (proceed or refuse) and an advisory
+/// `remember` flag (remember the answer for the session, Section 5.6). Returns
+/// `true` if a request with `requestId` was awaiting a decision (now
+/// unblocked), `false` if no such request exists (already resolved, timed out,
+/// or an unknown id).
+///
+/// UI is intentionally OUT of scope for FEAT-002: this is only the command seam
+/// wired to the framework-agnostic `PermissionRegistry` on [`AppState`].
+#[tauri::command]
+pub async fn resolve_permission(
+    state: tauri::State<'_, AppState>,
+    request_id: String,
+    decision: Decision,
+) -> Result<bool, CommandError> {
+    resolve_permission_inner(&state, &request_id, decision)
+}
+
+/// The full validate-then-resolve body of [`resolve_permission`], factored out
+/// so it can be driven directly in tests without a live Tauri `State` (the
+/// `set_provider_secret` testability pattern). The `#[tauri::command]` wrapper
+/// above is a thin adapter over this: it parses/validates the `requestId` UUID,
+/// then forwards the decision to the shared `PermissionRegistry`.
+fn resolve_permission_inner(
+    state: &AppState,
+    request_id: &str,
+    decision: Decision,
+) -> Result<bool, CommandError> {
+    let id = parse_uuid("requestId", request_id)?;
+    Ok(state.permission_registry.resolve(id, decision))
+}
+
 // --- Diagnostics ------------------------------------------------------------
 
 /// Returns the application version compiled into the binary.
@@ -615,6 +654,22 @@ mod tests {
             state.secret_store.resolve(&SecretRef::new("openai")),
             Err(SecretError::NotFound(_))
         ));
+    }
+
+    /// `resolve_permission` rejects a malformed request id before touching the
+    /// registry, and returns `false` for a well-formed but unknown id (nothing
+    /// was awaiting it). A registered request is unblocked and reports `true`.
+    #[tokio::test]
+    async fn resolve_permission_inner_validates_and_resolves() {
+        let state = test_state().await;
+
+        // Malformed UUID -> InvalidArgument, registry untouched.
+        let err = resolve_permission_inner(&state, "not-a-uuid", Decision::allow()).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // Well-formed but unknown id -> false (nothing awaiting it).
+        let unknown = Uuid::new_v4().to_string();
+        assert!(!resolve_permission_inner(&state, &unknown, Decision::allow()).unwrap());
     }
 
     /// Empty provider id / secret are rejected by validation before the store.

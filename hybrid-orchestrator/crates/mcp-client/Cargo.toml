@@ -1,7 +1,72 @@
 [package]
 name = "mcp-client"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# Concrete literals (kept in sync with the root `[workspace.package]`:
+# version = "0.1.0", edition = "2021", license = "MIT") rather than
+# `*.workspace = true` inheritance. This crate is under `[workspace] exclude` in
+# the root Cargo.toml (Phase 3 / FEAT-001) because it carries crates.io deps
+# (tokio/serde_json/reqwest/rustls-ring + a small in-crate JSON-RPC stack)
+# unreachable in the offline sandbox. When CI builds it standalone via
+# `--manifest-path crates/mcp-client/Cargo.toml`, there is no workspace root to
+# inherit from, and `*.workspace = true` would fail to parse ("failed to find a
+# workspace root"). Making the crate self-contained keeps the manifest
+# parseable.
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# NOTE: This crate depends on external crates.io crates (tokio for process/io/
+# sync/time, serde/serde_json for the JSON-RPC layer, reqwest for the HTTP/SSE
+# transport, async-trait for the `Transport` trait, thiserror for error types).
+# The SSE decoder is a plain `str::split` over the buffered POST body, so it
+# needs no `futures`/`futures-util`/`bytes` stream machinery. Those
+# resolve only where crates.io is reachable (CI), so this crate is placed under
+# `[workspace] exclude` in the root Cargo.toml (NOT under `members`); bare
+# offline cargo commands never try to resolve them. CI builds/tests/clippies it
+# directly via `cargo build --manifest-path crates/mcp-client/Cargo.toml`.
+# Version literals are kept in sync with the root `[workspace.dependencies]`
+# table.
+#
+# TLS: reqwest uses `rustls-tls` (default features off) instead of native-tls so
+# the Windows CI runner does not need a system OpenSSL, mirroring the `providers`
+# crate. rustls 0.23 with ONLY the `ring` feature installs an unambiguous
+# process-default CryptoProvider (see `src/crypto.rs`).
+
+# A [[bin]] mock/fixture MCP server bundled for cross-platform stdio tests. It
+# implements a minimal MCP server (initialize / tools/list / tools/call) over
+# newline-delimited JSON-RPC on stdin/stdout, and is spawned by the test suite
+# via `env!("CARGO_BIN_EXE_mcp-mock-server")` (Cargo sets this to the built
+# binary path, resolving `.exe` on Windows automatically). Spawning a dedicated
+# bin - rather than re-invoking the test binary - keeps the child free of the
+# test harness's own stdout chatter, so it behaves identically on ubuntu-latest
+# and windows-latest.
+[[bin]]
+name = "mcp-mock-server"
+path = "src/bin/mock_server.rs"
 
 [dependencies]
+domain = { path = "../domain" }
+providers = { path = "../providers" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# rustls 0.23 (the version reqwest's `rustls-tls` resolves) requires an
+# unambiguous process-default CryptoProvider before any rustls-backed client is
+# used. Depend on rustls with ONLY the `ring` feature and no defaults, matching
+# `providers`, and install it once at client-construction time (see
+# `src/crypto.rs`).
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
+[dev-dependencies]
+# tokio macros/rt provide the `#[tokio::test]` harness used by the stdio
+# round-trip and lifecycle tests.
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+# uuid is used only by tests (the `#[cfg(test)]` module in session.rs and the
+# integration test in tests/stdio_roundtrip.rs) to build `McpServerConfig`
+# fixtures. Kept as a concrete literal matching the version + features every
+# other workspace crate (domain, orchestrator-core, persistence, tauri-app)
+# declares, since this crate is excluded from the workspace and cannot inherit.
+uuid = { version = "1", features = ["v4", "serde"] }

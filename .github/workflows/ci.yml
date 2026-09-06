@@ -23,6 +23,13 @@ name: CI
 #     - crates/providers         -> reqwest (rustls-tls) + futures + tokio +
 #                                   async-trait + aws-sigv4/aws-credential-types
 #                                   (Phase 2 / FEAT-001; tests use mocked HTTP+SSE)
+#     - crates/mcp-client        -> tokio (process/io/sync/time) + serde_json
+#                                   (in-crate JSON-RPC) + reqwest (rustls-tls) +
+#                                   rustls/ring (HTTP/SSE transport; the SSE
+#                                   decoder is a plain str::split, no futures)
+#                                   + async-trait + thiserror
+#                                   (Phase 3 / FEAT-001; stdio tests spawn a
+#                                   bundled cross-platform mock MCP server bin)
 #   Cargo resolves the whole `members` dependency graph to build Cargo.lock, so
 #   an excluded crate is invisible to `cargo build --workspace` (and to
 #   `cargo build -p <crate>`). Therefore CI builds/tests/clippies each excluded
@@ -156,6 +163,9 @@ jobs:
       - name: cargo fmt (check, providers)
         run: cargo fmt --manifest-path crates/providers/Cargo.toml --check
 
+      - name: cargo fmt (check, mcp-client)
+        run: cargo fmt --manifest-path crates/mcp-client/Cargo.toml --check
+
       - name: cargo build (workspace)
         run: cargo build --workspace
 
@@ -230,6 +240,31 @@ jobs:
 
       - name: cargo test (providers)
         run: cargo test --manifest-path crates/providers/Cargo.toml
+
+      # --- Rust: mcp-client (excluded from the workspace, built explicitly) ---
+      # mcp-client is under `[workspace] exclude` because Phase 3 (FEAT-001) gave
+      # it crates.io deps unreachable offline: tokio (process/io/sync/time for
+      # the stdio transport + per-tool timeouts), serde/serde_json (the in-crate
+      # JSON-RPC 2.0 layer), reqwest (rustls-tls) + rustls/`ring` (the HTTP/SSE
+      # transport; the SSE decoder is a plain `str::split` over the buffered POST
+      # body, so no futures/bytes stream machinery), async-trait (the
+      # `Transport` trait), and thiserror.
+      # The `--workspace` commands above do NOT touch it. Build/test/clippy it
+      # directly via its manifest; its `path` deps on the excluded
+      # `domain`/`providers` crates are resolved transitively here. Built BEFORE
+      # orchestrator-core, which path-depends on it. Its stdio tests spawn a
+      # bundled cross-platform mock MCP server (`mcp-mock-server` `[[bin]]`),
+      # never live network; the HTTP/SSE transport is exercised against a mocked
+      # server. (The fmt-check step lives with the other per-crate fmt-check
+      # steps near the top of the job.)
+      - name: cargo build (mcp-client)
+        run: cargo build --manifest-path crates/mcp-client/Cargo.toml
+
+      - name: cargo clippy (mcp-client)
+        run: cargo clippy --manifest-path crates/mcp-client/Cargo.toml --all-targets -- -D warnings
+
+      - name: cargo test (mcp-client)
+        run: cargo test --manifest-path crates/mcp-client/Cargo.toml
 
       # --- Rust: orchestrator-core (excluded from the workspace, built explicitly)
       # orchestrator-core is under `[workspace] exclude` because it carries

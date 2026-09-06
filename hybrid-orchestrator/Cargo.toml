@@ -40,10 +40,21 @@ resolver = "2"
 # build/test/clippy/fmt steps. Its tests use MOCKED HTTP + SSE (wiremock),
 # never live network.
 #
-# The only crates that remain offline-buildable members are the still
-# dependency-free `mcp-client` and `routing`.
+# Phase 3 (FEAT-001) gives `mcp-client` its own crates.io deps: tokio (process/
+# io/sync/time for the stdio transport + timeouts), serde/serde_json (the
+# in-crate JSON-RPC 2.0 layer), reqwest with rustls-tls + rustls/`ring` and
+# futures/futures-util/bytes (the HTTP/SSE transport + SSE decoder, mirroring
+# `providers`), async-trait (the `Transport` trait), and thiserror. All are
+# crates.io-only, unreachable in the offline sandbox. Per the same pattern
+# established for the crates above, `mcp-client` therefore MOVES from `members`
+# to `exclude` here and gains explicit CI `--manifest-path` build/test/clippy/
+# fmt steps (the CI step ADDITIONS land in FEAT-002). Its stdio tests spawn a
+# bundled CROSS-PLATFORM mock MCP server (a `[[bin]]` in the crate), never live
+# network; the HTTP/SSE transport is exercised against a mocked server.
+#
+# The only crate that remains an offline-buildable member is the still
+# dependency-free `routing`.
 members = [
-    "crates/mcp-client",
     "crates/routing",
 ]
 
@@ -66,6 +77,16 @@ members = [
 #                          `domain` and `secrets` (Phase 2 / FEAT-001). Carries
 #                          the crates.io HTTP/SSE/SigV4 stack, so it joined the
 #                          excluded set in Phase 2; its tests use mocked HTTP+SSE.
+#   - `mcp-client`:        tokio (process/io/sync/time) + serde/serde_json (the
+#                          in-crate JSON-RPC 2.0 layer) + reqwest (rustls-tls) +
+#                          rustls/`ring` + futures/futures-util/bytes (HTTP/SSE
+#                          transport + SSE decoder) + async-trait + thiserror,
+#                          plus path deps on `domain` and `providers` (for the
+#                          reused `McpServerConfig`/`McpTransport` and
+#                          `ToolSpec`/`ToolCall` types). Carries the crates.io
+#                          process + HTTP/SSE stack, so it joined the excluded
+#                          set in Phase 3 (FEAT-001); its stdio tests spawn a
+#                          bundled cross-platform mock MCP server.
 #   - `secrets`:           keyring + serde + thiserror (FEAT-002).
 #   - `tauri-app`:         tauri + tauri-build + serde/serde_json (Phase 0).
 #
@@ -98,13 +119,15 @@ members = [
 # EXIT PATH (do this once network access is available): move each excluded
 # entry from `exclude` into `members` (keeping it out of `default-members` so
 # bare offline `cargo build` still skips it), run a networked
-# `cargo build -p domain -p orchestrator-core -p persistence -p secrets -p
-# tauri-app` to populate `Cargo.lock` with the full dependency graph, and commit
+# `cargo build -p domain -p mcp-client -p orchestrator-core -p persistence -p
+# secrets -p tauri-app` to populate `Cargo.lock` with the full dependency graph,
+# and commit
 # the updated `Cargo.lock` in the same change. That reconnects the crates to the
 # workspace lockfile without breaking the offline default build. The per-crate
 # `--manifest-path` CI steps can then be collapsed back into `--workspace` runs.
 exclude = [
     "crates/domain",
+    "crates/mcp-client",
     "crates/orchestrator-core",
     "crates/persistence",
     "crates/providers",
@@ -129,7 +152,11 @@ license = "MIT"
 # introduces reqwest/futures/aws-sigv4/aws-credential-types, recorded below for
 # documentation; the `providers` crate is `[workspace] exclude`d and pins these
 # as concrete literals in its own manifest (an excluded crate has no workspace
-# root to inherit from). NOTE: because every crate that consumes these is under
+# root to inherit from). Phase 3 `mcp-client` reuses this same set - tokio (with
+# the `full` feature for process/io/sync/time), serde/serde_json, thiserror,
+# async-trait, reqwest (rustls-tls), rustls (`ring`), futures/futures-util/bytes
+# - plus no NEW workspace-level dep versions; it too is `[workspace] exclude`d
+# and pins these as concrete literals in its own manifest. NOTE: because every crate that consumes these is under
 # `[workspace] exclude`, the excluded crates cannot use `{ workspace = true }`
 # (an excluded crate has no workspace root to inherit from); they pin the same
 # versions as concrete literals in their own manifests, kept in sync with this

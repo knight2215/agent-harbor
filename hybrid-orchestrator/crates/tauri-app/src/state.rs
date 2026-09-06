@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use orchestrator_core::{CoreEvent, SessionManager};
+use orchestrator_core::{CoreEvent, PermissionRegistry, SessionManager};
 use persistence::{Db, PersistenceError};
 use secrets::{KeyringSecretStore, SecretStore};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
@@ -31,6 +31,13 @@ pub struct AppState {
     /// over the Tauri channel. Phase 1 wires the plumbing; the streaming
     /// pipeline (Phase 2) starts pushing events onto it.
     pub core_events: UnboundedSender<CoreEvent>,
+    /// Registry of in-flight `Ask`-mode tool-permission requests (Section 5.6 /
+    /// 9.4). The core's `PermissionGate` registers a pending request when it
+    /// emits a [`CoreEvent::PermissionRequested`]; the `resolve_permission`
+    /// command delivers the user's decision here to unblock the awaiting
+    /// invocation. Phase 3 (FEAT-002) wires this seam; the tool-invocation
+    /// pipeline that constructs the gate around it lands in a later phase.
+    pub permission_registry: PermissionRegistry,
 }
 
 impl AppState {
@@ -51,6 +58,7 @@ impl AppState {
             session_manager,
             secret_store,
             core_events,
+            permission_registry: PermissionRegistry::new(),
         };
         Ok((state, rx))
     }
@@ -68,6 +76,7 @@ impl AppState {
             session_manager: Arc::new(session_manager),
             secret_store,
             core_events,
+            permission_registry: PermissionRegistry::new(),
         };
         (state, rx)
     }

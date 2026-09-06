@@ -3,9 +3,5 @@
 version = 4
 
 [[package]]
-name = "mcp-client"
-version = "0.1.0"
-
-[[package]]
 name = "routing"
 version = "0.1.0"

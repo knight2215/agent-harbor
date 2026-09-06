@@ -13,6 +13,18 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+# A [[bin]] mock/fixture MCP server for the FEAT-002 integration test
+# (tests/tool_loop.rs). It implements a minimal MCP server (initialize /
+# tools/list / tools/call) over newline-delimited JSON-RPC on stdin/stdout using
+# only the standard library + serde_json, and is spawned by the test via
+# `env!("CARGO_BIN_EXE_tool-loop-mock-server")`. A dedicated bin is required
+# because `env!("CARGO_BIN_EXE_mcp-mock-server")` (the mcp-client fixture) is
+# NOT set for this crate's tests, and Cargo does not build a path dependency's
+# bins into a dependent's target dir. See the binary's module docs.
+[[bin]]
+name = "tool-loop-mock-server"
+path = "src/bin/tool_loop_mock_server.rs"
+
 [dependencies]
 providers = { path = "../providers" }
 mcp-client = { path = "../mcp-client" }
@@ -44,3 +56,13 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+# FEAT-002 integration test (tests/tool_loop.rs) drives the function-calling
+# bridge with a MOCK `ChatProvider` and a self-re-invoked mock MCP server over
+# stdio. `async-trait` implements the `ChatProvider` trait for the mock;
+# `futures-util` provides the `BoxStream` its `chat_stream` returns. Concrete
+# literals (this crate is `[workspace] exclude`d) kept in sync with the root
+# `[workspace.dependencies]` table.
+async-trait = "0.1"
+futures-util = "0.3"
