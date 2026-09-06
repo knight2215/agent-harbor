@@ -46,6 +46,17 @@ export type ProviderKind =
 export type PermissionMode = "ask" | "allow" | "deny";
 
 /**
+ * The user's answer to a pending `permissionRequested` prompt, passed to the
+ * `resolve_permission` command. Mirrors Rust `orchestrator_core::Decision`
+ * (architecture.md Section 5.6 / 9.4). `remember` (default `false`) asks to
+ * remember the answer for the session.
+ */
+export interface PermissionDecision {
+  allow: boolean;
+  remember: boolean;
+}
+
+/**
  * Data-handling constraint tag. Mirrors Rust `PrivacyTag`.
  * `localOnly` / `confidential` are hard constraints that force local routing;
  * `Custom(String)` is serialized externally-tagged as `{ custom: string }`.

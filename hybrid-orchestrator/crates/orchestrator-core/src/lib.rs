@@ -17,8 +17,10 @@
 //! and the tests.
 
 pub mod events;
+pub mod permission;
 pub mod pipeline;
 pub mod session;
+pub mod tools_bridge;
 
 // Re-export the `domain::models` module as `orchestrator_core::models` so the
 // existing `crate::models::...` / `orchestrator_core::models::...` paths keep
@@ -41,6 +43,13 @@ pub use domain::{
 pub use events::{CoreEvent, McpConnectionState};
 pub use session::{ConversationInit, SessionError, SessionManager};
 
+// Phase 3 (FEAT-002): the function-calling bridge (Sections 5.4 / 5.5, P3.4),
+// the tool-invocation permission model (Sections 5.6 / 9.4, P3.5), and the
+// orchestrator-side error handling (P3.6). Re-exports kept ALPHABETICALLY
+// ORDERED.
+pub use permission::{Decision, PermissionGate, PermissionOutcome, PermissionRegistry};
+pub use tools_bridge::{validate_arguments, ToolBridge};
+
 #[cfg(test)]
 mod tests {
     /// Smoke test that references an item from the library crates
@@ -49,13 +58,19 @@ mod tests {
     /// crates' tests and by the session manager tests here), so they no longer
     /// expose a `placeholder()`. `providers` likewise now exposes real APIs
     /// (the registry + `ChatProvider` contract), so we reference its built-in
-    /// registry constructor instead of a placeholder; `mcp-client` and
-    /// `routing` are still placeholder crates.
+    /// registry constructor. `mcp-client` gained its real API in Phase 3
+    /// (FEAT-001); it no longer exposes `placeholder()`, so we reference its
+    /// namespacing helper (also exercised by the `tools_bridge` module).
+    /// `routing` is still a placeholder crate.
     #[test]
     fn smoke() {
         let registry = providers::builtin_registry();
         assert!(registry.has_factory(providers::ProviderKind::OpenAI));
-        mcp_client::placeholder();
+        // Reference a real `mcp-client` item now that `placeholder()` is gone.
+        assert_eq!(
+            mcp_client::namespace_tool("server", "tool"),
+            format!("server{}tool", mcp_client::NAMESPACE_SEPARATOR)
+        );
         routing::placeholder();
     }
 }
