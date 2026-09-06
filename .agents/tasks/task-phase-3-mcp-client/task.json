@@ -1,0 +1,7 @@
+{
+  "task_id": "task-phase-3-mcp-client",
+  "task_description": "Implement Phase 3 (the built-in MCP client) per architecture.md Section 5 and tasks.md Phase 3 (P3.1-P3.6): stdio + HTTP/SSE transports, server lifecycle with initialize handshake / capability negotiation / list-tools / on-demand invoke / bounded reconnect-with-backoff / teardown, tool discovery + schema mapping into providers::ToolSpec namespaced by server, the orchestrator-core function-calling bridge, the Ask/Allow/Deny permission model with resolve_permission wiring, and error/resource handling (structured tool-error results, per-tool timeouts, output-size caps, hiding tools from disconnected servers). mcp-client moves from [workspace] members to exclude and gains CI steps on ubuntu+windows; a cross-platform bundled mock MCP server backs the stdio tests. Work on branch phase-3-mcp-client off main. Do NOT implement Phase 4+ (no routing engine / full pipeline / UI surfaces beyond minimal resolve_permission command wiring).",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002"],
+  "blocked_reason": null
+}
