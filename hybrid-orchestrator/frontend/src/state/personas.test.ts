@@ -31,7 +31,7 @@ describe("personas store", () => {
   beforeEach(() => {
     invoke.mockReset();
     invoke.mockResolvedValue([]);
-    usePersonasStore.setState({ personas: [] });
+    usePersonasStore.setState({ personas: [], selectedId: null });
   });
 
   it("load fetches personas from the core", async () => {
@@ -39,6 +39,48 @@ describe("personas store", () => {
     await usePersonasStore.getState().load();
     expect(invoke).toHaveBeenCalledWith("list_personas");
     expect(usePersonasStore.getState().personas).toHaveLength(1);
+  });
+
+  it("create appends the persona and selects it", async () => {
+    invoke.mockResolvedValue(persona("p-1"));
+    const input = {
+      name: "Coder",
+      systemPrompt: "write code",
+      defaultRoute: null,
+      routingHint: null,
+      allowedToolServers: [],
+      parameters: persona("p-1").parameters,
+    };
+    await usePersonasStore.getState().create(input);
+    expect(invoke).toHaveBeenCalledWith("create_persona", { persona: input });
+    expect(usePersonasStore.getState().personas).toHaveLength(1);
+    expect(usePersonasStore.getState().selectedId).toBe("p-1");
+  });
+
+  it("update replaces the matching persona", async () => {
+    usePersonasStore.setState({ personas: [persona("p-1")] });
+    const updated = { ...persona("p-1"), name: "Renamed" };
+    invoke.mockResolvedValue(updated);
+    const input = {
+      name: "Renamed",
+      systemPrompt: "write code",
+      defaultRoute: null,
+      routingHint: null,
+      allowedToolServers: [],
+      parameters: persona("p-1").parameters,
+    };
+    await usePersonasStore.getState().update("p-1", input);
+    expect(invoke).toHaveBeenCalledWith("update_persona", { personaId: "p-1", persona: input });
+    expect(usePersonasStore.getState().personas[0].name).toBe("Renamed");
+  });
+
+  it("remove deletes the persona and clears the selection", async () => {
+    usePersonasStore.setState({ personas: [persona("p-1")], selectedId: "p-1" });
+    invoke.mockResolvedValue(undefined);
+    await usePersonasStore.getState().remove("p-1");
+    expect(invoke).toHaveBeenCalledWith("delete_persona", { personaId: "p-1" });
+    expect(usePersonasStore.getState().personas).toHaveLength(0);
+    expect(usePersonasStore.getState().selectedId).toBeNull();
   });
 
   it("personasChanged invalidates + refetches", () => {

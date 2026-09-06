@@ -8,11 +8,29 @@
 
 import { create } from "zustand";
 import {
+  addMcpServer as addMcpServerCmd,
   listMcpServers,
   refreshMcpTools,
+  removeMcpServer as removeMcpServerCmd,
   setMcpEnabled as setMcpEnabledCmd,
+  setToolPermission as setToolPermissionCmd,
+  updateMcpServer as updateMcpServerCmd,
 } from "../ipc/commands";
-import type { CoreEvent, McpConnectionState, McpServerConfig, ToolDescriptorView } from "../types";
+import type {
+  CoreEvent,
+  McpConnectionState,
+  McpServerConfig,
+  McpServerInput,
+  PermissionMode,
+  ToolDescriptorView,
+} from "../types";
+
+/** Return a shallow copy of `record` without the given `key`. */
+function omitKey<T>(record: Record<string, T>, key: string): Record<string, T> {
+  const next = { ...record };
+  delete next[key];
+  return next;
+}
 
 export interface ToolsState {
   /** Configured MCP servers. */
@@ -26,8 +44,16 @@ export interface ToolsState {
 
   /** Load the configured MCP servers from the core. */
   load: () => Promise<void>;
+  /** Add a new MCP server (connects in the background when enabled). */
+  addServer: (config: McpServerInput) => Promise<McpServerConfig>;
+  /** Update an existing MCP server (reconnects when enabled). */
+  updateServer: (id: string, config: McpServerInput) => Promise<McpServerConfig>;
+  /** Remove an MCP server (tears down its handle). */
+  removeServer: (id: string) => Promise<void>;
   /** Enable or disable a server (persist + connect/teardown). */
   setEnabled: (id: string, enabled: boolean) => Promise<void>;
+  /** Set a server's tool-invocation permission mode (per-server in Phase 5). */
+  setPermission: (id: string, mode: PermissionMode) => Promise<void>;
   /** Refresh a server's tool list (reconnect + re-list). */
   refreshTools: (id: string) => Promise<void>;
   /** Apply a CoreEvent: track connection state and errors. */
@@ -45,8 +71,39 @@ export const useToolsStore = create<ToolsState>((set) => ({
     set({ servers });
   },
 
+  addServer: async (config) => {
+    const created = await addMcpServerCmd(config);
+    set((state) => ({ servers: [...state.servers, created] }));
+    return created;
+  },
+
+  updateServer: async (id, config) => {
+    const updated = await updateMcpServerCmd(id, config);
+    set((state) => ({
+      servers: state.servers.map((s) => (s.id === updated.id ? updated : s)),
+    }));
+    return updated;
+  },
+
+  removeServer: async (id) => {
+    await removeMcpServerCmd(id);
+    set((state) => ({
+      servers: state.servers.filter((s) => s.id !== id),
+      connectionState: omitKey(state.connectionState, id),
+      tools: omitKey(state.tools, id),
+      errors: omitKey(state.errors, id),
+    }));
+  },
+
   setEnabled: async (id, enabled) => {
     const updated = await setMcpEnabledCmd(id, enabled);
+    set((state) => ({
+      servers: state.servers.map((s) => (s.id === updated.id ? updated : s)),
+    }));
+  },
+
+  setPermission: async (id, mode) => {
+    const updated = await setToolPermissionCmd(id, null, mode);
     set((state) => ({
       servers: state.servers.map((s) => (s.id === updated.id ? updated : s)),
     }));
