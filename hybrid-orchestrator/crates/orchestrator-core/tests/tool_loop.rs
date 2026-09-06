@@ -33,7 +33,6 @@ use providers::{
 use providers::{ChatChoice, FinishReason};
 
 use domain::{McpServerConfig, McpTransport, PermissionMode};
-use serde_json::json;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use uuid::Uuid;
 
