@@ -1,0 +1,1 @@
+//! stdio MCP transport (placeholder).

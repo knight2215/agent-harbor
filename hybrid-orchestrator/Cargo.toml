@@ -1,0 +1,36 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/orchestrator-core",
+    "crates/providers",
+    "crates/mcp-client",
+    "crates/routing",
+    "crates/persistence",
+    "crates/secrets",
+]
+
+# `tauri-app` is intentionally NOT a workspace member (and thus not in
+# `default-members`) during Phase 0.
+#
+# It depends on the external `tauri`, `serde`, and `serde_json` crates plus the
+# `tauri-build` build-dependency, all of which must be downloaded from
+# crates.io. The Phase 0 sandbox runs offline (INTEGRATIONS_ONLY: crates.io is
+# unreachable). Cargo resolves the *entire* workspace dependency graph to build
+# `Cargo.lock` even when a crate is excluded from `default-members`, so listing
+# `tauri-app` under `members` makes every bare cargo command (build/test/clippy/
+# fmt) fail offline because `tauri` cannot be resolved.
+#
+# To keep the offline baseline green while preserving the crate in the source
+# tree for spec fidelity, `tauri-app` is placed under `[workspace] exclude`. CI
+# (which has network access) generates a lockfile that includes tauri's deps and
+# builds it explicitly with `cargo build -p tauri-app` (or by re-adding it to
+# `members` once the networked lockfile is committed). See the crate's
+# Cargo.toml for details.
+exclude = [
+    "crates/tauri-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"

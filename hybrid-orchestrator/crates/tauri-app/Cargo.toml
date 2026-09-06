@@ -1,0 +1,24 @@
+[package]
+name = "tauri-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# NOTE: This crate depends on the external `tauri` crate (plus serde/serde_json),
+# which resolves only where crates.io is reachable (CI). It is intentionally
+# excluded from the workspace `default-members`, so bare offline cargo commands
+# do not attempt to build it. Build explicitly in CI with `cargo build -p tauri-app`.
+
+[dependencies]
+orchestrator-core = { path = "../orchestrator-core" }
+providers = { path = "../providers" }
+mcp-client = { path = "../mcp-client" }
+routing = { path = "../routing" }
+persistence = { path = "../persistence" }
+secrets = { path = "../secrets" }
+tauri = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+tauri-build = "2"
