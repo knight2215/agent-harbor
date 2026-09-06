@@ -7,12 +7,29 @@
 //!
 //! ## Concurrency (Section 7.5)
 //!
-//! Persistence writes are serialized through the SQLite pool, and reads are
-//! concurrent. On top of that, `SessionManager` holds a per-conversation async
-//! write lock (`Mutex` keyed by conversation `Uuid`): writes WITHIN one
-//! conversation are serialized so a turn cannot interleave with a rename or a
-//! second append, while writes to DIFFERENT conversations proceed in parallel
-//! (each has its own lock) and reads are never blocked by these locks.
+//! `SessionManager` holds a per-conversation async write lock (`Mutex` keyed by
+//! conversation `Uuid`): writes WITHIN one conversation are serialized so a turn
+//! cannot interleave with a rename or a second append, while writes to DIFFERENT
+//! conversations proceed in parallel (each has its own lock) and reads are never
+//! blocked by these locks.
+//!
+//! At the SQLite layer, [`persistence::Db::open`] enables WAL journaling and a
+//! `busy_timeout` so writes to DIFFERENT conversations - which the
+//! per-conversation lock does NOT serialize and which may land on different pool
+//! connections - wait for the write lock rather than immediately returning
+//! `SQLITE_BUSY`. Reads run concurrently under WAL.
+//!
+//! ## Lock-map growth (Phase 1 scope)
+//!
+//! `lock_for` lazily inserts one `Arc<Mutex<()>>` per conversation `Uuid`;
+//! `delete_conversation` removes the entry for a deleted conversation. Entries
+//! are otherwise retained for the life of the manager. Each entry is tiny (a
+//! `Uuid` key plus an `Arc` to an empty-tuple mutex, a handful of bytes), and
+//! the hybrid orchestrator is a single-user desktop app whose conversation
+//! count is bounded by what one user creates and mostly deletes. For Phase 1
+//! this bounded, self-limiting growth is acceptable; a general idle-eviction
+//! scheme (or an LRU cap) is deferred to a later phase if a long-lived process
+//! is observed to touch pathologically many distinct conversations.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};

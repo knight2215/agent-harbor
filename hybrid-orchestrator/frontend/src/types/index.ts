@@ -1,7 +1,10 @@
-// Shared TypeScript types mirrored BY HAND from the Rust serde DTOs in
-// `orchestrator-core` (crates/orchestrator-core/src/models.rs), which implement
+// Shared TypeScript types mirrored BY HAND from the Rust serde DTOs in the
+// leaf `domain` crate (crates/domain/src/models.rs), which implement
 // architecture.md Section 7.1 (data models), 4.2 (ProviderConfig), and 6.1
-// (ManualRoute / PrivacyTag / RouteSource).
+// (ManualRoute / PrivacyTag / RouteSource). `orchestrator-core` re-exports these
+// DTOs, so the Rust side is also reachable as `orchestrator_core::Conversation`
+// etc.; the serde representation (and therefore this mirror) is unchanged by the
+// relocation.
 //
 // There is NO codegen: these interfaces must be kept in sync with the Rust DTOs
 // manually. The Rust side uses `#[serde(rename_all = "camelCase")]`, so every

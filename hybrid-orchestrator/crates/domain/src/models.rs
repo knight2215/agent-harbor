@@ -1,22 +1,26 @@
 //! Domain models (architecture.md Section 7.1, plus ProviderConfig 4.2 and
 //! ManualRoute/PrivacyTag/RouteSource 6.1).
 //!
-//! These are the authoritative Rust DTOs. Every type derives `serde::Serialize`
-//! + `serde::Deserialize` with `rename_all = "camelCase"` so the JSON that
-//! crosses the Tauri IPC boundary matches the hand-mirrored TypeScript types in
+//! These are the authoritative Rust DTOs and they live in the leaf `domain`
+//! crate so BOTH `orchestrator-core` and `persistence` can depend on them
+//! DOWNWARD (architecture.md Section 3.3) without forming a dependency cycle.
+//! `orchestrator-core` re-exports every type here at its crate root, so
+//! `orchestrator_core::Conversation` (etc.) keeps resolving.
+//!
+//! Every type derives `serde::Serialize` + `serde::Deserialize` with
+//! `rename_all = "camelCase"` so the JSON that crosses the Tauri IPC boundary
+//! matches the hand-mirrored TypeScript types in
 //! `frontend/src/types/index.ts`. When you change a field here, update the TS
 //! mirror in the same change (there is no codegen; the two are kept in sync by
 //! hand, per the Phase 0 convention).
 //!
 //! `SecretRef` note: architecture.md Section 3.3 places the canonical
-//! `SecretRef` in the `secrets` crate, and permits `orchestrator-core` to
-//! depend on `secrets`. FEAT-001 temporarily defined a lightweight `SecretRef`
-//! newtype here to keep `secrets` offline-buildable. FEAT-002 reconciles this:
-//! the canonical, serde-serializable `SecretRef` now lives in the `secrets`
-//! crate and is RE-EXPORTED here (see `crate::models::SecretRef`), so there is a
+//! `SecretRef` in the `secrets` crate, and permits crates above it to depend on
+//! `secrets`. The canonical, serde-serializable `SecretRef` lives in the
+//! `secrets` crate and is RE-EXPORTED here (see [`SecretRef`]), so there is a
 //! single source of truth. The dependency direction stays correct
-//! (`orchestrator-core -> secrets`, never the reverse). The invariant is
-//! unchanged: `SecretRef` is only an opaque keystore handle, never the secret.
+//! (`domain -> secrets`, never the reverse). The invariant is unchanged:
+//! `SecretRef` is only an opaque keystore handle, never the secret.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

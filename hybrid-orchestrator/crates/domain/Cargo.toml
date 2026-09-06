@@ -1,0 +1,35 @@
+[package]
+name = "domain"
+# Concrete literals rather than `*.workspace = true` inheritance. This crate is
+# under `[workspace] exclude` in the root Cargo.toml (it carries crates.io deps -
+# serde/serde_json/uuid/chrono - that are offline-unreachable, crates.io 403), so
+# it is not a member of any workspace. When CI builds it standalone via
+# `--manifest-path crates/domain/Cargo.toml`, there is no workspace root to
+# inherit from, and `*.workspace = true` (for package keys OR for
+# `<dep> = { workspace = true }`) would fail to parse. Keeping the manifest
+# self-contained mirrors the Phase 0 `tauri-app` / FEAT-001 `orchestrator-core`
+# precedent. Versions are kept in sync with the root `[workspace.dependencies]`
+# table.
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# The shared, framework-agnostic Section 7.1 domain DTOs live here (FEAT-004, the
+# cycle-break remediation). This is a LEAF crate: it depends only DOWNWARD on
+# `secrets` (the canonical home of `SecretRef`, architecture.md Section 3.3) plus
+# crates.io serialization deps. Both `orchestrator-core` and `persistence` depend
+# on `domain`, which keeps the dependency graph strictly downward (Section 3.3)
+# and removes the `persistence -> orchestrator-core` reverse edge that formed a
+# hard `cargo` cyclic-dependency error. `orchestrator-core` RE-EXPORTS everything
+# here so existing `orchestrator_core::Conversation` paths keep working.
+#
+# These crates.io deps are unreachable in the offline sandbox, which is why this
+# crate is `[workspace] exclude`d and verified in CI - see the root Cargo.toml
+# rationale and .github/workflows/ci.yml. Versions mirror the root
+# `[workspace.dependencies]` table.
+[dependencies]
+secrets = { path = "../secrets" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }

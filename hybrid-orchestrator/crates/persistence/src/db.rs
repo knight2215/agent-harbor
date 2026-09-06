@@ -7,8 +7,22 @@
 
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions};
+use sqlx::sqlite::{
+    SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions, SqliteSynchronous,
+};
+
+/// How long a busy SQLite connection waits for a competing writer to release
+/// the write lock before returning `SQLITE_BUSY` (architecture.md Section 7.5).
+///
+/// The file-backed pool opens multiple connections, so writes to DIFFERENT
+/// conversations can land on DIFFERENT connections and contend at the SQLite
+/// layer (the `SessionManager`'s per-conversation async lock only serializes
+/// writes to the SAME conversation). Combined with WAL journaling below, a
+/// short busy-timeout lets a briefly-blocked writer wait for the lock instead
+/// of immediately failing.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Errors surfaced by the persistence layer.
 #[derive(Debug, thiserror::Error)]
@@ -44,7 +58,18 @@ impl Db {
             .filename(path)
             .create_if_missing(true)
             // Enforce FK constraints (messages -> conversations ON DELETE CASCADE).
-            .foreign_keys(true);
+            .foreign_keys(true)
+            // WAL journaling lets readers proceed concurrently with a writer and
+            // is the recommended mode for a multi-connection pool (Section 7.5).
+            .journal_mode(SqliteJournalMode::Wal)
+            // NORMAL is the safe, standard synchronous level to pair with WAL.
+            .synchronous(SqliteSynchronous::Normal)
+            // Wait (rather than immediately erroring with SQLITE_BUSY) when a
+            // competing writer on another pool connection holds the write lock.
+            // Cross-conversation writes land on different connections, so
+            // without this they could collide; the SessionManager's
+            // per-conversation lock only serializes SAME-conversation writes.
+            .busy_timeout(BUSY_TIMEOUT);
         Self::connect(options).await
     }
 

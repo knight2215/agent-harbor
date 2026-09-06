@@ -18,9 +18,20 @@ resolver = "2"
 # Phase 1 (FEAT-002) gives `persistence` its own crates.io deps (sqlx + tokio +
 # serde/serde_json/uuid/chrono/thiserror) and `secrets` the `keyring` crate. Per
 # the plan FEAT-001 established, both therefore MOVE from `members` to `exclude`
-# here and gain explicit CI `--manifest-path` build/test/clippy/fmt steps. The
-# only crates that remain offline-buildable members are the still dependency-free
-# `providers`, `mcp-client`, and `routing`.
+# here and gain explicit CI `--manifest-path` build/test/clippy/fmt steps.
+#
+# Phase 1 remediation (FEAT-004, cycle-break): the shared Section 7.1 domain DTOs
+# were extracted into a new leaf crate `domain` to break a hard `cargo` cyclic
+# dependency between `orchestrator-core` and `persistence` (each had a normal
+# path dep on the other). `domain` carries serde/serde_json/uuid/chrono and a
+# path dep on `secrets`, so - like the others - it is offline-unreachable and
+# joins `exclude` with its own explicit CI `--manifest-path` steps. Both
+# `orchestrator-core` and `persistence` now depend DOWNWARD on `domain`, and the
+# `persistence -> orchestrator-core` reverse edge is removed, restoring the
+# strictly-downward graph (Section 3.3).
+#
+# The only crates that remain offline-buildable members are the still
+# dependency-free `providers`, `mcp-client`, and `routing`.
 members = [
     "crates/providers",
     "crates/mcp-client",
@@ -30,10 +41,16 @@ members = [
 # Excluded (networked) crates: NOT workspace members because they depend on
 # crates.io crates that cannot be resolved offline.
 #
+#   - `domain`:            serde/serde_json/uuid/chrono + path dep on `secrets`
+#                          (FEAT-004). The leaf crate that owns the Section 7.1
+#                          DTOs; both orchestrator-core and persistence depend
+#                          downward on it.
 #   - `orchestrator-core`: serde/serde_json/uuid/chrono/thiserror + tokio, and
-#                          path deps on persistence/secrets (FEAT-001/002).
+#                          path deps on domain/persistence (FEAT-001/002/004).
 #   - `persistence`:       sqlx + tokio + serde/serde_json/uuid/chrono/thiserror
-#                          (FEAT-002).
+#                          + a path dep on `domain` (FEAT-002/004). It NO LONGER
+#                          depends on orchestrator-core (that reverse edge formed
+#                          a cycle; removed in FEAT-004).
 #   - `secrets`:           keyring + serde + thiserror (FEAT-002).
 #   - `tauri-app`:         tauri + tauri-build + serde/serde_json (Phase 0).
 #
@@ -49,8 +66,12 @@ members = [
 # builds/tests/clippies each one EXPLICITLY via
 # `--manifest-path crates/<crate>/Cargo.toml` under `-D warnings`, on
 # ubuntu/macOS/windows. `orchestrator-core` note in particular: it path-depends
-# on the five member library crates, so building it standalone still pulls those
-# members in through their paths - the dependency edges are validated in CI.
+# on the member library crates AND on the excluded `domain`/`persistence`
+# crates, so building it standalone pulls those in through their paths, and its
+# Section 3.3 dependency edges are compiled here. The graph is acyclic
+# (`orchestrator-core -> {domain, persistence}`, `persistence -> domain`,
+# `domain -> secrets`), so `cargo` resolves it cleanly - the FEAT-004 cycle-break
+# is what makes these standalone per-crate builds resolve at all.
 #
 # KNOWN TRADEOFF (tracked, not permanent): because these crates are `exclude`d
 # rather than non-default `members`, `cargo build --workspace` never sees them,
@@ -62,12 +83,13 @@ members = [
 # EXIT PATH (do this once network access is available): move each excluded
 # entry from `exclude` into `members` (keeping it out of `default-members` so
 # bare offline `cargo build` still skips it), run a networked
-# `cargo build -p orchestrator-core -p persistence -p secrets -p tauri-app` to
-# populate `Cargo.lock` with the full dependency graph, and commit the updated
-# `Cargo.lock` in the same change. That reconnects the crates to the workspace
-# lockfile without breaking the offline default build. The per-crate
+# `cargo build -p domain -p orchestrator-core -p persistence -p secrets -p
+# tauri-app` to populate `Cargo.lock` with the full dependency graph, and commit
+# the updated `Cargo.lock` in the same change. That reconnects the crates to the
+# workspace lockfile without breaking the offline default build. The per-crate
 # `--manifest-path` CI steps can then be collapsed back into `--workspace` runs.
 exclude = [
+    "crates/domain",
     "crates/orchestrator-core",
     "crates/persistence",
     "crates/secrets",

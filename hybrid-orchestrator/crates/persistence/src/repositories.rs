@@ -12,7 +12,7 @@
 //! so no `DATABASE_URL` is needed at build time.
 
 use chrono::{DateTime, Utc};
-use orchestrator_core::{
+use domain::{
     AgentPersona, Conversation, ManualRoute, McpServerConfig, McpTransport, Message,
     MessageContent, MessageStatus, ModelParameters, PermissionMode, PrivacyTag, ProviderConfig,
     ProviderKind, Role, RouteMetadata, RoutingHint, SecretRef, TokenUsage,

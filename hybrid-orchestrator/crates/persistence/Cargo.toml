@@ -26,7 +26,13 @@ license = "MIT"
 # live DATABASE_URL is needed at build time. The `sqlite` feature bundles a
 # self-contained SQLite; no system libsqlite3 is required.
 [dependencies]
-orchestrator-core = { path = "../orchestrator-core" }
+# Downward path dep on the leaf `domain` crate for the Section 7.1 DTOs the
+# repositories (de)serialize (architecture.md Section 3.3). This crate MUST NOT
+# depend on `orchestrator-core`: that reverse edge (added in FEAT-002) formed a
+# hard `cargo` cyclic-dependency error, since `orchestrator-core` depends on
+# `persistence`. Depending on the shared leaf `domain` instead keeps the graph
+# strictly downward and acyclic.
+domain = { path = "../domain" }
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

@@ -375,7 +375,23 @@ pub async fn set_provider_secret(
     provider_id: String,
     secret: String,
 ) -> Result<SecretRef, CommandError> {
-    validate_nonempty("providerId", &provider_id, MAX_PROVIDER_ID_LEN)?;
+    set_provider_secret_inner(&state, &provider_id, &secret)
+}
+
+/// The full validate-then-store-then-return body of [`set_provider_secret`],
+/// factored out so it can be driven directly in tests without a live Tauri
+/// `State`. The `#[tauri::command]` wrapper above is a thin adapter over this.
+///
+/// This is what enforces the NO-SECRET-ACROSS-IPC invariant: it returns ONLY
+/// the opaque [`SecretRef`] handle produced by the store, never the plaintext
+/// `secret` it was given. A regression that made this path echo the secret
+/// would fail `set_provider_secret_inner_returns_only_ref` below.
+fn set_provider_secret_inner(
+    state: &AppState,
+    provider_id: &str,
+    secret: &str,
+) -> Result<SecretRef, CommandError> {
+    validate_nonempty("providerId", provider_id, MAX_PROVIDER_ID_LEN)?;
     if secret.is_empty() {
         return Err(CommandError::invalid("`secret` must not be empty"));
     }
@@ -386,7 +402,7 @@ pub async fn set_provider_secret(
     }
     state
         .secret_store
-        .store(&provider_id, &secret)
+        .store(provider_id, secret)
         .map_err(|e| CommandError::internal(e.to_string()))
 }
 
@@ -408,7 +424,7 @@ mod tests {
     use super::*;
     use orchestrator_core::SessionManager;
     use persistence::Db;
-    use secrets::{InMemorySecretStore, SecretStore};
+    use secrets::{InMemorySecretStore, SecretError, SecretStore};
     use std::sync::Arc;
 
     async fn test_state() -> AppState {
@@ -459,15 +475,22 @@ mod tests {
         assert!(input.into_persona(Uuid::new_v4()).is_err());
     }
 
-    /// `set_provider_secret` returns only a SecretRef handle, never the secret,
-    /// and the secret is retrievable ONLY through the core-internal resolve
-    /// seam (which is not a command).
+    /// Drives the `set_provider_secret` HANDLER body end-to-end (via the
+    /// extracted `set_provider_secret_inner`, which the `#[tauri::command]`
+    /// wrapper is a thin adapter over). It asserts the handler returns ONLY the
+    /// opaque `SecretRef` handle, never the secret, and that the secret is
+    /// retrievable only through the core-internal `resolve` seam (not a
+    /// command). A regression that made the handler echo the secret in its
+    /// return value or serialized form would FAIL this test.
     #[tokio::test]
-    async fn set_provider_secret_returns_only_ref() {
+    async fn set_provider_secret_inner_returns_only_ref() {
         let state = test_state().await;
         let plaintext = "sk-do-not-leak-1234";
-        let secret_ref = state.secret_store.store("openai", plaintext).unwrap();
-        // The handle is the opaque provider id, never the key.
+
+        // Drive the actual handler body, not `secret_store.store` directly.
+        let secret_ref = set_provider_secret_inner(&state, "openai", plaintext).unwrap();
+
+        // The handler returns the opaque provider-id handle, never the key.
         assert_eq!(secret_ref, SecretRef::new("openai"));
         assert_eq!(secret_ref.handle(), "openai");
         assert!(!secret_ref.handle().contains(plaintext));
@@ -475,8 +498,36 @@ mod tests {
         let json = serde_json::to_string(&secret_ref).unwrap();
         assert_eq!(json, "\"openai\"");
         assert!(!json.contains(plaintext));
-        // The plaintext is only reachable via the internal resolve seam.
+        // The handler actually persisted the secret to the store, and the
+        // plaintext is reachable ONLY via the internal resolve seam.
         assert_eq!(state.secret_store.resolve(&secret_ref).unwrap(), plaintext);
+    }
+
+    /// The handler REJECTS invalid input before touching the store: an empty
+    /// provider id, an empty secret, and an over-long secret all error, and
+    /// nothing is written for the rejected calls.
+    #[tokio::test]
+    async fn set_provider_secret_inner_rejects_invalid_input() {
+        let state = test_state().await;
+
+        // Empty provider id -> InvalidArgument, nothing stored.
+        let err = set_provider_secret_inner(&state, "", "sk-key").unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // Empty secret -> InvalidArgument.
+        let err = set_provider_secret_inner(&state, "openai", "").unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // Over-long secret -> InvalidArgument.
+        let too_long = "x".repeat(MAX_SECRET_LEN + 1);
+        let err = set_provider_secret_inner(&state, "openai", &too_long).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // None of the rejected calls stored anything under "openai".
+        assert!(matches!(
+            state.secret_store.resolve(&SecretRef::new("openai")),
+            Err(SecretError::NotFound(_))
+        ));
     }
 
     /// Empty provider id / secret are rejected by validation before the store.
