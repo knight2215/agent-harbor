@@ -128,6 +128,35 @@ impl HttpSseClient {
         builder
     }
 
+    /// GET `path` with `headers` and decode the JSON response into `T`. Used by
+    /// adapters for endpoints like OpenAI's `GET /models`.
+    pub async fn get_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        headers: &[(String, String)],
+    ) -> ClientResult<T> {
+        let builder = self.http.get(self.url(path));
+        let builder = Self::apply_headers(builder, headers);
+
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| ProviderError::Transport(e.to_string()))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(ProviderError::HttpStatus {
+                status: status.as_u16(),
+                body: text,
+            });
+        }
+
+        resp.json::<T>()
+            .await
+            .map_err(|e| ProviderError::Decode(e.to_string()))
+    }
+
     /// POST `body` as JSON to `path` with `headers` and decode the JSON response
     /// into `T` (non-streaming path).
     pub async fn post_json<T: DeserializeOwned>(
