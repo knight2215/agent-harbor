@@ -116,8 +116,21 @@ command fail. To keep the offline baseline green, `tauri-app` is placed under
 A consequence: `cargo build --workspace` and `cargo build -p tauri-app` do **not**
 see the excluded crate. CI therefore builds it explicitly via
 `cargo build --manifest-path crates/tauri-app/Cargo.toml`, and the `tauri build`
-step compiles it as part of bundling. Once a networked lockfile that includes
-tauri's dependencies is committed, `tauri-app` can be moved back into `members`.
+step compiles it as part of bundling.
+
+**Known tradeoff (tracked, not permanent).** Because the crate is `exclude`d
+rather than a non-default `members` entry, its Section 3.3 dependency edges are
+validated only in CI and its dependencies never enter
+`hybrid-orchestrator/Cargo.lock`, so a breaking change to a leaf crate's public
+API that affects `tauri-app` will not surface in the offline default build.
+
+**Exit path (once network access exists).** Move `crates/tauri-app` from
+`exclude` into `members` in `hybrid-orchestrator/Cargo.toml` (keeping it out of
+`default-members` so the bare offline `cargo build` still skips it), run a
+networked `cargo build -p tauri-app` to populate `Cargo.lock` with tauri's
+dependency graph, and commit the updated `Cargo.lock` in the same change. This
+reconnects the crate to the workspace lockfile without breaking the offline
+default build.
 
 ## Continuous integration
 
@@ -134,6 +147,13 @@ installer. CI is the authoritative place the full build is exercised.
 are **committed** to guarantee reproducible builds. When you change dependencies,
 commit the updated lockfile in the **same commit** as the dependency change.
 Never add these lockfiles to `.gitignore`.
+
+`frontend/package-lock.json` does not exist yet: it cannot be generated in the
+offline Phase 0 sandbox (`npm install` requires the npm registry). The first
+networked CI run installs via `npm ci || npm install`, which takes the
+`npm install` path and produces the lockfile. Commit that generated
+`package-lock.json`, then switch CI to a plain `npm ci` and re-enable the
+setup-node npm cache (see the note in `.github/workflows/ci.yml`).
 
 ## License
 

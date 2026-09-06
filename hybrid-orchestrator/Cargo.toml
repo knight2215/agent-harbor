@@ -23,9 +23,23 @@ members = [
 # To keep the offline baseline green while preserving the crate in the source
 # tree for spec fidelity, `tauri-app` is placed under `[workspace] exclude`. CI
 # (which has network access) generates a lockfile that includes tauri's deps and
-# builds it explicitly with `cargo build -p tauri-app` (or by re-adding it to
-# `members` once the networked lockfile is committed). See the crate's
-# Cargo.toml for details.
+# builds it explicitly with `--manifest-path crates/tauri-app/Cargo.toml`. See
+# that crate's Cargo.toml and .github/workflows/ci.yml for details.
+#
+# KNOWN TRADEOFF (tracked, not permanent): because the crate is `exclude`d
+# rather than a non-default `members` entry, `cargo build --workspace` never
+# sees it, so its Section 3.3 dependency edges onto `orchestrator-core` and the
+# leaf libs are validated ONLY in CI, and its dependencies do not enter this
+# workspace's Cargo.lock. Risk: a breaking change to a leaf crate's public API
+# that affects tauri-app will not surface in the offline default build.
+#
+# EXIT PATH (do this once network access is available): move
+# "crates/tauri-app" from `exclude` into `members` below (keeping it out of
+# `default-members` so bare offline `cargo build` still skips it), run a
+# networked `cargo build -p tauri-app` to populate Cargo.lock with tauri's
+# dependency graph, and commit the updated Cargo.lock in the same change. That
+# reconnects the crate to the workspace lockfile without breaking the offline
+# default build.
 exclude = [
     "crates/tauri-app",
 ]
