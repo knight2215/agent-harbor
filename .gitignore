@@ -1,0 +1,14 @@
+# Rust build artifacts
+/target
+**/target/
+
+# Node / frontend
+node_modules/
+dist/
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+
+# NOTE: lockfiles are intentionally NOT ignored (lockfile policy).
+# hybrid-orchestrator/Cargo.lock and frontend/package-lock.json are committed.

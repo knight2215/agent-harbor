@@ -1,0 +1,160 @@
+name: CI
+
+# Phase 0 CI pipeline (tasks.md P0.6).
+#
+# Runs the full workspace build/test/clippy, the frontend vitest suite, and a
+# `tauri build` on a matrix of target operating systems. Unlike the Phase 0
+# offline sandbox, GitHub Actions has network access, so this is the
+# authoritative place where the FULL build is exercised: the six library crates
+# AND the tauri-app crate (which needs the external `tauri` crate from
+# crates.io), plus the npm dependencies for the frontend.
+#
+# IMPORTANT WORKSPACE ARRANGEMENT:
+#   crates/tauri-app is under `[workspace] exclude` in hybrid-orchestrator/
+#   Cargo.toml (NOT `members`). This was forced by the offline sandbox: cargo
+#   resolves the whole `members` dependency graph to build Cargo.lock, and
+#   `tauri` is unreachable offline. A consequence is that `cargo build
+#   --workspace` (and `cargo build -p tauri-app`) will NOT include tauri-app,
+#   because an excluded package is invisible to the workspace. Therefore CI
+#   builds/tests/clippies tauri-app EXPLICITLY via
+#   `--manifest-path crates/tauri-app/Cargo.toml`. The final `tauri build`
+#   step compiles tauri-app as part of bundling the installer as well.
+
+on:
+  push:
+  pull_request:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build-test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        # All commands below run from the Cargo workspace root unless a step
+        # overrides `working-directory` (the frontend steps do).
+        working-directory: hybrid-orchestrator
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable + clippy + rustfmt)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      # Tauri v2 Linux system dependencies. Required to compile tauri-app and to
+      # run `tauri build` on ubuntu. macOS and Windows ship the needed webview
+      # (WKWebView / WebView2) so they do not need this step.
+      - name: Install Tauri v2 Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+        working-directory: .
+
+      # NOTE: `cache: npm` is intentionally NOT enabled here. setup-node's npm
+      # cache requires an existing lockfile at `cache-dependency-path`, and it
+      # errors hard (does not silently skip) when the file is absent. The Phase
+      # 0 sandbox is offline, so `frontend/package-lock.json` cannot be
+      # generated/committed until the first networked CI run produces it. Once
+      # that lockfile is committed, re-enable caching by adding:
+      #     cache: npm
+      #     cache-dependency-path: hybrid-orchestrator/frontend/package-lock.json
+      # and switch the install step below to a plain `npm ci`.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            hybrid-orchestrator/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('hybrid-orchestrator/**/Cargo.lock', 'hybrid-orchestrator/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # --- Rust: workspace (the six library crates) ---------------------------
+      - name: cargo fmt (check)
+        run: cargo fmt --all --check
+
+      - name: cargo build (workspace)
+        run: cargo build --workspace
+
+      - name: cargo test (workspace)
+        run: cargo test --workspace
+
+      - name: cargo clippy (workspace)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # --- Rust: tauri-app (excluded from the workspace, built explicitly) ----
+      # tauri-app is under `[workspace] exclude`, so the `--workspace` commands
+      # above do NOT touch it. Build/test/clippy it directly via its manifest.
+      - name: cargo build (tauri-app)
+        run: cargo build --manifest-path crates/tauri-app/Cargo.toml
+
+      - name: cargo clippy (tauri-app)
+        run: cargo clippy --manifest-path crates/tauri-app/Cargo.toml --all-targets -- -D warnings
+
+      - name: cargo test (tauri-app)
+        run: cargo test --manifest-path crates/tauri-app/Cargo.toml
+
+      # --- Frontend: install, lint, test --------------------------------------
+      - name: npm install (frontend)
+        working-directory: hybrid-orchestrator/frontend
+        # Prefer the reproducible `npm ci`; fall back to `npm install` when the
+        # lockfile does not exist yet (the offline Phase 0 sandbox cannot
+        # generate one). The first networked run takes the `npm install` path
+        # and produces `package-lock.json`; commit that file (per the README
+        # lockfile policy) and switch this to a plain `npm ci` afterwards.
+        run: npm ci || npm install
+
+      - name: npm run lint (frontend)
+        working-directory: hybrid-orchestrator/frontend
+        run: npm run lint
+
+      - name: npm run format:check (frontend)
+        working-directory: hybrid-orchestrator/frontend
+        run: npm run format:check
+
+      - name: npm run test (frontend vitest)
+        working-directory: hybrid-orchestrator/frontend
+        run: npm run test
+
+      # --- Tauri: build the installer -----------------------------------------
+      # Installs the Tauri v2 CLI and bundles the app. This compiles tauri-app
+      # and the frontend production build, catching bundling / capability /
+      # COPY-path issues that unit tests miss (tasks.md P0.6).
+      - name: Install Tauri CLI (v2)
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: tauri build
+        run: cargo tauri build --config crates/tauri-app/tauri.conf.json

@@ -1,0 +1,9 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Least-privilege capability set for the main window (architecture.md Section 9.2). Grants only Tauri's core defaults required for the window to run. The custom `app_version` command is NOT authorized here: in Tauri v2 user-defined `#[tauri::command]` handlers are gated solely by being registered in `generate_handler!` (see src/main.rs), not by a capability permission token. Capability permissions like `core:app:*` govern Tauri's built-in plugins, which Phase 0 does not use.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default"
+  ]
+}

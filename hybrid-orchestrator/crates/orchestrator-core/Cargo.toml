@@ -1,0 +1,12 @@
+[package]
+name = "orchestrator-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+providers = { path = "../providers" }
+mcp-client = { path = "../mcp-client" }
+routing = { path = "../routing" }
+persistence = { path = "../persistence" }
+secrets = { path = "../secrets" }
