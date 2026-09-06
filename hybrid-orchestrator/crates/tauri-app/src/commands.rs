@@ -14,8 +14,11 @@
 
 use orchestrator_core::{
     AgentPersona, Conversation, ConversationInit, ManualRoute, ModelParameters, PrivacyTag,
-    RoutingHint, SecretRef,
+    ProviderConfig, RoutingHint, SecretRef,
 };
+use persistence::config::{AppConfig, PricingConfig};
+use persistence::ProviderRepo;
+use providers::{list_available_models as list_models, AvailableModel, PricingTable, TokenPrice};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -406,6 +409,90 @@ fn set_provider_secret_inner(
         .map_err(|e| CommandError::internal(e.to_string()))
 }
 
+// --- Model selector data (P2.10) -------------------------------------------
+
+/// List every available model across all configured providers, with per-model
+/// capabilities and price, for the Phase 5 model selector (architecture.md
+/// Section 8.2) and Phase 4 routing (Section 6.1).
+///
+/// It assembles the built-in provider registry from the persisted
+/// [`ProviderConfig`] rows and the pricing table from the versioned
+/// [`AppConfig`] (Section 6.2), then returns `Vec<`[`AvailableModel`]`>`.
+///
+/// DISPLAY-SAFE (Section 9.1 / 9.2): the returned rows carry ONLY
+/// provider/model/capabilities/price labels. No secret material and no resolved
+/// [`SecretRef`] value ever crosses this boundary; secrets are resolved only
+/// inside the registry when it builds an instance, and stay there.
+#[tauri::command]
+pub async fn list_available_models(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<AvailableModel>, CommandError> {
+    list_available_models_inner(&state).await
+}
+
+/// The full body of [`list_available_models`], factored out so it can be driven
+/// directly in tests without a live Tauri `State` (the `set_provider_secret`
+/// testability pattern). Loads config rows + pricing, builds the registry, and
+/// enumerates models.
+///
+/// This is what enforces the DISPLAY-SAFE invariant: it returns only
+/// [`AvailableModel`] rows built from the provider/model/capabilities/price
+/// surface, never touching `SecretStore::resolve` for the return value. A
+/// regression that leaked secret material into the result would fail
+/// `list_available_models_inner_returns_display_safe_rows` below.
+async fn list_available_models_inner(
+    state: &AppState,
+) -> Result<Vec<AvailableModel>, CommandError> {
+    let db = state.session_manager.db();
+
+    // Persisted provider instances (only the SecretRef handle is stored).
+    let configs: Vec<ProviderConfig> = ProviderRepo::new(db)
+        .list()
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // User-entered pricing from the versioned app config (Section 6.2).
+    let app_config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let pricing = pricing_table_from_config(&app_config.pricing);
+
+    // Build the built-in registry and instantiate the configured providers,
+    // resolving each row's api_key_ref through the secret store at build time.
+    let registry = providers::build_registry(configs.iter(), state.secret_store.as_ref())
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // Enumerate models (may hit the network per provider) and attach
+    // capabilities + price.
+    list_models(&registry, &configs, &pricing)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))
+}
+
+/// Convert the persisted [`PricingConfig`] (the single source of truth, Section
+/// 6.2) into the in-memory [`PricingTable`] `list_available_models` reads. The
+/// persisted rates seed the table; kinds/models the user did not price resolve
+/// to zero (local providers included).
+fn pricing_table_from_config(config: &PricingConfig) -> PricingTable {
+    let mut table = PricingTable::new();
+    for (kind, rate) in &config.per_kind {
+        table.set_kind(
+            *kind,
+            TokenPrice::new(rate.input_per_mtok, rate.output_per_mtok),
+        );
+    }
+    for (kind, models) in &config.per_model {
+        for (model, rate) in models {
+            table.set_model(
+                *kind,
+                model.clone(),
+                TokenPrice::new(rate.input_per_mtok, rate.output_per_mtok),
+            );
+        }
+    }
+    table
+}
+
 // --- Diagnostics ------------------------------------------------------------
 
 /// Returns the application version compiled into the binary.
@@ -535,5 +622,89 @@ mod tests {
     fn secret_validation_bounds() {
         assert!(validate_nonempty("providerId", "", MAX_PROVIDER_ID_LEN).is_err());
         assert!(validate_nonempty("providerId", "openai", MAX_PROVIDER_ID_LEN).is_ok());
+    }
+
+    /// With no configured providers, the command body returns an empty list
+    /// (no network is touched: there are no instances to enumerate). This drives
+    /// the extracted inner fn end-to-end (load configs + pricing, build the
+    /// registry, enumerate) exactly as the `#[tauri::command]` wrapper does.
+    #[tokio::test]
+    async fn list_available_models_inner_empty_when_no_providers() {
+        let state = test_state().await;
+        let models = list_available_models_inner(&state).await.unwrap();
+        assert!(models.is_empty());
+    }
+
+    /// The persisted pricing config converts into the in-memory pricing table:
+    /// per-kind and per-model rates are threaded through, and unpriced kinds
+    /// (local providers included) resolve to zero (Section 6.2).
+    #[test]
+    fn pricing_table_from_config_threads_rates_and_zeros_unpriced() {
+        use orchestrator_core::ProviderKind;
+        use persistence::config::TokenRate;
+        use std::collections::BTreeMap;
+
+        let mut per_kind = BTreeMap::new();
+        per_kind.insert(
+            ProviderKind::OpenAI,
+            TokenRate {
+                input_per_mtok: 2.5,
+                output_per_mtok: 10.0,
+            },
+        );
+        let mut openai_models = BTreeMap::new();
+        openai_models.insert(
+            "gpt-4o-mini".to_string(),
+            TokenRate {
+                input_per_mtok: 0.15,
+                output_per_mtok: 0.6,
+            },
+        );
+        let mut per_model = BTreeMap::new();
+        per_model.insert(ProviderKind::OpenAI, openai_models);
+
+        let config = PricingConfig {
+            per_kind,
+            per_model,
+            last_edited: None,
+        };
+        let table = pricing_table_from_config(&config);
+
+        // Per-model override wins.
+        assert_eq!(
+            table.price_for(ProviderKind::OpenAI, "gpt-4o-mini"),
+            TokenPrice::new(0.15, 0.6)
+        );
+        // Per-kind default applies to other models.
+        assert_eq!(
+            table.price_for(ProviderKind::OpenAI, "gpt-4o"),
+            TokenPrice::new(2.5, 10.0)
+        );
+        // An unpriced kind (local) resolves to zero.
+        assert_eq!(
+            table.price_for(ProviderKind::LmStudio, "any"),
+            TokenPrice::ZERO
+        );
+    }
+
+    /// The `AvailableModel` shape that crosses IPC is display-safe: it serializes
+    /// to provider/model/capabilities/price fields only, never secret material.
+    #[test]
+    fn available_model_is_display_safe() {
+        let row = AvailableModel {
+            provider_id: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            capabilities: providers::Capabilities::default(),
+            price: TokenPrice::new(2.5, 10.0),
+        };
+        let json = serde_json::to_string(&row).unwrap();
+        assert!(json.contains("\"providerId\":\"openai\""));
+        assert!(json.contains("\"model\":\"gpt-4o\""));
+        assert!(json.contains("\"capabilities\""));
+        assert!(json.contains("\"price\""));
+        // No secret material of any kind is present.
+        assert!(!json.to_lowercase().contains("secret"));
+        assert!(!json.to_lowercase().contains("apikey"));
+        assert!(!json.contains("sk-"));
     }
 }

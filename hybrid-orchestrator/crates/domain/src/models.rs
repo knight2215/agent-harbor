@@ -290,7 +290,12 @@ pub struct ProviderConfig {
 }
 
 /// The supported provider families (Section 4.2 / 4.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// `Hash` so `ProviderKind` can key the provider-factory map
+// (`providers::ProviderRegistry`) and the per-kind pricing table
+// (`providers::PricingTable`); `PartialOrd`/`Ord` so it can key the ordered
+// `BTreeMap` in the persisted pricing config (`persistence::PricingConfig`);
+// `Copy` keeps those lookups cheap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProviderKind {
     OpenAI,

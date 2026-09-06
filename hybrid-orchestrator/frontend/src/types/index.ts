@@ -177,6 +177,63 @@ export interface ProviderConfig {
   extra: unknown;
 }
 
+/**
+ * Per-model capability descriptor. Mirrors Rust `providers::Capabilities`
+ * (architecture.md Section 4.1). Rust uses `#[serde(rename_all = "camelCase")]`,
+ * so `json_mode` -> `jsonMode` and `max_context` -> `maxContext`.
+ */
+export interface Capabilities {
+  streaming: boolean;
+  tools: boolean;
+  vision: boolean;
+  jsonMode: boolean;
+  maxContext: number | null;
+}
+
+/** Metadata about a model a provider offers. Mirrors Rust `providers::ModelInfo` (Section 4.1). */
+export interface ModelInfo {
+  id: string;
+  displayName: string | null;
+  contextLength: number | null;
+}
+
+/**
+ * Per-model token pricing in currency units per one million tokens. Mirrors
+ * Rust `providers::TokenPrice` / `persistence::TokenRate` (architecture.md
+ * Section 6.2). Local providers default to zero.
+ */
+export interface TokenPrice {
+  inputPerMtok: number;
+  outputPerMtok: number;
+}
+
+/**
+ * One selectable model surfaced by the `list_available_models` command. Mirrors
+ * Rust `providers::AvailableModel` (architecture.md Section 6.1 / 8.2).
+ *
+ * DISPLAY-SAFE: carries only provider/model/capabilities/price labels, never
+ * secret material (Section 9.1 / 9.2).
+ */
+export interface AvailableModel {
+  providerId: string;
+  model: string;
+  capabilities: Capabilities;
+  price: TokenPrice;
+}
+
+/**
+ * User-entered per-provider/per-model token-rate table stored in the versioned
+ * app config. Mirrors Rust `persistence::PricingConfig` (architecture.md Section
+ * 6.2). Keys are the camelCase `ProviderKind` serialization; empty maps are
+ * omitted from the persisted JSON. This is the single source both the cost
+ * signal and `list_available_models` read.
+ */
+export interface PricingConfig {
+  perKind: Partial<Record<ProviderKind, TokenPrice>>;
+  perModel: Partial<Record<ProviderKind, Record<string, TokenPrice>>>;
+  lastEdited: string | null;
+}
+
 /** Connection state of an MCP server. Mirrors Rust `McpConnectionState`. */
 export type McpConnectionState = "connecting" | "connected" | "disconnected";
 
