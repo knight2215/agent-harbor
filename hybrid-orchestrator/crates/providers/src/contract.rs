@@ -166,7 +166,7 @@ pub struct ChatRequest {
     pub messages: Vec<ChatMessage>,
     /// Function-calling tool schemas (from MCP). Empty when tools are unused or
     /// gated off by capability negotiation.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tools: Vec<ToolSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
