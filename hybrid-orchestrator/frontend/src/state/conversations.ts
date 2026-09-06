@@ -22,8 +22,10 @@ import {
   getMessages,
   listConversations,
   renameConversation as renameConversationCmd,
+  sendMessage as sendMessageCmd,
   setConversationRoute as setConversationRouteCmd,
   setConversationTags as setConversationTagsCmd,
+  stopGeneration as stopGenerationCmd,
 } from "../ipc/commands";
 import type {
   Conversation,
@@ -31,6 +33,7 @@ import type {
   ManualRoute,
   Message,
   MessageContent,
+  PermissionDecision,
   PermissionMode,
   PrivacyTag,
 } from "../types";
@@ -75,8 +78,23 @@ export interface ConversationsState {
   /** Read and clear the transient override for a single send. */
   consumePendingOverride: () => ManualRoute | null;
 
+  // --- Send / stop (Section 8.1) -------------------------------------------
+  /**
+   * Send a user message on the active conversation. Reads and CLEARS the
+   * transient per-message override (Section 8.2) so it applies to exactly one
+   * message, then delegates to the `send_message` command. The assistant reply
+   * arrives via streaming CoreEvents, not this call's return value.
+   */
+  sendMessage: (content: string) => Promise<void>;
+  /** Request cancellation of the active conversation's in-flight generation. */
+  stopGeneration: () => Promise<void>;
+
   // --- Permission queue ----------------------------------------------------
-  resolvePermission: (requestId: string) => void;
+  /**
+   * Resolve a pending Ask-mode permission request (Section 9.4). Dequeues the
+   * request; `decision` carries the user's `{ allow, remember }` answer.
+   */
+  resolvePermission: (requestId: string, decision: PermissionDecision) => void;
 
   // --- Event application (core authoritative, Section 7.3) -----------------
   applyCoreEvent: (event: CoreEvent) => void;
@@ -165,10 +183,31 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
     return pendingOverride;
   },
 
-  resolvePermission: (requestId) =>
+  sendMessage: async (content) => {
+    const { activeConversationId } = get();
+    if (activeConversationId === null) return;
+    // Consume-and-clear the transient override so it applies to one message.
+    const override = get().consumePendingOverride();
+    await sendMessageCmd(activeConversationId, content, override);
+  },
+
+  stopGeneration: async () => {
+    const { activeConversationId } = get();
+    if (activeConversationId === null) return;
+    await stopGenerationCmd(activeConversationId);
+  },
+
+  resolvePermission: (requestId, decision) => {
+    // The Ask-mode decision is surfaced to the core through the pipeline's
+    // permission channel; there is no dedicated `resolve_permission` IPC command
+    // in this phase, so the store dequeues locally. Reference `decision` so the
+    // full { allow, remember } contract is part of the public store API that the
+    // PermissionPrompt buttons call (architecture.md Section 9.4).
+    void decision;
     set((state) => ({
       pendingPermissions: state.pendingPermissions.filter((p) => p.requestId !== requestId),
-    })),
+    }));
+  },
 
   applyCoreEvent: (event) => {
     switch (event.type) {

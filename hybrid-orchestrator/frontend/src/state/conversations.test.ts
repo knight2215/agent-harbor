@@ -162,7 +162,7 @@ describe("conversations store", () => {
       rationale: "read a file",
     });
     expect(useConversationsStore.getState().pendingPermissions).toHaveLength(1);
-    useConversationsStore.getState().resolvePermission("r-1");
+    useConversationsStore.getState().resolvePermission("r-1", { allow: true, remember: false });
     expect(useConversationsStore.getState().pendingPermissions).toHaveLength(0);
   });
 
@@ -177,5 +177,32 @@ describe("conversations store", () => {
     expect(consumed).toEqual({ providerId: "openai", model: "gpt-4o" });
     // Cleared after a single consume so it applies to exactly one message.
     expect(useConversationsStore.getState().pendingOverride).toBeNull();
+  });
+
+  it("sendMessage carries the current override then the store clears it", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    useConversationsStore.getState().setPendingOverride({ providerId: "openai", model: "gpt-4o" });
+    await useConversationsStore.getState().sendMessage("hello");
+    expect(invoke).toHaveBeenCalledWith("send_message", {
+      conversationId: "c-1",
+      content: "hello",
+      overrideRoute: { providerId: "openai", model: "gpt-4o" },
+    });
+    // The override applies to exactly one message.
+    expect(useConversationsStore.getState().pendingOverride).toBeNull();
+
+    // A subsequent send with no override passes null.
+    await useConversationsStore.getState().sendMessage("again");
+    expect(invoke).toHaveBeenLastCalledWith("send_message", {
+      conversationId: "c-1",
+      content: "again",
+      overrideRoute: null,
+    });
+  });
+
+  it("stopGeneration cancels the active conversation's turn", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    await useConversationsStore.getState().stopGeneration();
+    expect(invoke).toHaveBeenCalledWith("stop_generation", { conversationId: "c-1" });
   });
 });
