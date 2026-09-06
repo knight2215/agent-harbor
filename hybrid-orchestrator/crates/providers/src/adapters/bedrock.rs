@@ -31,7 +31,7 @@ use async_trait::async_trait;
 use aws_credential_types::Credentials;
 use aws_sigv4::http_request::{sign, SignableBody, SignableRequest, SigningSettings};
 use aws_sigv4::sign::v4;
-use futures_util::stream::BoxStream;
+use futures_util::stream::{BoxStream, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -204,7 +204,15 @@ impl BedrockAdapter {
         let anthropic = matches!(ModelFamily::from_model_id(model), ModelFamily::Anthropic);
         Capabilities {
             streaming: true,
-            tools: anthropic,
+            // Tool calling is NOT wired for Bedrock in Phase 2: `shape_*_body`
+            // never serializes a `tools` array and the normalizers discard any
+            // `tool_use` block. Advertising `tools: true` would let capability
+            // negotiation route a tool-requiring request here, and the tools
+            // would silently vanish (review issue 2). Report `false` so
+            // negotiation strips tools honestly until Bedrock tool mapping is
+            // wired (a later phase). The direct Anthropic adapter DOES support
+            // tools; only Bedrock-Anthropic is gated here.
+            tools: false,
             vision: anthropic && model.contains("claude-3"),
             json_mode: false,
             max_context: None,
@@ -415,6 +423,9 @@ fn normalize_anthropic(raw: &Value) -> ChatResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TitanBody {
+    /// Prompt token count Titan reports at the top level of an invoke response.
+    #[serde(default)]
+    input_text_token_count: u32,
     #[serde(default)]
     results: Vec<TitanResult>,
 }
@@ -431,9 +442,16 @@ struct TitanResult {
 }
 
 fn normalize_titan(raw: &Value) -> ChatResponse {
-    let body: TitanBody =
-        serde_json::from_value(raw.clone()).unwrap_or(TitanBody { results: vec![] });
-    let (text, reason, tokens) = match body.results.into_iter().next() {
+    let body: TitanBody = serde_json::from_value(raw.clone()).unwrap_or(TitanBody {
+        input_text_token_count: 0,
+        results: vec![],
+    });
+    // Titan reports prompt tokens at the top level (`inputTextTokenCount`);
+    // populate `prompt_tokens` from it so `total_tokens` includes the prompt and
+    // cost signals do not undercount (review issue 8). Absent (0) when the field
+    // is not present.
+    let prompt_tokens = body.input_text_token_count;
+    let (text, reason, completion_tokens) = match body.results.into_iter().next() {
         Some(r) => (r.output_text, r.completion_reason, r.token_count),
         None => (String::new(), None, 0),
     };
@@ -444,9 +462,9 @@ fn normalize_titan(raw: &Value) -> ChatResponse {
         _ => None,
     };
     let usage = Some(Usage {
-        prompt_tokens: 0,
-        completion_tokens: tokens,
-        total_tokens: tokens,
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens + completion_tokens,
     });
     single_choice(text, finish_reason, usage)
 }
@@ -552,40 +570,149 @@ pub fn decode_event_stream(buf: &[u8]) -> Result<Vec<Value>, ProviderError> {
     let mut out = Vec::new();
     let mut pos = 0usize;
     while pos + 12 <= buf.len() {
-        let total_len =
-            u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as usize;
-        let headers_len =
-            u32::from_be_bytes([buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]]) as usize;
-        if total_len < 16 || pos + total_len > buf.len() {
-            return Err(ProviderError::Decode(
-                "truncated event-stream frame".to_string(),
-            ));
+        match decode_one_frame(&buf[pos..])? {
+            Some((value, consumed)) => {
+                out.push(value);
+                pos += consumed;
+            }
+            // Not enough bytes for a full frame; for a complete buffer this is a
+            // truncation error (mirrors the previous behavior).
+            None => {
+                return Err(ProviderError::Decode(
+                    "truncated event-stream frame".to_string(),
+                ));
+            }
         }
-        // Payload sits after the 12-byte prelude + headers, before the trailing
-        // 4-byte message CRC.
-        let payload_start = pos + 12 + headers_len;
-        let payload_end = pos + total_len - 4;
-        if payload_start > payload_end || payload_end > buf.len() {
-            return Err(ProviderError::Decode(
-                "invalid event-stream frame lengths".to_string(),
-            ));
-        }
-        let payload = &buf[payload_start..payload_end];
-        let outer: Value =
-            serde_json::from_slice(payload).map_err(|e| ProviderError::Decode(e.to_string()))?;
-        // A `chunk` event wraps base64 model JSON under `bytes`; decode it.
-        if let Some(b64) = outer.get("bytes").and_then(|b| b.as_str()) {
-            let decoded = base64_decode(b64)
-                .ok_or_else(|| ProviderError::Decode("invalid base64 in chunk".to_string()))?;
-            let inner: Value = serde_json::from_slice(&decoded)
-                .map_err(|e| ProviderError::Decode(e.to_string()))?;
-            out.push(inner);
-        } else {
-            out.push(outer);
-        }
-        pos += total_len;
     }
     Ok(out)
+}
+
+/// Decode the FIRST event-stream frame at the start of `buf`, returning the
+/// inner payload JSON and how many bytes the frame consumed, or `Ok(None)` when
+/// `buf` does not yet hold a complete frame (the incremental caller should read
+/// more bytes). Frame-length inconsistencies still surface as `Err`.
+///
+/// Shared by [`decode_event_stream`] (whole-buffer) and the incremental
+/// streaming decoder so both apply identical framing rules.
+fn decode_one_frame(buf: &[u8]) -> Result<Option<(Value, usize)>, ProviderError> {
+    if buf.len() < 12 {
+        return Ok(None);
+    }
+    let total_len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    let headers_len = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]) as usize;
+    if total_len < 16 {
+        return Err(ProviderError::Decode(
+            "invalid event-stream frame lengths".to_string(),
+        ));
+    }
+    if buf.len() < total_len {
+        // Frame prelude is present but the body has not fully arrived yet.
+        return Ok(None);
+    }
+    // Payload sits after the 12-byte prelude + headers, before the trailing
+    // 4-byte message CRC.
+    let payload_start = 12 + headers_len;
+    let payload_end = total_len - 4;
+    if payload_start > payload_end || payload_end > buf.len() {
+        return Err(ProviderError::Decode(
+            "invalid event-stream frame lengths".to_string(),
+        ));
+    }
+    let payload = &buf[payload_start..payload_end];
+    let outer: Value =
+        serde_json::from_slice(payload).map_err(|e| ProviderError::Decode(e.to_string()))?;
+    // A `chunk` event wraps base64 model JSON under `bytes`; decode it.
+    let value = if let Some(b64) = outer.get("bytes").and_then(|b| b.as_str()) {
+        let decoded = base64_decode(b64)
+            .ok_or_else(|| ProviderError::Decode("invalid base64 in chunk".to_string()))?;
+        serde_json::from_slice(&decoded).map_err(|e| ProviderError::Decode(e.to_string()))?
+    } else {
+        outer
+    };
+    Ok(Some((value, total_len)))
+}
+
+/// State threaded through the incremental Bedrock event-stream `unfold`.
+struct BedrockStreamState {
+    stream: BoxStream<'static, Result<bytes::Bytes, ProviderError>>,
+    model: String,
+    buf: Vec<u8>,
+    /// Deltas already decoded from complete frames in `buf`, awaiting emission.
+    pending: std::collections::VecDeque<ChatDelta>,
+    done: bool,
+}
+
+/// Turn a byte stream of AWS event-stream framing into a stream of normalized
+/// [`ChatDelta`]s, de-framing INCREMENTALLY: each complete frame is decoded and
+/// its delta emitted as soon as its bytes arrive, without buffering the whole
+/// response (review issue 3). Partial trailing bytes are retained until the
+/// rest of the frame arrives.
+fn bedrock_event_stream<S>(
+    byte_stream: S,
+    model: String,
+) -> BoxStream<'static, Result<ChatDelta, ProviderError>>
+where
+    S: futures_util::Stream<Item = Result<bytes::Bytes, ProviderError>> + Send + 'static,
+{
+    let init = BedrockStreamState {
+        stream: byte_stream.boxed(),
+        model,
+        buf: Vec::new(),
+        pending: std::collections::VecDeque::new(),
+        done: false,
+    };
+
+    futures_util::stream::unfold(init, |mut state| async move {
+        loop {
+            if let Some(delta) = state.pending.pop_front() {
+                return Some((Ok(delta), state));
+            }
+            if state.done {
+                return None;
+            }
+            match state.stream.next().await {
+                Some(Ok(chunk)) => {
+                    state.buf.extend_from_slice(&chunk);
+                    // Drain every complete frame now buffered.
+                    let mut consumed_total = 0usize;
+                    loop {
+                        match decode_one_frame(&state.buf[consumed_total..]) {
+                            Ok(Some((payload, consumed))) => {
+                                consumed_total += consumed;
+                                if let Some(delta) = normalize_stream_chunk(&state.model, &payload)
+                                {
+                                    state.pending.push_back(delta);
+                                }
+                            }
+                            Ok(None) => break, // need more bytes
+                            Err(e) => {
+                                state.done = true;
+                                if consumed_total > 0 {
+                                    state.buf.drain(..consumed_total);
+                                }
+                                return Some((Err(e), state));
+                            }
+                        }
+                    }
+                    if consumed_total > 0 {
+                        state.buf.drain(..consumed_total);
+                    }
+                }
+                Some(Err(e)) => {
+                    state.done = true;
+                    return Some((Err(e), state));
+                }
+                None => {
+                    // Byte stream ended. Any leftover bytes that are not a full
+                    // frame are dropped (a well-formed Bedrock stream ends on a
+                    // frame boundary).
+                    state.done = true;
+                    return None;
+                }
+            }
+        }
+    })
+    .boxed()
 }
 
 /// Minimal, dependency-free standard base64 decoder (Bedrock chunk payloads are
@@ -671,17 +798,13 @@ impl ChatProvider for BedrockAdapter {
         let body = Self::shape_body(&req);
         let resp = self.signed_request(&req.model, true, &body).await?;
         let model = req.model.clone();
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| ProviderError::Transport(e.to_string()))?;
-        let payloads = decode_event_stream(&bytes)?;
-        let deltas: Vec<Result<ChatDelta, ProviderError>> = payloads
-            .iter()
-            .filter_map(|p| normalize_stream_chunk(&model, p).map(Ok))
-            .collect();
-        use futures_util::stream::{self, StreamExt};
-        Ok(stream::iter(deltas).boxed())
+        // Stream the AWS event-stream framing INCREMENTALLY off `bytes_stream()`
+        // rather than buffering the whole body first (review issue 3): each
+        // complete frame is de-framed and yielded as soon as its bytes arrive.
+        let byte_stream = resp
+            .bytes_stream()
+            .map(|chunk| chunk.map_err(|e| ProviderError::Transport(e.to_string())));
+        Ok(bedrock_event_stream(byte_stream, model))
     }
 }
 
@@ -1094,6 +1217,62 @@ mod tests {
         let delta = normalize_stream_chunk("amazon.titan-text-express-v1", &payload).unwrap();
         assert_eq!(delta.content.as_deref(), Some("Hi"));
         assert_eq!(delta.finish_reason, Some(FinishReason::Stop));
+    }
+
+    #[test]
+    fn normalize_titan_populates_prompt_tokens() {
+        // Titan reports prompt tokens at the top level; total must include them.
+        let titan = json!({
+            "inputTextTokenCount": 7,
+            "results": [{"outputText": "Hi", "completionReason": "FINISH", "tokenCount": 4}]
+        });
+        let resp = normalize_response("amazon.titan-text-express-v1", &titan);
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 7);
+        assert_eq!(usage.completion_tokens, 4);
+        assert_eq!(usage.total_tokens, 11);
+    }
+
+    /// The incremental de-framer must yield each frame's delta even when frame
+    /// bytes are split ACROSS byte-stream chunks (the whole-body buffering the
+    /// old code did would have hidden any incremental-boundary bug).
+    #[tokio::test]
+    async fn chat_stream_incremental_across_split_chunks() {
+        use futures_util::stream;
+
+        let mut wire = Vec::new();
+        wire.extend(make_event_frame(
+            "{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}",
+        ));
+        wire.extend(make_event_frame(
+            "{\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}",
+        ));
+        wire.extend(make_event_frame(
+            "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}",
+        ));
+
+        // Split the wire bytes at an awkward offset that lands MID-frame so the
+        // decoder must buffer a partial frame across chunk boundaries.
+        let split = 7.min(wire.len());
+        let (a, b) = wire.split_at(split);
+        let mid = b.len() / 2;
+        let (b1, b2) = b.split_at(mid);
+        let byte_stream = stream::iter(vec![
+            Ok(bytes::Bytes::copy_from_slice(a)),
+            Ok(bytes::Bytes::copy_from_slice(b1)),
+            Ok(bytes::Bytes::copy_from_slice(b2)),
+        ]);
+
+        let model = "anthropic.claude-3-5-sonnet-20240620-v1:0".to_string();
+        let deltas: Vec<ChatDelta> = bedrock_event_stream(byte_stream, model)
+            .map(|r| r.unwrap())
+            .collect()
+            .await;
+
+        assert_eq!(deltas.len(), 3);
+        assert_eq!(deltas[0].content.as_deref(), Some("Hel"));
+        assert_eq!(deltas[1].content.as_deref(), Some("lo"));
+        assert_eq!(deltas[2].finish_reason, Some(FinishReason::Stop));
     }
 
     #[tokio::test]

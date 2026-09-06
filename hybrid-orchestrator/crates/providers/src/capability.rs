@@ -31,6 +31,12 @@ pub struct Negotiated {
     pub request: ChatRequest,
     /// True when the caller asked to stream but the model cannot; the caller
     /// should call `chat` and synthesize one delta (Section 4.4).
+    ///
+    /// NOTE (review issue 9): this flag is ADVISORY in Phase 2. `negotiate`
+    /// already clears `request.stream`, but nothing in `NativeAdapter` /
+    /// `HttpSseClient` acts on `streaming_fallback` itself. Honoring it (call
+    /// `chat` and synthesize a single delta) is the session manager's job when
+    /// it is wired in a later phase.
     pub streaming_fallback: bool,
     /// True when tools were requested but stripped because the model does not
     /// support tool calling.

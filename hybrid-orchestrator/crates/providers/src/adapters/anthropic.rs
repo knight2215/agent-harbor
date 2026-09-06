@@ -107,6 +107,13 @@ impl AnthropicAdapter {
                     }
                 }
                 MessageRole::User => {
+                    // Phase 2: user messages are TEXT-ONLY. The internal
+                    // `ChatMessage` has no image/attachment field yet, so a user
+                    // turn always maps to a single text block. NOTE: `caps_for`
+                    // may report `vision: true` for Claude 3/4, but that
+                    // advertises the model's future capability, not working
+                    // image input here; multimodal content plumbing lands in a
+                    // later phase (review issue 7).
                     messages.push(json!({
                         "role": "user",
                         "content": [{"type": "text", "text": msg.content.clone().unwrap_or_default()}],

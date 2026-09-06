@@ -10,8 +10,9 @@
 //!   - Non-streaming: `POST {base_url}/v1beta/models/{model}:generateContent`.
 //!   - Streaming:
 //!     `POST {base_url}/v1beta/models/{model}:streamGenerateContent?alt=sse`.
-//!   - The API key is placed on the URL query string (`?key=<key>`), the Gemini
-//!     convention.
+//!   - The API key travels in the `x-goog-api-key` request header (not the
+//!     `?key=` query string) so it never lands on the URL, which is the most
+//!     log-prone surface.
 //!   - user/assistant messages map to `contents` entries with `parts`; the
 //!     Gemini role for assistant is `model`. Tool results map to a `function`
 //!     part; assistant tool calls map to a `functionCall` part.
@@ -75,23 +76,28 @@ impl GeminiAdapter {
         }
     }
 
+    /// Request headers, including the API key.
+    ///
+    /// The key is sent via the `x-goog-api-key` HEADER rather than the `?key=`
+    /// query string. Both are accepted by the Gemini API, but the header keeps
+    /// the key off the URL. URLs are the most log-prone surface (proxy/access
+    /// logs, and reqwest transport errors that stringify the request URL), so a
+    /// header avoids leaking the key into those paths (review issue 6).
     fn request_headers(&self) -> Vec<(String, String)> {
-        vec![("Content-Type".to_string(), "application/json".to_string())]
+        vec![
+            ("Content-Type".to_string(), "application/json".to_string()),
+            ("x-goog-api-key".to_string(), self.api_key.clone()),
+        ]
     }
 
-    /// The path for the non-streaming or streaming endpoint, with the API key
-    /// on the query string (Gemini convention).
+    /// The path for the non-streaming or streaming endpoint. The API key is NOT
+    /// placed on the query string; it travels in the `x-goog-api-key` header
+    /// (see [`request_headers`](Self::request_headers)).
     fn path(&self, model: &str, stream: bool) -> String {
         if stream {
-            format!(
-                "/v1beta/models/{model}:streamGenerateContent?alt=sse&key={key}",
-                key = self.api_key
-            )
+            format!("/v1beta/models/{model}:streamGenerateContent?alt=sse")
         } else {
-            format!(
-                "/v1beta/models/{model}:generateContent?key={key}",
-                key = self.api_key
-            )
+            format!("/v1beta/models/{model}:generateContent")
         }
     }
 
@@ -99,6 +105,23 @@ impl GeminiAdapter {
     fn build_body(req: &ChatRequest) -> Value {
         let mut system_parts: Vec<String> = Vec::new();
         let mut contents: Vec<Value> = Vec::new();
+
+        // Correlate tool results back to the function they answer. The internal
+        // contract carries the correlator in `tool_call_id` (the assistant's
+        // originating `ToolCall.id`), NOT in `name`; Gemini's
+        // `functionResponse.name` must be the FUNCTION name. Build an
+        // id -> function-name map from the assistant tool calls first, so a
+        // later `Tool` message can look its function name up by
+        // `tool_call_id`.
+        let mut call_fn_by_id: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for msg in &req.messages {
+            if msg.role == MessageRole::Assistant {
+                for tc in &msg.tool_calls {
+                    call_fn_by_id.insert(tc.id.as_str(), tc.function.name.as_str());
+                }
+            }
+        }
 
         for msg in &req.messages {
             match msg.role {
@@ -131,7 +154,21 @@ impl GeminiAdapter {
                 }
                 MessageRole::Tool => {
                     // A tool result maps to a `functionResponse` part in a user
-                    // turn, keyed by the participant name (function name).
+                    // turn. Gemini keys the response by the FUNCTION name, but
+                    // the internal contract carries only the call correlator in
+                    // `tool_call_id`. Resolve the function name from the
+                    // correlating assistant tool call (via `tool_call_id`);
+                    // fall back to an explicit `name`, then to the raw
+                    // `tool_call_id`, so the field is never empty when a
+                    // correlator is present.
+                    let fn_name = msg
+                        .tool_call_id
+                        .as_deref()
+                        .and_then(|id| call_fn_by_id.get(id).copied())
+                        .map(|s| s.to_string())
+                        .or_else(|| msg.name.clone())
+                        .or_else(|| msg.tool_call_id.clone())
+                        .unwrap_or_default();
                     let response: Value = msg
                         .content
                         .as_ref()
@@ -143,7 +180,7 @@ impl GeminiAdapter {
                         "role": "user",
                         "parts": [{
                             "functionResponse": {
-                                "name": msg.name.clone().unwrap_or_default(),
+                                "name": fn_name,
                                 "response": response,
                             }
                         }],
@@ -328,7 +365,35 @@ fn normalize_response(resp: GenerateContentResponse) -> ChatResponse {
 
 /// Normalize one streamed Gemini chunk into an internal [`ChatDelta`]. Returns
 /// `Ok(None)` for chunks that carry nothing the core consumes.
-fn parse_stream_chunk(data: &str) -> Result<Option<ChatDelta>, ProviderError> {
+///
+/// ## Streaming tool-call convention (see [`ToolCallDelta`])
+///
+/// The internal contract models tool-call arguments as *fragments accumulated
+/// by `index`*: a consumer keys deltas by `index` and CONCATENATES each
+/// `arguments_fragment` to build the final JSON arguments string. That model
+/// fits providers (OpenAI, Anthropic) that stream arguments token-by-token.
+///
+/// Gemini does NOT stream arguments incrementally: it delivers each
+/// `functionCall` as a single COMPLETE object (name + full `args`) in one
+/// chunk. To compose safely with the fragment-accumulation model we:
+///
+///   - assign every streamed tool call a process-monotonic `index` (via a
+///     per-stream counter threaded through the parse closure), so two calls
+///     arriving in two separate chunks never collide on `index = 0` and their
+///     complete `args` blobs are never concatenated into one invalid string;
+///   - derive a matching stable, unique `id` (`call_{index}`) from that same
+///     counter;
+///   - place the COMPLETE arguments JSON in `arguments_fragment`. Because the
+///     index is unique per call, "accumulating" fragments for that index yields
+///     exactly the one complete blob (a single terminal fragment). A consumer
+///     therefore never has more than one fragment per Gemini tool-call index.
+///
+/// The `next_tool_index` counter starts at the value the caller supplies and is
+/// advanced once per emitted tool call; the caller persists it across chunks.
+fn parse_stream_chunk_with(
+    data: &str,
+    next_tool_index: &mut u32,
+) -> Result<Option<ChatDelta>, ProviderError> {
     let chunk: GenerateContentResponse =
         serde_json::from_str(data).map_err(|e| ProviderError::Decode(e.to_string()))?;
 
@@ -339,15 +404,21 @@ fn parse_stream_chunk(data: &str) -> Result<Option<ChatDelta>, ProviderError> {
     let mut content = String::new();
     let mut tool_calls: Vec<ToolCallDelta> = Vec::new();
     if let Some(c) = candidate.content {
-        for (i, part) in c.parts.into_iter().enumerate() {
+        for part in c.parts.into_iter() {
             if let Some(t) = part.text {
                 content.push_str(&t);
             }
             if let Some(fc) = part.function_call {
+                // Stable, unique index/id across chunks (see fn docs): never
+                // reuse `call_0`, so an index-keyed accumulator cannot concat
+                // two complete arg blobs or collapse two calls into one.
+                let index = *next_tool_index;
+                *next_tool_index += 1;
                 tool_calls.push(ToolCallDelta {
-                    index: i as u32,
-                    id: Some(format!("call_{i}")),
+                    index,
+                    id: Some(format!("call_{index}")),
                     function_name: Some(fc.name),
+                    // COMPLETE args JSON, terminal for this (unique) index.
                     arguments_fragment: Some(fc.args.to_string()),
                 });
             }
@@ -395,8 +466,12 @@ impl ChatProvider for GeminiAdapter {
             #[serde(default)]
             display_name: Option<String>,
         }
-        let path = format!("/v1beta/models?key={key}", key = self.api_key);
-        let resp: ModelsResponse = self.client.get_json(&path, &self.request_headers()).await?;
+        // Key travels in the `x-goog-api-key` header (see `request_headers`),
+        // not the query string.
+        let resp: ModelsResponse = self
+            .client
+            .get_json("/v1beta/models", &self.request_headers())
+            .await?;
         Ok(resp
             .models
             .into_iter()
@@ -432,9 +507,19 @@ impl ChatProvider for GeminiAdapter {
         let headers = self.request_headers();
         let body = Self::build_body(&req);
         let path = self.path(&req.model, true);
-        self.client
-            .post_sse(&path, &headers, &body, parse_stream_chunk)
-            .await
+        // Per-stream tool-call index counter. `post_sse` takes an `Fn` closure
+        // (called once per SSE frame), so we thread the counter through shared
+        // interior mutability rather than a captured `&mut`. This gives every
+        // streamed Gemini tool call a unique, monotonic index/id across chunks
+        // (see `parse_stream_chunk_with`).
+        let next_tool_index = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let parse = move |data: &str| -> Result<Option<ChatDelta>, ProviderError> {
+            let mut idx = next_tool_index.load(std::sync::atomic::Ordering::Relaxed);
+            let out = parse_stream_chunk_with(data, &mut idx)?;
+            next_tool_index.store(idx, std::sync::atomic::Ordering::Relaxed);
+            Ok(out)
+        };
+        self.client.post_sse(&path, &headers, &body, parse).await
     }
 }
 
@@ -486,7 +571,7 @@ mod tests {
     use crate::contract::ToolSpec;
     use futures_util::StreamExt;
     use secrets::InMemorySecretStore;
-    use wiremock::matchers::{method, query_param};
+    use wiremock::matchers::{header, method, query_param};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
     fn sample_request() -> ChatRequest {
@@ -555,24 +640,90 @@ mod tests {
     }
 
     #[test]
-    fn path_places_key_on_query_string() {
+    fn build_body_tool_result_name_from_correlating_call() {
+        // An assistant tool call followed by its tool result: the
+        // functionResponse.name must be the FUNCTION name resolved via
+        // tool_call_id, not empty (the result carries no `name`).
+        let mut r = ChatRequest::new("gemini-1.5-pro", vec![]);
+        r.messages = vec![
+            ChatMessage {
+                role: MessageRole::Assistant,
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: "call_abc".to_string(),
+                    kind: "function".to_string(),
+                    function: FunctionCall {
+                        name: "get_weather".to_string(),
+                        arguments: "{\"city\":\"NYC\"}".to_string(),
+                    },
+                }],
+                tool_call_id: None,
+                name: None,
+            },
+            ChatMessage {
+                role: MessageRole::Tool,
+                content: Some("{\"temp\":72}".to_string()),
+                tool_calls: vec![],
+                tool_call_id: Some("call_abc".to_string()),
+                name: None,
+            },
+        ];
+        let body = GeminiAdapter::build_body(&r);
+        // Second content entry is the tool result turn.
+        let fr = &body["contents"][1]["parts"][0]["functionResponse"];
+        assert_eq!(fr["name"], json!("get_weather"));
+        assert_eq!(fr["response"], json!({"temp": 72}));
+    }
+
+    #[test]
+    fn build_body_tool_result_falls_back_to_tool_call_id() {
+        // No correlating assistant call: fall back to tool_call_id rather than
+        // emitting an empty name.
+        let mut r = ChatRequest::new("gemini-1.5-pro", vec![]);
+        r.messages = vec![ChatMessage {
+            role: MessageRole::Tool,
+            content: Some("done".to_string()),
+            tool_calls: vec![],
+            tool_call_id: Some("call_orphan".to_string()),
+            name: None,
+        }];
+        let body = GeminiAdapter::build_body(&r);
+        let fr = &body["contents"][0]["parts"][0]["functionResponse"];
+        assert_eq!(fr["name"], json!("call_orphan"));
+    }
+
+    #[test]
+    fn path_omits_key_and_header_carries_it() {
         let adapter = GeminiAdapter::new("gemini", "http://x", "AIza-key", None);
+        // Key is NOT on the URL path/query.
         assert_eq!(
             adapter.path("gemini-1.5-pro", false),
-            "/v1beta/models/gemini-1.5-pro:generateContent?key=AIza-key"
+            "/v1beta/models/gemini-1.5-pro:generateContent"
         );
         assert_eq!(
             adapter.path("gemini-1.5-pro", true),
-            "/v1beta/models/gemini-1.5-pro:streamGenerateContent?alt=sse&key=AIza-key"
+            "/v1beta/models/gemini-1.5-pro:streamGenerateContent?alt=sse"
         );
+        assert!(!adapter.path("gemini-1.5-pro", false).contains("AIza-key"));
+        assert!(!adapter.path("gemini-1.5-pro", true).contains("AIza-key"));
+        // Key travels in the x-goog-api-key header instead.
+        let headers = adapter.request_headers();
+        assert!(headers
+            .iter()
+            .any(|(k, v)| k == "x-goog-api-key" && v == "AIza-key"));
     }
 
     #[tokio::test]
     async fn chat_sends_key_query_and_normalizes_response() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(query_param("key", "AIza-test"))
+            .and(header("x-goog-api-key", "AIza-test"))
             .respond_with(|req: &Request| {
+                // Key must NOT appear on the request URL (only in the header).
+                assert!(
+                    !req.url.as_str().contains("AIza-test"),
+                    "api key leaked onto the request URL"
+                );
                 let body: Value = serde_json::from_slice(&req.body).unwrap();
                 // Assert outbound translation: contents/parts + tools.
                 assert_eq!(body["contents"][0]["role"], json!("user"));
@@ -643,6 +794,63 @@ mod tests {
             Some("get_weather")
         );
         assert_eq!(deltas[2].finish_reason, Some(FinishReason::Stop));
+    }
+
+    /// Regression for the streaming tool-call fragment/id bug: two tool calls
+    /// arriving in two SEPARATE chunks must get DISTINCT, monotonic indices/ids
+    /// so an index-keyed accumulator neither concatenates the two complete
+    /// `args` blobs nor collapses the two calls into one. Under the old code
+    /// (both labelled `index = 0` / `id = "call_0"`) this test fails.
+    #[tokio::test]
+    async fn chat_stream_multi_tool_calls_get_distinct_indices() {
+        let server = MockServer::start().await;
+        let sse = concat!(
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"get_weather\",\"args\":{\"city\":\"NYC\"}}}]}}]}\n\n",
+            "data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"get_time\",\"args\":{\"tz\":\"UTC\"}}}]},\"finishReason\":\"STOP\"}]}\n\n",
+        );
+        Mock::given(method("POST"))
+            .and(query_param("alt", "sse"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(sse),
+            )
+            .mount(&server)
+            .await;
+
+        let adapter = GeminiAdapter::new("gemini", server.uri(), "AIza-test", None);
+        let mut req = sample_request();
+        req.stream = true;
+        let stream = adapter.chat_stream(req).await.unwrap();
+        let deltas: Vec<ChatDelta> = stream.map(|r| r.unwrap()).collect().await;
+
+        // Collect every tool-call fragment across all chunks.
+        let calls: Vec<&ToolCallDelta> = deltas.iter().flat_map(|d| d.tool_calls.iter()).collect();
+        assert_eq!(calls.len(), 2, "two distinct tool calls expected");
+
+        // Distinct, monotonic indices, NOT both 0.
+        assert_eq!(calls[0].index, 0);
+        assert_eq!(calls[1].index, 1);
+        assert_ne!(calls[0].index, calls[1].index);
+
+        // Distinct, stable ids, NOT both "call_0".
+        assert_eq!(calls[0].id.as_deref(), Some("call_0"));
+        assert_eq!(calls[1].id.as_deref(), Some("call_1"));
+        assert_ne!(calls[0].id, calls[1].id);
+
+        assert_eq!(calls[0].function_name.as_deref(), Some("get_weather"));
+        assert_eq!(calls[1].function_name.as_deref(), Some("get_time"));
+
+        // Each fragment is the COMPLETE args blob for its (unique) index; an
+        // index-keyed accumulator yields exactly one valid JSON per call.
+        assert_eq!(
+            calls[0].arguments_fragment.as_deref(),
+            Some("{\"city\":\"NYC\"}")
+        );
+        assert_eq!(
+            calls[1].arguments_fragment.as_deref(),
+            Some("{\"tz\":\"UTC\"}")
+        );
     }
 
     #[test]
