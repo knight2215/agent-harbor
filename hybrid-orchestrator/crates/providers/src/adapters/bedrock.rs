@@ -112,6 +112,9 @@ impl BedrockAdapter {
         credentials: AwsCredentials,
         credential_source: CredentialSource,
     ) -> Self {
+        // Ensure the rustls default crypto provider (`ring`) is installed before
+        // building the reqwest client; see `crate::crypto`.
+        crate::crypto::ensure_crypto_provider();
         BedrockAdapter {
             id: id.into(),
             base_url: base_url.into(),

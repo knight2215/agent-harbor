@@ -15,6 +15,7 @@
 pub mod builtins;
 pub mod capability;
 pub mod contract;
+pub(crate) mod crypto;
 pub mod registry;
 
 pub mod adapters {

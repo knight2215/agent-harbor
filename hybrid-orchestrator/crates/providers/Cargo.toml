@@ -35,6 +35,14 @@ thiserror = "2"
 async-trait = "0.1"
 tokio = { version = "1", features = ["rt", "macros"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# rustls 0.23 (the version reqwest's `rustls-tls` resolves) requires an
+# unambiguous process-default CryptoProvider before any rustls-backed client is
+# used. This crate links two providers indirectly (reqwest -> `ring`; the AWS
+# crates -> `aws-lc-rs`), so we install `ring` explicitly at client-construction
+# time (see `src/crypto.rs`). Depend on rustls with ONLY the `ring` feature and
+# no defaults so we neither add a second rustls version nor pull aws-lc-rs in
+# through rustls itself.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 futures = "0.3"
 futures-util = "0.3"
 bytes = "1"

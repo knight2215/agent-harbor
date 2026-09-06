@@ -102,6 +102,10 @@ pub struct HttpSseClient {
 impl HttpSseClient {
     /// Build a client rooted at `base_url` (no trailing slash required).
     pub fn new(base_url: impl Into<String>) -> Self {
+        // rustls 0.23 (via reqwest's `rustls-tls`) needs an unambiguous default
+        // crypto provider installed before the client is used; install `ring`
+        // once here so the reqwest connector's TLS init succeeds.
+        crate::crypto::ensure_crypto_provider();
         HttpSseClient {
             base_url: base_url.into(),
             http: reqwest::Client::new(),
@@ -110,6 +114,7 @@ impl HttpSseClient {
 
     /// Build a client from a pre-configured reqwest client (e.g. with timeouts).
     pub fn with_client(base_url: impl Into<String>, http: reqwest::Client) -> Self {
+        crate::crypto::ensure_crypto_provider();
         HttpSseClient {
             base_url: base_url.into(),
             http,
