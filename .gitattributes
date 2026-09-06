@@ -1,0 +1,14 @@
+# Enforce consistent LF line endings for text files across all OSes.
+# Without this, Windows checkouts introduce CRLF, which Prettier's default
+# endOfLine: "lf" flags as formatting violations in `format:check`.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending normalized.
+*.png binary
+*.ico binary
+*.icns binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.woff binary
+*.woff2 binary
