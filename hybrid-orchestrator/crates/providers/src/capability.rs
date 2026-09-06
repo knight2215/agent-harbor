@@ -332,6 +332,7 @@ where
         let frame = &frame[..pos.frame_len];
         if parse_frame(frame, parse, pending)? {
             saw_done = true;
+            break;
         }
     }
     Ok(saw_done)
