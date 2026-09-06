@@ -1,7 +1,50 @@
 [package]
 name = "providers"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# Concrete literals (kept in sync with the root `[workspace.package]`:
+# version = "0.1.0", edition = "2021", license = "MIT") rather than
+# `*.workspace = true` inheritance. This crate is under `[workspace] exclude` in
+# the root Cargo.toml (Phase 2 / FEAT-001) because it carries crates.io deps
+# (reqwest/futures/aws-sigv4/...) unreachable in the offline sandbox. When CI
+# builds it standalone via `--manifest-path crates/providers/Cargo.toml`, there
+# is no workspace root to inherit from, and `*.workspace = true` would fail to
+# parse ("failed to find a workspace root"). Making the crate self-contained
+# keeps the manifest parseable.
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# NOTE: This crate depends on external crates.io crates (reqwest + SSE stream,
+# futures/futures-util for BoxStream, tokio, async-trait, aws-sigv4 +
+# aws-credential-types for the Bedrock adapter). Those resolve only where
+# crates.io is reachable (CI), so this crate is placed under `[workspace]
+# exclude` in the root Cargo.toml (NOT under `members`); bare offline cargo
+# commands never try to resolve them. CI builds/tests/clippies it directly via
+# `cargo build --manifest-path crates/providers/Cargo.toml`. Version literals are
+# kept in sync with the root `[workspace.dependencies]` table.
+#
+# TLS: reqwest uses `rustls-tls` (default features off) instead of native-tls so
+# the Windows CI runner does not need a system OpenSSL.
 
 [dependencies]
+domain = { path = "../domain" }
+secrets = { path = "../secrets" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+async-trait = "0.1"
+tokio = { version = "1", features = ["rt", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures = "0.3"
+futures-util = "0.3"
+bytes = "1"
+
+# Bedrock SigV4 signing (P2.9). Pure-Rust, Windows-friendly.
+aws-sigv4 = "1"
+aws-credential-types = "1"
+
+[dev-dependencies]
+# Mocked HTTP + SSE server for adapter/client tests (no live network). tokio
+# macros/rt provide the `#[tokio::test]` harness.
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

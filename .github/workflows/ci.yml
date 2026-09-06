@@ -20,6 +20,9 @@ name: CI
 #                                   + tokio (since Phase 1 / FEAT-001-002)
 #     - crates/persistence       -> sqlx + tokio + serde/... (Phase 1 / FEAT-002)
 #     - crates/secrets           -> keyring + serde + thiserror (Phase 1 / FEAT-002)
+#     - crates/providers         -> reqwest (rustls-tls) + futures + tokio +
+#                                   async-trait + aws-sigv4/aws-credential-types
+#                                   (Phase 2 / FEAT-001; tests use mocked HTTP+SSE)
 #   Cargo resolves the whole `members` dependency graph to build Cargo.lock, so
 #   an excluded crate is invisible to `cargo build --workspace` (and to
 #   `cargo build -p <crate>`). Therefore CI builds/tests/clippies each excluded
@@ -150,6 +153,9 @@ jobs:
       - name: cargo fmt (check, tauri-app)
         run: cargo fmt --manifest-path crates/tauri-app/Cargo.toml --check
 
+      - name: cargo fmt (check, providers)
+        run: cargo fmt --manifest-path crates/providers/Cargo.toml --check
+
       - name: cargo build (workspace)
         run: cargo build --workspace
 
@@ -204,6 +210,26 @@ jobs:
 
       - name: cargo test (persistence)
         run: cargo test --manifest-path crates/persistence/Cargo.toml
+
+      # --- Rust: providers (excluded from the workspace, built explicitly) ----
+      # providers is under `[workspace] exclude` because Phase 2 (FEAT-001) gave
+      # it crates.io deps unreachable offline: reqwest (rustls-tls) + SSE stream,
+      # futures/futures-util (BoxStream), tokio, async-trait,
+      # serde/serde_json/thiserror, and aws-sigv4 + aws-credential-types for the
+      # Bedrock adapter (P2.9). The `--workspace` commands above do NOT touch it.
+      # Build/test/clippy it directly via its manifest; its `path` deps on the
+      # excluded `domain`/`secrets` crates are resolved transitively here. Its
+      # tests use MOCKED HTTP + SSE (wiremock) and fixture byte buffers, never
+      # live network. (The fmt-check step lives with the other per-crate
+      # fmt-check steps near the top of the job.)
+      - name: cargo build (providers)
+        run: cargo build --manifest-path crates/providers/Cargo.toml
+
+      - name: cargo clippy (providers)
+        run: cargo clippy --manifest-path crates/providers/Cargo.toml --all-targets -- -D warnings
+
+      - name: cargo test (providers)
+        run: cargo test --manifest-path crates/providers/Cargo.toml
 
       # --- Rust: orchestrator-core (excluded from the workspace, built explicitly)
       # orchestrator-core is under `[workspace] exclude` because it carries

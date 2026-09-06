@@ -30,10 +30,19 @@ resolver = "2"
 # `persistence -> orchestrator-core` reverse edge is removed, restoring the
 # strictly-downward graph (Section 3.3).
 #
+# Phase 2 (FEAT-001) gives `providers` its own crates.io deps: an async HTTP
+# client + SSE streaming (reqwest with rustls-tls), `futures`/`futures-util`
+# (BoxStream), `tokio`, `async-trait`, serde/serde_json/thiserror, plus
+# `aws-sigv4` + `aws-credential-types` for the later Bedrock adapter (P2.9).
+# All of those are crates.io-only, unreachable in the offline sandbox. Per the
+# same pattern established for the crates above, `providers` therefore MOVES
+# from `members` to `exclude` here and gains explicit CI `--manifest-path`
+# build/test/clippy/fmt steps. Its tests use MOCKED HTTP + SSE (wiremock),
+# never live network.
+#
 # The only crates that remain offline-buildable members are the still
-# dependency-free `providers`, `mcp-client`, and `routing`.
+# dependency-free `mcp-client` and `routing`.
 members = [
-    "crates/providers",
     "crates/mcp-client",
     "crates/routing",
 ]
@@ -51,6 +60,12 @@ members = [
 #                          + a path dep on `domain` (FEAT-002/004). It NO LONGER
 #                          depends on orchestrator-core (that reverse edge formed
 #                          a cycle; removed in FEAT-004).
+#   - `providers`:         reqwest (rustls-tls) + futures/futures-util + tokio +
+#                          async-trait + serde/serde_json/thiserror + aws-sigv4/
+#                          aws-credential-types (Bedrock P2.9), plus path deps on
+#                          `domain` and `secrets` (Phase 2 / FEAT-001). Carries
+#                          the crates.io HTTP/SSE/SigV4 stack, so it joined the
+#                          excluded set in Phase 2; its tests use mocked HTTP+SSE.
 #   - `secrets`:           keyring + serde + thiserror (FEAT-002).
 #   - `tauri-app`:         tauri + tauri-build + serde/serde_json (Phase 0).
 #
@@ -92,6 +107,7 @@ exclude = [
     "crates/domain",
     "crates/orchestrator-core",
     "crates/persistence",
+    "crates/providers",
     "crates/secrets",
     "crates/tauri-app",
 ]
@@ -108,8 +124,12 @@ license = "MIT"
 #
 # FEAT-001 uses: serde, serde_json, uuid, chrono, thiserror.
 # FEAT-002 consumes: sqlx (persistence), keyring (secrets), tokio
-# (persistence + orchestrator-core SessionManager). `async-trait` is declared
-# for later phases. NOTE: because every crate that consumes these is under
+# (persistence + orchestrator-core SessionManager). `async-trait` is now used by
+# the Phase 2 `providers` crate (the `ChatProvider` async trait). Phase 2 also
+# introduces reqwest/futures/aws-sigv4/aws-credential-types, recorded below for
+# documentation; the `providers` crate is `[workspace] exclude`d and pins these
+# as concrete literals in its own manifest (an excluded crate has no workspace
+# root to inherit from). NOTE: because every crate that consumes these is under
 # `[workspace] exclude`, the excluded crates cannot use `{ workspace = true }`
 # (an excluded crate has no workspace root to inherit from); they pin the same
 # versions as concrete literals in their own manifests, kept in sync with this
@@ -127,3 +147,13 @@ tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
 keyring = "3"
+# Phase 2 (providers). rustls-tls is chosen over the default native-tls so the
+# Windows CI runner does not need a system OpenSSL. These are recorded here for
+# documentation and the EXIT PATH; the excluded `providers` crate pins them as
+# concrete literals in its own manifest.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+futures = "0.3"
+futures-util = "0.3"
+bytes = "1"
+aws-sigv4 = "1"
+aws-credential-types = "1"
