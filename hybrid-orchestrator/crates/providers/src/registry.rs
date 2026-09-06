@@ -278,7 +278,7 @@ mod tests {
         let mut reg = ProviderRegistry::new();
         reg.register_factory(Box::new(FakeFactory));
 
-        let rows = vec![config("p1", Some(k1)), config("p2", Some(k2))];
+        let rows = [config("p1", Some(k1)), config("p2", Some(k2))];
         reg.build_all(rows.iter(), &store).unwrap();
 
         let mut ids = reg.instance_ids();

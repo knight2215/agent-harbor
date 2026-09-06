@@ -424,7 +424,7 @@ mod tests {
         // network call (build != list_models). Proves build_registry wires the
         // instance up under its id.
         let store = InMemorySecretStore::new();
-        let configs = vec![config("local", ProviderKind::LmStudio)];
+        let configs = [config("local", ProviderKind::LmStudio)];
         let registry = build_registry(configs.iter(), &store).unwrap();
         assert!(registry.get("local").is_some());
     }
