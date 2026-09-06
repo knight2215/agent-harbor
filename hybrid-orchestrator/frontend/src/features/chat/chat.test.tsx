@@ -189,7 +189,7 @@ describe("chat surface", () => {
     });
   });
 
-  it("PermissionPrompt renders on permission_requested and resolves via resolvePermission", () => {
+  it("PermissionPrompt renders on permission_requested and resolves via resolvePermission", async () => {
     render(<PermissionPrompt />);
     // Empty queue -> nothing rendered.
     expect(screen.queryByRole("dialog")).toBeNull();
@@ -207,6 +207,15 @@ describe("chat surface", () => {
     expect(screen.getByText("read_file")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Allow" }));
-    expect(useConversationsStore.getState().pendingPermissions).toHaveLength(0);
+    // The decision is forwarded to the core, then the prompt is dequeued.
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("resolve_permission", {
+        requestId: "r-1",
+        decision: { allow: true, remember: false },
+      });
+    });
+    await waitFor(() => {
+      expect(useConversationsStore.getState().pendingPermissions).toHaveLength(0);
+    });
   });
 });

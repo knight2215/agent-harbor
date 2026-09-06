@@ -18,7 +18,7 @@ export function PermissionPrompt() {
   if (request === null) return null;
 
   const decide = (allow: boolean) => {
-    resolvePermission(request.requestId, { allow, remember });
+    void resolvePermission(request.requestId, { allow, remember });
     setRemember(false);
   };
 

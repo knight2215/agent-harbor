@@ -152,7 +152,8 @@ describe("conversations store", () => {
     expect(invoke).toHaveBeenCalledWith("list_conversations");
   });
 
-  it("permissionRequested enqueues and resolvePermission dequeues", () => {
+  it("permissionRequested enqueues; resolvePermission forwards the decision and dequeues", async () => {
+    invoke.mockResolvedValue(true);
     useConversationsStore.getState().applyCoreEvent({
       type: "permissionRequested",
       requestId: "r-1",
@@ -162,7 +163,15 @@ describe("conversations store", () => {
       rationale: "read a file",
     });
     expect(useConversationsStore.getState().pendingPermissions).toHaveLength(1);
-    useConversationsStore.getState().resolvePermission("r-1", { allow: true, remember: false });
+    await useConversationsStore
+      .getState()
+      .resolvePermission("r-1", { allow: true, remember: false });
+    // The decision is forwarded to the core to unblock the tool invocation.
+    expect(invoke).toHaveBeenCalledWith("resolve_permission", {
+      requestId: "r-1",
+      decision: { allow: true, remember: false },
+    });
+    // And the prompt is dequeued from the local queue.
     expect(useConversationsStore.getState().pendingPermissions).toHaveLength(0);
   });
 

@@ -22,6 +22,7 @@ import {
   getMessages,
   listConversations,
   renameConversation as renameConversationCmd,
+  resolvePermission as resolvePermissionCmd,
   sendMessage as sendMessageCmd,
   setConversationRoute as setConversationRouteCmd,
   setConversationTags as setConversationTagsCmd,
@@ -91,10 +92,12 @@ export interface ConversationsState {
 
   // --- Permission queue ----------------------------------------------------
   /**
-   * Resolve a pending Ask-mode permission request (Section 9.4). Dequeues the
-   * request; `decision` carries the user's `{ allow, remember }` answer.
+   * Resolve a pending Ask-mode permission request (Section 9.4). Forwards the
+   * user's `{ allow, remember }` `decision` to the core through the
+   * `resolve_permission` command to unblock the tool invocation, then dequeues
+   * the request from the local queue.
    */
-  resolvePermission: (requestId: string, decision: PermissionDecision) => void;
+  resolvePermission: (requestId: string, decision: PermissionDecision) => Promise<void>;
 
   // --- Event application (core authoritative, Section 7.3) -----------------
   applyCoreEvent: (event: CoreEvent) => void;
@@ -197,13 +200,10 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
     await stopGenerationCmd(activeConversationId);
   },
 
-  resolvePermission: (requestId, decision) => {
-    // The Ask-mode decision is surfaced to the core through the pipeline's
-    // permission channel; there is no dedicated `resolve_permission` IPC command
-    // in this phase, so the store dequeues locally. Reference `decision` so the
-    // full { allow, remember } contract is part of the public store API that the
-    // PermissionPrompt buttons call (architecture.md Section 9.4).
-    void decision;
+  resolvePermission: async (requestId, decision) => {
+    // Forward the Ask-mode decision to the core so its blocked tool invocation
+    // can proceed (architecture.md Section 9.4), then dequeue the prompt.
+    await resolvePermissionCmd(requestId, decision);
     set((state) => ({
       pendingPermissions: state.pendingPermissions.filter((p) => p.requestId !== requestId),
     }));

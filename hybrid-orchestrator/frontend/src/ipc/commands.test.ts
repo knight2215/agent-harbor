@@ -35,6 +35,7 @@ import {
   exportConversation,
   openConversation,
   stopGeneration,
+  resolvePermission,
 } from "./commands";
 import type { McpServerInput } from "../types";
 
@@ -266,5 +267,14 @@ describe("ipc/commands wrappers", () => {
   it("stopGeneration forwards conversationId", async () => {
     await stopGeneration("c-1");
     expect(invoke).toHaveBeenCalledWith("stop_generation", { conversationId: "c-1" });
+  });
+
+  it("resolvePermission forwards requestId + decision and returns the awaiting flag", async () => {
+    invoke.mockResolvedValue(true);
+    await expect(resolvePermission("r-1", { allow: true, remember: false })).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledWith("resolve_permission", {
+      requestId: "r-1",
+      decision: { allow: true, remember: false },
+    });
   });
 });

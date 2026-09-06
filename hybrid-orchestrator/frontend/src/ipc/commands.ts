@@ -10,6 +10,7 @@ import type {
   Message,
   ModelParameters,
   OpenedConversation,
+  PermissionDecision,
   PermissionMode,
   PrivacyTag,
   RouteExplanation,
@@ -263,4 +264,19 @@ export function openConversation(conversationId: string): Promise<OpenedConversa
  */
 export function stopGeneration(conversationId: string): Promise<void> {
   return invoke<void>("stop_generation", { conversationId });
+}
+
+/**
+ * Resolve a pending Ask-mode tool-permission request (architecture.md Section
+ * 9.4). The core blocks the tool invocation until the user answers; this
+ * forwards the request's `requestId` and the user's `{ allow, remember }`
+ * {@link PermissionDecision} to unblock it. Returns `true` if a request with
+ * `requestId` was awaiting a decision (now unblocked), `false` otherwise
+ * (already resolved, timed out, or an unknown id). Backed by `resolve_permission`.
+ */
+export function resolvePermission(
+  requestId: string,
+  decision: PermissionDecision,
+): Promise<boolean> {
+  return invoke<boolean>("resolve_permission", { requestId, decision });
 }
