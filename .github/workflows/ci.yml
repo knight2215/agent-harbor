@@ -61,7 +61,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macOS intentionally omitted for now: GitHub bills macOS runners at
+        # 10x, and Linux + Windows already cover the cross-platform issues that
+        # matter here (line endings, path handling, the Windows webview build).
+        # Re-add macos-latest when macOS coverage / release bundles are needed.
+        os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
 
     defaults:
@@ -80,8 +84,8 @@ jobs:
           components: clippy, rustfmt
 
       # Tauri v2 Linux system dependencies. Required to compile tauri-app and to
-      # run `tauri build` on ubuntu. macOS and Windows ship the needed webview
-      # (WKWebView / WebView2) so they do not need this step.
+      # run `tauri build` on ubuntu. Windows ships the needed webview
+      # (WebView2) so it does not need this step.
       - name: Install Tauri v2 Linux system dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
