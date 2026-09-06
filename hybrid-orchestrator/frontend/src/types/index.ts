@@ -249,6 +249,57 @@ export interface PricingConfig {
 export type McpConnectionState = "connecting" | "connected" | "disconnected";
 
 /**
+ * Input for the `add_mcp_server` / `update_mcp_server` commands. Mirrors Rust
+ * `McpServerInput` (the persisted `McpServerConfig` minus the id, which the
+ * command assigns on add or takes from the path on update). `transport` uses the
+ * exact `McpTransport` serde representation (`env`/`headers` as `[key, value]`
+ * tuples).
+ */
+export interface McpServerInput {
+  name: string;
+  transport: McpTransport;
+  permissionMode: PermissionMode;
+  enabled: boolean;
+}
+
+/**
+ * Display-safe view of an MCP tool descriptor returned by `refresh_mcp_tools`.
+ * Mirrors Rust `ToolDescriptorView` (architecture.md Section 5.4 / 8.3). Carries
+ * only the tool name, description, and its JSON Schema; never secret material.
+ */
+export interface ToolDescriptorView {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+}
+
+/**
+ * A display-safe preview of how the active conversation is routed, returned by
+ * `get_route_explanation` (architecture.md Section 8.2). Mirrors Rust
+ * `RouteExplanation`. `providerId` / `model` are omitted (undefined) when the
+ * route is automatic and no prior message has recorded a decision yet.
+ */
+export interface RouteExplanation {
+  rationale: string;
+  providerId?: string;
+  model?: string;
+  source: RouteSource;
+}
+
+/** Serialization format for `export_conversation`. Mirrors Rust `ExportFormat`. */
+export type ExportFormat = "markdown" | "json";
+
+/**
+ * The resume payload returned by `open_conversation` (architecture.md Section
+ * 8.5). Mirrors Rust `OpenedConversation`: the conversation plus its message
+ * history in one round-trip so the chat surface can restore the full session.
+ */
+export interface OpenedConversation {
+  conversation: Conversation;
+  messages: Message[];
+}
+
+/**
  * Events emitted by the core to the frontend (architecture.md Section 8).
  * Mirrors Rust `CoreEvent`, an internally-tagged enum discriminated on `type`.
  *

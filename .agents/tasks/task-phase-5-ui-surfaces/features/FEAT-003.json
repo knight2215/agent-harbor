@@ -1,0 +1,28 @@
+{
+  "id": "FEAT-003",
+  "type": "feat",
+  "description": "P5.4 Tool/MCP server manager (Section 8.3) AND P5.5 Agent config editor (Section 8.4), built together because the agent editor's DefaultRoutePicker reuses the ProviderModelPicker from FEAT-002 and its AllowedToolsSelector consumes the same MCP servers/tools data the tool manager owns (state/tools.ts). Depends on FEAT-001 (MCP CRUD + persona commands + tools/personas stores) and FEAT-002 (reusable ProviderModelPicker).",
+  "status": "pending",
+  "steps": [
+    "TOOL MANAGER (src/features/tool-manager/): ServerList (lists configured MCP servers from state/tools.ts with status badges from per-server McpConnectionState; enable/disable toggle -> setMcpEnabled; remove -> removeMcpServer), ServerForm (create/edit; transport selector stdio { command, args[], env: [key,value][] } OR httpSse { url, headers: [key,value][] }; submit -> addMcpServer/updateMcpServer with the McpServerInput shape from FEAT-001), ToolInspector (per-server discovered tools + schemas from refreshMcpTools/store tool lists), PermissionModeControl (Ask/Allow/Deny per server, and per-tool overrides if FEAT-001 exposed them -> setToolPermission), ConnectionHealth (renders connection state + last mcp_error).",
+    "TOOL MANAGER wiring: consume mcp_state_changed (update per-server connection state + tool list) and mcp_error (surface in ConnectionHealth) via the tools store's event function. Refresh via refreshMcpTools. All mutations go through the FEAT-001 commands; the surface never touches transport internals directly.",
+    "AGENT EDITOR (src/features/agent-editor/): PersonaList (from state/personas.ts; create/select/delete -> create_persona/delete_persona), PersonaEditor (name, systemPrompt textarea, ModelParameters controls: temperature/maxTokens/topP/frequencyPenalty/presencePenalty/stop), DefaultRoutePicker (REUSE the ProviderModelPicker from FEAT-002 to pick default_route), AllowedToolsSelector (choose which configured MCP servers/tools this persona may use, from the tools store; persona.allowedToolServers is Uuid[] of server ids — the Rust side validates them as UUIDs), RoutingHintControl (RoutingHint union: preferLocal/preferQuality/preferCheap/preferSpeed). Save -> createPersona/updatePersona with PersonaInput.",
+    "AGENT EDITOR wiring: consume personas_changed (refresh persona list) via the personas store. assign_persona is invoked from the history/chat resume flow (FEAT-004) but expose an assign action if the editor offers 'use in current conversation'. Validate required fields client-side (non-empty name/systemPrompt) to match the Rust bounds and surface CommandError messages on failure.",
+    "TESTS (vitest + RTL): tool manager — ServerForm submit calls addMcpServer with the correct stdio vs httpSse McpServerInput shape; ServerList enable/disable calls setMcpEnabled and remove calls removeMcpServer; feed synthetic mcp_state_changed/mcp_error and assert status badge + ConnectionHealth update; ToolInspector renders tools from the store. agent editor — PersonaEditor save calls createPersona/updatePersona with the full PersonaInput (params + defaultRoute + routingHint + allowedToolServers); DefaultRoutePicker reuse renders the shared picker; personas_changed refreshes the list; AllowedToolsSelector reflects the tools store. Mock invoke + listen.",
+    "LOCAL VERIFY: `NODE_OPTIONS= npx prettier --check .` clean; self-audit eslint/tsc; report deferrals."
+  ],
+  "acceptance_criteria": [
+    "Tool manager lists servers with live status, adds/edits servers via a transport-aware ServerForm (stdio or httpSse), inspects discovered tools, sets permission modes, and shows connection health; all mutations go through the FEAT-001 MCP commands.",
+    "Tool manager updates on mcp_state_changed / mcp_error via the tools store.",
+    "Agent editor lists/creates/edits/deletes personas with system prompt, model parameters, default route (reusing ProviderModelPicker), allowed tool servers, and routing hint; saves via create_persona/update_persona; refreshes on personas_changed.",
+    "The DefaultRoutePicker reuses the FEAT-002 ProviderModelPicker (built once).",
+    "vitest/RTL tests cover rendering, mocked-invoke command calls, and event-driven updates for both surfaces.",
+    "`NODE_OPTIONS= npx prettier --check .` passes."
+  ],
+  "verification": [
+    "Run `NODE_OPTIONS= npx prettier --check .` from hybrid-orchestrator/frontend; confirm clean.",
+    "Self-audit ESLint/tsc against the configs; report eslint/tsc/vitest deferred to CI."
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

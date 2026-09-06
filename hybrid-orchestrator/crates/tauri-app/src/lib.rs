@@ -58,6 +58,20 @@ pub fn run() {
             commands::list_available_models,
             commands::send_message,
             commands::resolve_permission,
+            commands::get_messages,
+            commands::set_conversation_route,
+            commands::assign_persona,
+            commands::get_route_explanation,
+            commands::list_mcp_servers,
+            commands::add_mcp_server,
+            commands::update_mcp_server,
+            commands::remove_mcp_server,
+            commands::set_mcp_enabled,
+            commands::refresh_mcp_tools,
+            commands::set_tool_permission,
+            commands::export_conversation,
+            commands::open_conversation,
+            commands::stop_generation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

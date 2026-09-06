@@ -5,15 +5,115 @@
 //! and the [`SecretStore`] (Section 9.1). Registered with the Tauri builder via
 //! `.manage(...)` in `main.rs`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use mcp_client::McpServerHandle;
-use orchestrator_core::{CoreEvent, PermissionRegistry, SessionManager};
+use mcp_client::{McpConnectionState, McpServerHandle};
+use orchestrator_core::{CoreEvent, McpServerConfig, PermissionRegistry, SessionManager};
 use persistence::config::AppConfig;
-use persistence::{Db, PersistenceError};
+use persistence::{Db, McpServerRepo, PersistenceError};
 use routing::PolicyRegistry;
 use secrets::{KeyringSecretStore, SecretStore};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::RwLock;
+use uuid::Uuid;
+
+/// A shared, runtime-mutable registry of connected MCP server handles
+/// (architecture.md Section 5.3 / 8.3). The MCP-manager commands
+/// (`add_mcp_server`, `set_mcp_enabled`, `remove_mcp_server`, ...) add, replace,
+/// reconnect, and tear down handles here at runtime, and `send_message` reads
+/// the live connected set from it instead of a fixed empty vec.
+///
+/// Keyed by the server's [`Uuid`]. Behind an `Arc<RwLock<..>>` so it is cheap to
+/// clone into command tasks and the startup connector, `Send + Sync` for Tauri
+/// managed state, and safe to mutate while the pipeline reads a snapshot.
+#[derive(Clone, Default)]
+pub struct McpRegistry {
+    handles: Arc<RwLock<HashMap<Uuid, Arc<McpServerHandle>>>>,
+}
+
+impl McpRegistry {
+    /// An empty registry.
+    pub fn new() -> Self {
+        McpRegistry {
+            handles: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Insert (or replace) the handle for `id`, returning the previous handle
+    /// if one was registered (so the caller can tear it down).
+    pub async fn insert(
+        &self,
+        id: Uuid,
+        handle: Arc<McpServerHandle>,
+    ) -> Option<Arc<McpServerHandle>> {
+        self.handles.write().await.insert(id, handle)
+    }
+
+    /// Remove and return the handle for `id`, if present.
+    pub async fn remove(&self, id: Uuid) -> Option<Arc<McpServerHandle>> {
+        self.handles.write().await.remove(&id)
+    }
+
+    /// The handle for `id`, if present.
+    pub async fn get(&self, id: Uuid) -> Option<Arc<McpServerHandle>> {
+        self.handles.read().await.get(&id).cloned()
+    }
+
+    /// A snapshot of the currently registered handles. `send_message` reads this
+    /// so the pipeline attaches tools from the live connected set.
+    pub async fn snapshot(&self) -> Vec<Arc<McpServerHandle>> {
+        self.handles.read().await.values().cloned().collect()
+    }
+}
+
+/// Connect `handle` in the background and report its resulting state to the
+/// frontend via [`CoreEvent`]s. Never blocks the caller: a slow or broken
+/// server must not stall startup or a command.
+///
+/// On success emits [`CoreEvent::McpStateChanged`] with the handle's live state;
+/// on failure emits [`CoreEvent::McpError`] plus a `Disconnected` state so the
+/// Tool/MCP manager surface (Section 8.3) reflects the outcome.
+pub fn spawn_connect(
+    handle: Arc<McpServerHandle>,
+    server_id: Uuid,
+    events: UnboundedSender<CoreEvent>,
+) {
+    tokio::spawn(async move {
+        let _ = events.send(CoreEvent::McpStateChanged {
+            server_id,
+            state: to_core_state(McpConnectionState::Connecting),
+        });
+        match handle.connect().await {
+            Ok(()) => {
+                let _ = events.send(CoreEvent::McpStateChanged {
+                    server_id,
+                    state: to_core_state(handle.state().await),
+                });
+            }
+            Err(err) => {
+                let _ = events.send(CoreEvent::McpError {
+                    server_id,
+                    message: err.to_string(),
+                });
+                let _ = events.send(CoreEvent::McpStateChanged {
+                    server_id,
+                    state: to_core_state(McpConnectionState::Disconnected),
+                });
+            }
+        }
+    });
+}
+
+/// Map the mcp-client connection state onto the core event enum (the two are
+/// intentionally-parallel enums kept in sync; see the mcp-client module docs).
+pub fn to_core_state(state: McpConnectionState) -> orchestrator_core::McpConnectionState {
+    match state {
+        McpConnectionState::Connecting => orchestrator_core::McpConnectionState::Connecting,
+        McpConnectionState::Connected => orchestrator_core::McpConnectionState::Connected,
+        McpConnectionState::Disconnected => orchestrator_core::McpConnectionState::Disconnected,
+    }
+}
 
 /// Application-wide state managed by Tauri and shared across command handlers.
 ///
@@ -38,9 +138,7 @@ pub struct AppState {
     /// 9.4). The core's `PermissionGate` registers a pending request when it
     /// emits a [`CoreEvent::PermissionRequested`]; the `resolve_permission`
     /// command delivers the user's decision here to unblock the awaiting
-    /// invocation. Phase 3 (FEAT-002) wires this seam; Phase 4 (FEAT-002) wires
-    /// the pipeline that constructs the `PermissionGate` around it in
-    /// `send_message`.
+    /// invocation.
     pub permission_registry: PermissionRegistry,
     /// The routing policy registry (architecture.md Section 6.4). Holds the
     /// selectable/persisted active automatic policy; the `send_message`
@@ -49,12 +147,11 @@ pub struct AppState {
     /// [`AppState::initialize`], defaulting to the built-in `autoDefault`.
     /// Behind `Arc` so it is cheaply cloned into the spawned pipeline task.
     pub policies: Arc<PolicyRegistry>,
-    /// Connected MCP server handles the pipeline attaches tools from
-    /// (architecture.md Section 5). EMPTY for now: the MCP server-manager wiring
-    /// that connects and tracks handles lands in Phase 5, so the pipeline runs
-    /// with zero connected servers (no tools attached) until then. The pipeline
-    /// tolerates an empty set (it simply skips tool attachment).
-    pub mcp_servers: Arc<Vec<Arc<McpServerHandle>>>,
+    /// The runtime MCP handle registry (architecture.md Section 5.3 / 8.3). The
+    /// MCP-manager commands add/replace/reconnect/teardown handles here and
+    /// `send_message` reads the live connected set from it, so the pipeline
+    /// attaches tools from whatever servers are currently connected.
+    pub mcp_servers: McpRegistry,
 }
 
 impl AppState {
@@ -85,18 +182,38 @@ impl AppState {
         // rows and pricing (mirroring `list_available_models_inner`), so nothing
         // provider-related is built here.
 
+        // Load persisted MCP server rows so the enabled ones can be connected in
+        // the background below (Section 5.3): startup must not block on a slow or
+        // broken server, so each connect is spawned and reports status via
+        // mcp_state_changed / mcp_error events.
+        let persisted_servers: Vec<McpServerConfig> =
+            McpServerRepo::new(&db).list().await.unwrap_or_default();
+
         let session_manager = Arc::new(SessionManager::new(db));
         let secret_store: Arc<dyn SecretStore + Send + Sync> = Arc::new(KeyringSecretStore::new());
         let (core_events, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mcp_servers = McpRegistry::new();
+
+        // Register every persisted server's handle and connect the enabled ones
+        // in the background (Section 5.3): a disabled server is registered but
+        // left disconnected until `set_mcp_enabled` turns it on.
+        for config in persisted_servers {
+            let id = config.id;
+            let enabled = config.enabled;
+            let handle = Arc::new(McpServerHandle::new(config));
+            mcp_servers.insert(id, handle.clone()).await;
+            if enabled {
+                spawn_connect(handle, id, core_events.clone());
+            }
+        }
+
         let state = AppState {
             session_manager,
             secret_store,
             core_events,
             permission_registry: PermissionRegistry::new(),
             policies: Arc::new(policies),
-            // No MCP server manager yet (Phase 5); the pipeline tolerates an
-            // empty set by attaching no tools.
-            mcp_servers: Arc::new(Vec::new()),
+            mcp_servers,
         };
         Ok((state, rx))
     }
@@ -115,11 +232,11 @@ impl AppState {
             secret_store,
             core_events,
             permission_registry: PermissionRegistry::new(),
-            // Tests default to the built-in `autoDefault` policy and no connected
-            // MCP servers; a test that needs a specific policy can override the
-            // field on the returned state.
+            // Tests default to the built-in `autoDefault` policy and an empty MCP
+            // registry; a test that needs a specific policy or a connected server
+            // can override the field on the returned state.
             policies: Arc::new(PolicyRegistry::new()),
-            mcp_servers: Arc::new(Vec::new()),
+            mcp_servers: McpRegistry::new(),
         };
         (state, rx)
     }

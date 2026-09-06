@@ -46,3 +46,8 @@ tauri-build = "2"
 # `--manifest-path`, where these resolve.
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# The Phase 5 (FEAT-001) command unit tests construct `Message` values, whose
+# `created_at` is a `chrono::DateTime<Utc>`. Concrete literal version (kept in
+# sync with the root `[workspace.dependencies]`) because this crate is under
+# `[workspace] exclude`.
+chrono = { version = "0.4", features = ["serde"] }

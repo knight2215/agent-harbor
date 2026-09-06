@@ -1,0 +1,7 @@
+{
+  "task_id": "task-phase-5-ui-surfaces",
+  "task_description": "Phase 5 (architecture.md Section 8, tasks.md P5.1-P5.7): implement the five React UI surfaces (chat, model selector, tool/MCP manager, agent config editor, conversation history) wired to real Tauri commands/events, plus the shared IPC + Zustand-store plumbing and the supporting Rust #[tauri::command] additions and least-privilege capability wiring. Flip README Phase 5 status to DONE. Frontend-heavy; local gate is prettier --check only (eslint/tsc/vitest + all cargo per-crate checks deferred to CI on ubuntu+windows). Work on branch phase-5-ui-surfaces off main.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null
+}

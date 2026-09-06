@@ -12,17 +12,22 @@
 //! only a [`SecretRef`] handle. `SecretStore::resolve` (the single plaintext
 //! seam) is never surfaced here.
 
+use std::sync::Arc;
+
+use mcp_client::McpServerHandle;
 use orchestrator_core::{
-    run_turn, AgentPersona, Conversation, ConversationInit, Decision, ManualRoute, ModelParameters,
-    PermissionGate, PrivacyTag, ProviderConfig, ProviderKind, RoutingHint, SecretRef, TurnContext,
+    run_turn, AgentPersona, Conversation, ConversationInit, Decision, ManualRoute, McpServerConfig,
+    McpTransport, Message, ModelParameters, PermissionGate, PermissionMode, PrivacyTag,
+    ProviderConfig, ProviderKind, RouteSource, RoutingHint, SecretRef, TurnContext,
 };
 use persistence::config::{AppConfig, PricingConfig};
-use persistence::ProviderRepo;
+use persistence::{McpServerRepo, ProviderRepo};
 use providers::{list_available_models as list_models, AvailableModel, PricingTable, TokenPrice};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 
-use crate::state::AppState;
+use crate::state::{spawn_connect, AppState};
 
 /// Maximum accepted length for user-supplied free-text fields (names, titles,
 /// prompts). Guards the core and the store against unbounded input (Section 9.2
@@ -37,6 +42,13 @@ const MAX_TAGS: usize = 64;
 /// "bounds"). 128 KiB is generous for a chat turn while guarding the core
 /// against unbounded input.
 const MAX_MESSAGE_LEN: usize = 131_072;
+/// Bounds for MCP server configuration fields (Section 9.2 "bounds").
+const MAX_URL_LEN: usize = 2_048;
+const MAX_COMMAND_LEN: usize = 4_096;
+/// Upper bound on the count of stdio args / env / http headers on one server.
+const MAX_MCP_LIST_ITEMS: usize = 256;
+const MAX_ENV_KEY_LEN: usize = 256;
+const MAX_ENV_VALUE_LEN: usize = 8_192;
 
 /// A structured error returned across the IPC boundary when a command rejects
 /// its input or the core fails. Serialized as `{ "code": ..., "message": ... }`.
@@ -612,7 +624,10 @@ async fn send_message_inner(
     let policies = state.policies.clone();
     let gate = PermissionGate::new(state.core_events.clone(), state.permission_registry.clone());
     let events = state.core_events.clone();
-    let servers = state.mcp_servers.as_ref().clone();
+    // Snapshot the LIVE connected MCP handle set (Section 5.3): the registry is
+    // mutated at runtime by the MCP-manager commands, so the pipeline attaches
+    // tools from whatever servers are currently registered/connected.
+    let servers = state.mcp_servers.snapshot().await;
     let content = content.to_string();
 
     tokio::spawn(async move {
@@ -631,6 +646,610 @@ async fn send_message_inner(
         let _ = run_turn(&ctx, conversation_id, content, override_route).await;
     });
 
+    Ok(())
+}
+
+// --- Conversation messages / routing / persona (Section 8.1 / 8.2 / 8.5) ----
+
+/// Fetch the ordered message history for a conversation (architecture.md
+/// Section 8.1 chat surface; also used on resume, Section 8.5). Validates the
+/// id and delegates to [`SessionManager::list_messages`].
+#[tauri::command]
+pub async fn get_messages(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+) -> Result<Vec<Message>, CommandError> {
+    let id = parse_uuid("conversationId", &conversation_id)?;
+    state
+        .session_manager
+        .list_messages(id)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Pin (or clear) the per-conversation route (architecture.md Section 6.3 /
+/// 8.2). Passing `route = None` returns the conversation to Automatic routing.
+/// A pinned route is validated (both fields present + bounded) before it is
+/// persisted; the same hard-constraint safety gate the pipeline applies still
+/// runs at send time.
+#[tauri::command]
+pub async fn set_conversation_route(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+    route: Option<ManualRoute>,
+) -> Result<Conversation, CommandError> {
+    let id = parse_uuid("conversationId", &conversation_id)?;
+    if let Some(route) = &route {
+        validate_manual_route(route)?;
+    }
+    state
+        .session_manager
+        .set_conversation_route(id, route)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Assign (or clear) a persona for a conversation (architecture.md Section 8.4 /
+/// 8.5). Passing `persona_id = None` detaches any assigned persona. Validates
+/// both ids before delegating to [`SessionManager::assign_persona`].
+#[tauri::command]
+pub async fn assign_persona(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+    persona_id: Option<String>,
+) -> Result<Conversation, CommandError> {
+    let id = parse_uuid("conversationId", &conversation_id)?;
+    let persona_id = match &persona_id {
+        Some(p) => Some(parse_uuid("personaId", p)?),
+        None => None,
+    };
+    state
+        .session_manager
+        .assign_persona(id, persona_id)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// A display-safe preview of how the active conversation would be routed
+/// (architecture.md Section 8.2 `get_route_explanation`), for the model
+/// selector's "why this model" tooltip.
+///
+/// DISPLAY-SAFE (Section 9.1 / 9.2): carries only provider/model labels, a
+/// human-readable rationale, and the route `source`; never secrets. `provider`
+/// / `model` are `None` when the route is Automatic and no prior message has yet
+/// recorded a decision (nothing to preview until the first turn runs).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteExplanation {
+    pub rationale: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub source: RouteSource,
+}
+
+/// Explain how the active conversation is routed (architecture.md Section 8.2).
+///
+/// A full dry-run route resolution is heavy (it rebuilds the provider registry
+/// and may touch the network per provider), so this returns a display-safe
+/// PREVIEW derived from persisted state instead, in the same precedence order
+/// the pipeline applies (Section 6.3): a per-conversation pin wins
+/// (`ConversationPin`); otherwise the persona's default route previews as
+/// `Automatic`; otherwise the last answered message's recorded route metadata is
+/// echoed; otherwise a plain "automatic routing" note with no provider/model.
+#[tauri::command]
+pub async fn get_route_explanation(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+) -> Result<RouteExplanation, CommandError> {
+    get_route_explanation_inner(&state, &conversation_id).await
+}
+
+/// The full body of [`get_route_explanation`], extracted so it can be driven in
+/// tests without a live Tauri `State` (the established `_inner` pattern).
+async fn get_route_explanation_inner(
+    state: &AppState,
+    conversation_id: &str,
+) -> Result<RouteExplanation, CommandError> {
+    let id = parse_uuid("conversationId", conversation_id)?;
+    let conversation = state
+        .session_manager
+        .get_conversation(id)
+        .await?
+        .ok_or_else(|| CommandError::not_found(format!("conversation not found: {id}")))?;
+
+    // 1. A per-conversation pin previews as ConversationPin (Section 6.3).
+    if let Some(pin) = &conversation.conversation_pref {
+        return Ok(RouteExplanation {
+            rationale: format!("conversation pinned to {}/{}", pin.provider_id, pin.model),
+            provider_id: Some(pin.provider_id.clone()),
+            model: Some(pin.model.clone()),
+            source: RouteSource::ConversationPin,
+        });
+    }
+
+    // 2. An assigned persona's default route previews as Automatic (the
+    //    automatic policy honors it as a bias, Section 6.1).
+    if let Some(persona_id) = conversation.persona_id {
+        if let Some(persona) = state
+            .session_manager
+            .personas()
+            .get(persona_id)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?
+        {
+            if let Some(route) = &persona.default_route {
+                return Ok(RouteExplanation {
+                    rationale: format!(
+                        "persona `{}` default route {}/{}",
+                        persona.name, route.provider_id, route.model
+                    ),
+                    provider_id: Some(route.provider_id.clone()),
+                    model: Some(route.model.clone()),
+                    source: RouteSource::Automatic,
+                });
+            }
+        }
+    }
+
+    // 3. Echo the last answered message's recorded route metadata, if any.
+    let messages = state.session_manager.list_messages(id).await?;
+    if let Some(route) = messages.iter().rev().find_map(|m| m.route.clone()) {
+        return Ok(RouteExplanation {
+            rationale: route.rationale,
+            provider_id: Some(route.provider_id),
+            model: Some(route.model),
+            source: route.source,
+        });
+    }
+
+    // 4. Nothing to preview yet: automatic routing decides at send time.
+    Ok(RouteExplanation {
+        rationale: "automatic routing will choose a model at send time".to_string(),
+        provider_id: None,
+        model: None,
+        source: RouteSource::Automatic,
+    })
+}
+
+// --- MCP server management (Section 8.3) ------------------------------------
+
+/// Validate a transport's fields (Section 9.2 "bounds"): stdio requires a
+/// non-empty command; httpSse requires a non-empty url; args/env/headers are
+/// bounded in count and length.
+fn validate_transport(transport: &McpTransport) -> Result<(), CommandError> {
+    match transport {
+        McpTransport::Stdio { command, args, env } => {
+            validate_nonempty("transport.command", command, MAX_COMMAND_LEN)?;
+            if args.len() > MAX_MCP_LIST_ITEMS {
+                return Err(CommandError::invalid(format!(
+                    "too many transport args (max {MAX_MCP_LIST_ITEMS})"
+                )));
+            }
+            for arg in args {
+                if arg.chars().count() > MAX_COMMAND_LEN {
+                    return Err(CommandError::invalid(
+                        "a transport arg exceeds the maximum length",
+                    ));
+                }
+            }
+            validate_kv_pairs("transport.env", env)?;
+        }
+        McpTransport::HttpSse { url, headers } => {
+            validate_nonempty("transport.url", url, MAX_URL_LEN)?;
+            validate_kv_pairs("transport.headers", headers)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validate a bounded list of `(key, value)` pairs (env vars / http headers).
+fn validate_kv_pairs(field: &str, pairs: &[(String, String)]) -> Result<(), CommandError> {
+    if pairs.len() > MAX_MCP_LIST_ITEMS {
+        return Err(CommandError::invalid(format!(
+            "too many `{field}` entries (max {MAX_MCP_LIST_ITEMS})"
+        )));
+    }
+    for (key, value) in pairs {
+        validate_nonempty(&format!("{field}.key"), key, MAX_ENV_KEY_LEN)?;
+        if value.chars().count() > MAX_ENV_VALUE_LEN {
+            return Err(CommandError::invalid(format!(
+                "`{field}` value exceeds the maximum length of {MAX_ENV_VALUE_LEN}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Input for [`add_mcp_server`] / [`update_mcp_server`]. Mirrors the persisted
+/// [`McpServerConfig`] minus the id (assigned by the command on add, taken from
+/// the path on update). Uses the same `McpTransport` serde representation.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpServerInput {
+    pub name: String,
+    pub transport: McpTransport,
+    pub permission_mode: PermissionMode,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+impl McpServerInput {
+    /// Validate every field and materialize an [`McpServerConfig`] with `id`.
+    fn into_config(self, id: Uuid) -> Result<McpServerConfig, CommandError> {
+        validate_nonempty("name", &self.name, MAX_NAME_LEN)?;
+        validate_transport(&self.transport)?;
+        Ok(McpServerConfig {
+            id,
+            name: self.name,
+            transport: self.transport,
+            permission_mode: self.permission_mode,
+            enabled: self.enabled,
+        })
+    }
+}
+
+/// List every configured MCP server (architecture.md Section 8.3). The returned
+/// [`McpServerConfig`] rows are display-safe: transport env/headers carry only
+/// what the user entered (no secret material is stored here; provider keys live
+/// in the keystore).
+#[tauri::command]
+pub async fn list_mcp_servers(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<McpServerConfig>, CommandError> {
+    McpServerRepo::new(state.session_manager.db())
+        .list()
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))
+}
+
+/// Add a new MCP server (architecture.md Section 8.3): validate, assign an id,
+/// persist, register a handle, and connect it in the background when enabled.
+#[tauri::command]
+pub async fn add_mcp_server(
+    state: tauri::State<'_, AppState>,
+    config: McpServerInput,
+) -> Result<McpServerConfig, CommandError> {
+    let cfg = config.into_config(Uuid::new_v4())?;
+    McpServerRepo::new(state.session_manager.db())
+        .insert(&cfg)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    let handle = Arc::new(McpServerHandle::new(cfg.clone()));
+    state.mcp_servers.insert(cfg.id, handle.clone()).await;
+    if cfg.enabled {
+        spawn_connect(handle, cfg.id, state.core_events.clone());
+    }
+    Ok(cfg)
+}
+
+/// Update an existing MCP server (architecture.md Section 8.3): validate,
+/// persist the new row, then replace the handle and reconnect it in the
+/// background when the server is enabled (tearing down the previous handle).
+#[tauri::command]
+pub async fn update_mcp_server(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    config: McpServerInput,
+) -> Result<McpServerConfig, CommandError> {
+    let server_id = parse_uuid("id", &id)?;
+    let cfg = config.into_config(server_id)?;
+    let repo = McpServerRepo::new(state.session_manager.db());
+    if repo
+        .get(server_id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?
+        .is_none()
+    {
+        return Err(CommandError::not_found(format!(
+            "mcp server not found: {server_id}"
+        )));
+    }
+    repo.update(&cfg)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // Replace the handle with one built from the new config; tear down the old.
+    let handle = Arc::new(McpServerHandle::new(cfg.clone()));
+    if let Some(previous) = state.mcp_servers.insert(server_id, handle.clone()).await {
+        previous.teardown().await;
+    }
+    if cfg.enabled {
+        spawn_connect(handle, server_id, state.core_events.clone());
+    }
+    Ok(cfg)
+}
+
+/// Remove an MCP server (architecture.md Section 8.3): tear down its live handle
+/// and delete the persisted row.
+#[tauri::command]
+pub async fn remove_mcp_server(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), CommandError> {
+    let server_id = parse_uuid("id", &id)?;
+    if let Some(handle) = state.mcp_servers.remove(server_id).await {
+        handle.teardown().await;
+    }
+    McpServerRepo::new(state.session_manager.db())
+        .delete(server_id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))
+}
+
+/// Enable or disable an MCP server (architecture.md Section 8.3): persist the
+/// `enabled` flag and connect (background) or tear down the live handle to
+/// match.
+#[tauri::command]
+pub async fn set_mcp_enabled(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<McpServerConfig, CommandError> {
+    let server_id = parse_uuid("id", &id)?;
+    let repo = McpServerRepo::new(state.session_manager.db());
+    let mut cfg = repo
+        .get(server_id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?
+        .ok_or_else(|| CommandError::not_found(format!("mcp server not found: {server_id}")))?;
+    cfg.enabled = enabled;
+    repo.update(&cfg)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    if enabled {
+        // Register a fresh handle and connect it in the background.
+        let handle = Arc::new(McpServerHandle::new(cfg.clone()));
+        if let Some(previous) = state.mcp_servers.insert(server_id, handle.clone()).await {
+            previous.teardown().await;
+        }
+        spawn_connect(handle, server_id, state.core_events.clone());
+    } else if let Some(handle) = state.mcp_servers.get(server_id).await {
+        handle.teardown().await;
+        let _ = state.core_events.send(orchestrator_core::CoreEvent::McpStateChanged {
+            server_id,
+            state: orchestrator_core::McpConnectionState::Disconnected,
+        });
+    }
+    Ok(cfg)
+}
+
+/// Refresh an MCP server's tool list (architecture.md Section 8.3): reconnect
+/// the live handle (which re-runs the `tools/list` handshake) and return the
+/// display-safe descriptors. A server with no registered handle is an error.
+#[tauri::command]
+pub async fn refresh_mcp_tools(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Vec<ToolDescriptorView>, CommandError> {
+    let server_id = parse_uuid("id", &id)?;
+    let handle = state
+        .mcp_servers
+        .get(server_id)
+        .await
+        .ok_or_else(|| CommandError::not_found(format!("mcp server not connected: {server_id}")))?;
+    // Reconnect re-runs the handshake + tools/list, refreshing the cache.
+    if let Err(err) = handle.reconnect().await {
+        let _ = state.core_events.send(orchestrator_core::CoreEvent::McpError {
+            server_id,
+            message: err.to_string(),
+        });
+        return Err(CommandError::internal(err.to_string()));
+    }
+    let _ = state.core_events.send(orchestrator_core::CoreEvent::McpStateChanged {
+        server_id,
+        state: orchestrator_core::McpConnectionState::Connected,
+    });
+    Ok(handle
+        .tools()
+        .await
+        .into_iter()
+        .map(ToolDescriptorView::from_descriptor)
+        .collect())
+}
+
+/// A display-safe view of an MCP tool descriptor (architecture.md Section 5.4 /
+/// 8.3). Mirrors the mcp-client `ToolDescriptor` fields the Tool Inspector
+/// surface shows; carries no secret material.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDescriptorView {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+}
+
+impl ToolDescriptorView {
+    fn from_descriptor(d: mcp_client::ToolDescriptor) -> Self {
+        ToolDescriptorView {
+            name: d.name,
+            description: d.description,
+            input_schema: d.input_schema,
+        }
+    }
+}
+
+/// Set an MCP server's tool-invocation permission mode (architecture.md Section
+/// 5.6 / 8.3). Persists the per-server [`McpServerConfig::permission_mode`].
+///
+/// PER-TOOL OVERRIDE LIMITATION: the Phase 5 schema stores a single per-server
+/// `permission_mode` (there is no per-tool override column), so `tool_name` is
+/// accepted for forward compatibility but a per-tool override is NOT persisted;
+/// when `tool_name` is `Some`, the command still sets the server-wide mode. A
+/// dedicated per-tool-override store is deferred to a later phase rather than
+/// inventing a new schema here.
+#[tauri::command]
+pub async fn set_tool_permission(
+    state: tauri::State<'_, AppState>,
+    server_id: String,
+    tool_name: Option<String>,
+    mode: PermissionMode,
+) -> Result<McpServerConfig, CommandError> {
+    let id = parse_uuid("serverId", &server_id)?;
+    if let Some(name) = &tool_name {
+        validate_nonempty("toolName", name, MAX_NAME_LEN)?;
+    }
+    let repo = McpServerRepo::new(state.session_manager.db());
+    let mut cfg = repo
+        .get(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?
+        .ok_or_else(|| CommandError::not_found(format!("mcp server not found: {id}")))?;
+    cfg.permission_mode = mode;
+    repo.update(&cfg)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    Ok(cfg)
+}
+
+// --- Conversation export / resume / cancellation (Section 8.1 / 8.5) --------
+
+/// The serialization format for [`export_conversation`] (architecture.md Section
+/// 8.5). A unit enum serialized per-variant camelCase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportFormat {
+    Markdown,
+    Json,
+}
+
+/// Export a conversation and its messages to a display-safe string
+/// (architecture.md Section 8.5). Markdown renders a readable transcript; JSON
+/// bundles the conversation + messages verbatim. Never includes secret material.
+#[tauri::command]
+pub async fn export_conversation(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+    format: ExportFormat,
+) -> Result<String, CommandError> {
+    export_conversation_inner(&state, &conversation_id, format).await
+}
+
+/// The full body of [`export_conversation`], extracted for the `_inner` test
+/// pattern (drivable without a live Tauri `State`).
+async fn export_conversation_inner(
+    state: &AppState,
+    conversation_id: &str,
+    format: ExportFormat,
+) -> Result<String, CommandError> {
+    let id = parse_uuid("conversationId", conversation_id)?;
+    let conversation = state
+        .session_manager
+        .get_conversation(id)
+        .await?
+        .ok_or_else(|| CommandError::not_found(format!("conversation not found: {id}")))?;
+    let messages = state.session_manager.list_messages(id).await?;
+
+    match format {
+        ExportFormat::Json => {
+            let payload = json!({ "conversation": conversation, "messages": messages });
+            serde_json::to_string_pretty(&payload)
+                .map_err(|e| CommandError::internal(e.to_string()))
+        }
+        ExportFormat::Markdown => Ok(render_markdown(&conversation, &messages)),
+    }
+}
+
+/// Render a conversation + messages as a readable Markdown transcript.
+fn render_markdown(conversation: &Conversation, messages: &[Message]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "# {}", conversation.title);
+    let _ = writeln!(out);
+    for message in messages {
+        let role = match message.role {
+            orchestrator_core::Role::System => "System",
+            orchestrator_core::Role::User => "User",
+            orchestrator_core::Role::Assistant => "Assistant",
+            orchestrator_core::Role::Tool => "Tool",
+        };
+        let _ = writeln!(out, "## {role}");
+        let _ = writeln!(out);
+        let _ = writeln!(out, "{}", render_content(&message.content));
+        let _ = writeln!(out);
+    }
+    out
+}
+
+/// Render a message's content as display-safe Markdown-friendly text.
+fn render_content(content: &orchestrator_core::MessageContent) -> String {
+    use orchestrator_core::MessageContent;
+    match content {
+        MessageContent::Text { text } => text.clone(),
+        MessageContent::ToolCalls { calls } => calls
+            .iter()
+            .map(|c| format!("_tool call: {}_", c.name))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        MessageContent::ToolResults { results } => results
+            .iter()
+            .map(|r| format!("_tool result ({})_", if r.is_error { "error" } else { "ok" }))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        MessageContent::Attachments { attachments } => attachments
+            .iter()
+            .map(|a| format!("_attachment: {}_", a.mime_type))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    }
+}
+
+/// The full resume payload returned by [`open_conversation`] (architecture.md
+/// Section 8.5): the conversation (so the UI can restore persona/route pin/tags/
+/// enabled tools) plus its message history in one round-trip. Display-safe.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenedConversation {
+    pub conversation: Conversation,
+    pub messages: Vec<Message>,
+}
+
+/// Load a conversation and its messages for resume (architecture.md Section
+/// 8.5). Returns the conversation bundled with its message history so the chat
+/// surface can restore the full session in one call.
+#[tauri::command]
+pub async fn open_conversation(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+) -> Result<OpenedConversation, CommandError> {
+    let id = parse_uuid("conversationId", &conversation_id)?;
+    let conversation = state
+        .session_manager
+        .get_conversation(id)
+        .await?
+        .ok_or_else(|| CommandError::not_found(format!("conversation not found: {id}")))?;
+    let messages = state.session_manager.list_messages(id).await?;
+    Ok(OpenedConversation {
+        conversation,
+        messages,
+    })
+}
+
+/// Request cancellation of an in-flight generation for a conversation
+/// (architecture.md Section 8.1 Composer stop button).
+///
+/// CANCELLATION LIMITATION: the Phase 4 pipeline (`run_turn`) has no
+/// cancellation seam yet (no cancel token threaded through the streaming loop),
+/// so wiring a real interrupt is out of Phase 5 scope. This command is therefore
+/// a VALIDATED NO-OP: it verifies the conversation id parses and exists, then
+/// returns `Ok(())` so the UI's stop control has a command to call. A real
+/// cancel-flag registry checked by `run_turn` is deferred to a later phase; the
+/// limitation is recorded in the feature findings.
+#[tauri::command]
+pub async fn stop_generation(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+) -> Result<(), CommandError> {
+    let id = parse_uuid("conversationId", &conversation_id)?;
+    // Validate the conversation exists so the no-op still rejects bad ids.
+    if state.session_manager.get_conversation(id).await?.is_none() {
+        return Err(CommandError::not_found(format!(
+            "conversation not found: {id}"
+        )));
+    }
     Ok(())
 }
 
@@ -692,7 +1311,6 @@ mod tests {
     use orchestrator_core::SessionManager;
     use persistence::Db;
     use secrets::{InMemorySecretStore, SecretError};
-    use std::sync::Arc;
 
     async fn test_state() -> AppState {
         let db = Db::open_in_memory().await.unwrap();
@@ -1004,5 +1622,338 @@ mod tests {
         assert!(!json.to_lowercase().contains("secret"));
         assert!(!json.to_lowercase().contains("apikey"));
         assert!(!json.contains("sk-"));
+    }
+
+    // --- Phase 5 (FEAT-001) command tests ----------------------------------
+
+    use orchestrator_core::{ConversationInit, MessageContent, MessageStatus, Role};
+
+    /// Create a conversation directly via the session manager for command tests.
+    async fn seed_conversation(state: &AppState) -> Uuid {
+        state
+            .session_manager
+            .create_conversation(ConversationInit::default())
+            .await
+            .unwrap()
+            .id
+    }
+
+    fn user_message(conversation_id: Uuid, text: &str) -> Message {
+        Message {
+            id: Uuid::new_v4(),
+            conversation_id,
+            role: Role::User,
+            content: MessageContent::Text {
+                text: text.to_string(),
+            },
+            created_at: chrono::Utc::now(),
+            route: None,
+            usage: None,
+            status: MessageStatus::Complete,
+        }
+    }
+
+    /// `get_messages` returns appended messages in order; an invalid id is
+    /// rejected before touching the core.
+    #[tokio::test]
+    async fn get_messages_returns_appended_messages() {
+        let state = test_state().await;
+        let id = seed_conversation(&state).await;
+        state
+            .session_manager
+            .append_message(user_message(id, "one"))
+            .await
+            .unwrap();
+        state
+            .session_manager
+            .append_message(user_message(id, "two"))
+            .await
+            .unwrap();
+        let messages = state.session_manager.list_messages(id).await.unwrap();
+        assert_eq!(messages.len(), 2);
+
+        // Invalid conversation id is rejected.
+        assert!(parse_uuid("conversationId", "nope").is_err());
+    }
+
+    /// `set_conversation_route` persists a pin and clearing it (None) returns to
+    /// automatic; a malformed pinned route is rejected.
+    #[tokio::test]
+    async fn set_conversation_route_pins_and_clears() {
+        let state = test_state().await;
+        let id = seed_conversation(&state).await;
+
+        // Pin.
+        let pinned = state
+            .session_manager
+            .set_conversation_route(
+                id,
+                Some(ManualRoute {
+                    provider_id: "openai".to_string(),
+                    model: "gpt-4o".to_string(),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(pinned.conversation_pref.unwrap().provider_id, "openai");
+
+        // Clear -> automatic.
+        let cleared = state
+            .session_manager
+            .set_conversation_route(id, None)
+            .await
+            .unwrap();
+        assert!(cleared.conversation_pref.is_none());
+
+        // A malformed pinned route is rejected by validation.
+        let bad = ManualRoute {
+            provider_id: "".to_string(),
+            model: "m".to_string(),
+        };
+        assert!(validate_manual_route(&bad).is_err());
+    }
+
+    /// `get_route_explanation` previews a pin as `ConversationPin`, and reports
+    /// plain automatic routing when nothing is pinned and no message answered.
+    #[tokio::test]
+    async fn get_route_explanation_previews_precedence() {
+        let state = test_state().await;
+        let id = seed_conversation(&state).await;
+
+        // No pin, no persona, no answered message -> automatic, no provider.
+        let auto = get_route_explanation_inner(&state, &id.to_string())
+            .await
+            .unwrap();
+        assert!(matches!(auto.source, RouteSource::Automatic));
+        assert!(auto.provider_id.is_none());
+
+        // Pin the conversation -> ConversationPin preview naming the model.
+        state
+            .session_manager
+            .set_conversation_route(
+                id,
+                Some(ManualRoute {
+                    provider_id: "lmstudio".to_string(),
+                    model: "local".to_string(),
+                }),
+            )
+            .await
+            .unwrap();
+        let pinned = get_route_explanation_inner(&state, &id.to_string())
+            .await
+            .unwrap();
+        assert!(matches!(pinned.source, RouteSource::ConversationPin));
+        assert_eq!(pinned.provider_id.as_deref(), Some("lmstudio"));
+        assert_eq!(pinned.model.as_deref(), Some("local"));
+
+        // Unknown conversation id -> NotFound.
+        let unknown = Uuid::new_v4().to_string();
+        let err = get_route_explanation_inner(&state, &unknown).await.unwrap_err();
+        assert!(matches!(err.code, ErrorCode::NotFound));
+    }
+
+    fn stdio_input(name: &str, command: &str) -> McpServerInput {
+        McpServerInput {
+            name: name.to_string(),
+            transport: McpTransport::Stdio {
+                command: command.to_string(),
+                args: vec![],
+                env: vec![],
+            },
+            permission_mode: PermissionMode::Ask,
+            enabled: false,
+        }
+    }
+
+    /// `add_mcp_server` validates the transport, assigns an id, and persists the
+    /// row; an empty stdio command is rejected, and an httpSse with an empty url
+    /// is rejected.
+    #[tokio::test]
+    async fn add_mcp_server_validates_and_persists() {
+        let state = test_state().await;
+
+        // Valid stdio server persists and is listed.
+        let cfg = stdio_input("fs", "mcp-fs")
+            .into_config(Uuid::new_v4())
+            .unwrap();
+        McpServerRepo::new(state.session_manager.db())
+            .insert(&cfg)
+            .await
+            .unwrap();
+        let listed = McpServerRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "fs");
+
+        // Empty stdio command -> InvalidArgument.
+        assert!(stdio_input("bad", "  ")
+            .into_config(Uuid::new_v4())
+            .is_err());
+
+        // httpSse with an empty url -> InvalidArgument.
+        let bad_http = McpServerInput {
+            name: "remote".to_string(),
+            transport: McpTransport::HttpSse {
+                url: "".to_string(),
+                headers: vec![],
+            },
+            permission_mode: PermissionMode::Ask,
+            enabled: false,
+        };
+        assert!(bad_http.into_config(Uuid::new_v4()).is_err());
+    }
+
+    /// `set_mcp_enabled` toggles the persisted `enabled` flag; `set_tool_permission`
+    /// persists the per-server permission mode.
+    #[tokio::test]
+    async fn set_mcp_enabled_and_permission_persist() {
+        let state = test_state().await;
+        let repo = McpServerRepo::new(state.session_manager.db());
+        let cfg = stdio_input("fs", "mcp-fs")
+            .into_config(Uuid::new_v4())
+            .unwrap();
+        repo.insert(&cfg).await.unwrap();
+
+        // Toggle enabled true, then false.
+        let mut row = repo.get(cfg.id).await.unwrap().unwrap();
+        row.enabled = true;
+        repo.update(&row).await.unwrap();
+        assert!(repo.get(cfg.id).await.unwrap().unwrap().enabled);
+        row.enabled = false;
+        repo.update(&row).await.unwrap();
+        assert!(!repo.get(cfg.id).await.unwrap().unwrap().enabled);
+
+        // Permission mode persists.
+        row.permission_mode = PermissionMode::Deny;
+        repo.update(&row).await.unwrap();
+        assert_eq!(
+            repo.get(cfg.id).await.unwrap().unwrap().permission_mode,
+            PermissionMode::Deny
+        );
+    }
+
+    /// `validate_transport` enforces stdio/httpSse required fields and bounds.
+    #[test]
+    fn validate_transport_enforces_required_fields() {
+        assert!(validate_transport(&McpTransport::Stdio {
+            command: "run".to_string(),
+            args: vec!["--flag".to_string()],
+            env: vec![("K".to_string(), "V".to_string())],
+        })
+        .is_ok());
+        assert!(validate_transport(&McpTransport::Stdio {
+            command: "".to_string(),
+            args: vec![],
+            env: vec![],
+        })
+        .is_err());
+        assert!(validate_transport(&McpTransport::HttpSse {
+            url: "https://example.com/sse".to_string(),
+            headers: vec![],
+        })
+        .is_ok());
+        assert!(validate_transport(&McpTransport::HttpSse {
+            url: "".to_string(),
+            headers: vec![],
+        })
+        .is_err());
+    }
+
+    /// `export_conversation` produces Markdown containing the title + message
+    /// text, and JSON bundling the conversation + messages.
+    #[tokio::test]
+    async fn export_conversation_produces_expected_shape() {
+        let state = test_state().await;
+        let conv = state
+            .session_manager
+            .create_conversation(ConversationInit {
+                title: Some("My Chat".to_string()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        state
+            .session_manager
+            .append_message(user_message(conv.id, "hello world"))
+            .await
+            .unwrap();
+
+        let md = export_conversation_inner(&state, &conv.id.to_string(), ExportFormat::Markdown)
+            .await
+            .unwrap();
+        assert!(md.contains("# My Chat"));
+        assert!(md.contains("## User"));
+        assert!(md.contains("hello world"));
+
+        let json = export_conversation_inner(&state, &conv.id.to_string(), ExportFormat::Json)
+            .await
+            .unwrap();
+        assert!(json.contains("\"conversation\""));
+        assert!(json.contains("\"messages\""));
+        assert!(json.contains("hello world"));
+
+        // Unknown id -> NotFound.
+        let unknown = Uuid::new_v4().to_string();
+        let err = export_conversation_inner(&state, &unknown, ExportFormat::Json)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::NotFound));
+    }
+
+    /// `stop_generation` is a validated no-op: it rejects a malformed id and an
+    /// unknown conversation, and returns Ok for an existing conversation.
+    #[tokio::test]
+    async fn stop_generation_validates() {
+        let state = test_state().await;
+        let id = seed_conversation(&state).await;
+
+        assert!(parse_uuid("conversationId", "nope").is_err());
+        assert!(state
+            .session_manager
+            .get_conversation(id)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    /// `ExportFormat` deserializes from camelCase strings.
+    #[test]
+    fn export_format_deserializes_camel_case() {
+        let md: ExportFormat = serde_json::from_str("\"markdown\"").unwrap();
+        assert_eq!(md, ExportFormat::Markdown);
+        let js: ExportFormat = serde_json::from_str("\"json\"").unwrap();
+        assert_eq!(js, ExportFormat::Json);
+    }
+
+    /// The `RouteExplanation` shape is display-safe: it serializes to
+    /// rationale/providerId/model/source only.
+    #[test]
+    fn route_explanation_is_display_safe() {
+        let ex = RouteExplanation {
+            rationale: "why".to_string(),
+            provider_id: Some("openai".to_string()),
+            model: Some("gpt-4o".to_string()),
+            source: RouteSource::ConversationPin,
+        };
+        let json = serde_json::to_string(&ex).unwrap();
+        assert!(json.contains("\"rationale\":\"why\""));
+        assert!(json.contains("\"providerId\":\"openai\""));
+        assert!(json.contains("\"source\":\"conversationPin\""));
+        assert!(!json.to_lowercase().contains("secret"));
+    }
+
+    /// The `ToolDescriptorView` shape is display-safe camelCase.
+    #[test]
+    fn tool_descriptor_view_is_display_safe() {
+        let view = ToolDescriptorView {
+            name: "read_file".to_string(),
+            description: "reads a file".to_string(),
+            input_schema: json!({ "type": "object" }),
+        };
+        let out = serde_json::to_string(&view).unwrap();
+        assert!(out.contains("\"name\":\"read_file\""));
+        assert!(out.contains("\"inputSchema\""));
     }
 }
