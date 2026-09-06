@@ -1,8 +1,22 @@
-//! Tauri shell binary (Phase 0 stub).
+//! Tauri shell binary (thin adapter over the reusable core libraries).
 //!
-//! Full wiring (managed state, `#[tauri::command]` handlers, event bridging,
-//! `tauri.conf.json`, and capability files) is added in a later feature. This
-//! stub only exists so the crate manifest is valid. It is not built offline
-//! (it depends on the external `tauri` crate, unreachable in the sandbox).
+//! This crate wires the managed application state, exposes the
+//! `#[tauri::command]` handlers, and bridges core events to Tauri's `emit`
+//! API. It depends on the external `tauri` crate, so it is built in CI (where
+//! crates.io is reachable) and is excluded from the offline default workspace
+//! build. See the workspace `Cargo.toml` for the offline-build rationale.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-fn main() {}
+mod commands;
+mod events;
+mod state;
+
+use state::AppState;
+
+fn main() {
+    tauri::Builder::default()
+        .manage(AppState::default())
+        .invoke_handler(tauri::generate_handler![commands::app_version])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}
