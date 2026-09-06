@@ -1,8 +1,16 @@
 [package]
 name = "tauri-app"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# These are intentionally concrete literals (kept in sync with the root
+# `[workspace.package]`: version = "0.1.0", edition = "2021", license = "MIT")
+# rather than `*.workspace = true` inheritance. This crate is under
+# `[workspace] exclude` in the root Cargo.toml (see NOTE below), so it is not a
+# member of any workspace. When CI builds it standalone via
+# `--manifest-path crates/tauri-app/Cargo.toml`, there is no workspace root to
+# inherit from, and `*.workspace = true` would fail to parse ("failed to find a
+# workspace root"). Making the crate self-contained keeps the manifest parseable.
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 
 # NOTE: This crate depends on the external `tauri` crate (plus serde/serde_json),
 # which resolves only where crates.io is reachable (CI). During the offline
