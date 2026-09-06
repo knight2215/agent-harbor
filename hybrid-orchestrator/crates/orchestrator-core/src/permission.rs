@@ -6,12 +6,12 @@
 //!
 //! - `Allow`  -> invoke immediately.
 //! - `Deny`   -> refuse; the bridge turns this into a structured tool-error
-//!               message so the turn does not crash.
+//!   message so the turn does not crash.
 //! - `Ask`    -> emit a [`CoreEvent::PermissionRequested`] on the core event
-//!               channel and BLOCK until the frontend resolves the request via
-//!               [`PermissionRegistry::resolve`] (wired to the tauri-app
-//!               `resolve_permission` command). The awaited [`Decision`] then
-//!               allows or denies the invocation.
+//!   channel and BLOCK until the frontend resolves the request via
+//!   [`PermissionRegistry::resolve`] (wired to the tauri-app
+//!   `resolve_permission` command). The awaited [`Decision`] then
+//!   allows or denies the invocation.
 //!
 //! The mechanism is framework-agnostic: it depends only on the core event
 //! channel (an `mpsc::UnboundedSender<CoreEvent>`) and `tokio` oneshot channels,
