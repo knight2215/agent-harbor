@@ -24,7 +24,7 @@ use crate::policy::{
     AvailableModel, ManualRoute, RouteSource, RoutingDecision, RoutingError, RoutingPolicy,
     RoutingRequest,
 };
-use crate::signals::{is_local_price, required_capabilities, requires_local};
+use crate::signals::{is_provably_local, required_capabilities, requires_local};
 
 /// Wraps an active automatic [`RoutingPolicy`] and enforces the Section 6.3
 /// manual-override precedence in front of it.
@@ -58,12 +58,14 @@ impl ManualOverrideResolver {
             .find(|m| m.provider_id == route.provider_id && m.model == route.model);
 
         // Privacy gate (Section 6.3): under a LocalOnly/Confidential tag, the
-        // manual route must resolve to a LOCAL candidate.
+        // manual route must resolve to a PROVABLY local candidate (fail-closed).
+        // A zero price is not accepted as proof of locality - see
+        // `crate::signals::is_provably_local` and the auto_default module doc.
         if requires_local(&req.privacy_tags) {
-            let is_local = candidate.is_some_and(|c| is_local_price(&c.price));
+            let is_local = candidate.is_some_and(|c| is_provably_local(c, &req.local_provider_ids));
             if !is_local {
                 return Err(RoutingError::ManualRouteRejected(format!(
-                    "manual route {}/{} would send local-only data to the cloud",
+                    "manual route {}/{} would send local-only data to a non-local model",
                     route.provider_id, route.model
                 )));
             }
@@ -84,11 +86,20 @@ impl ManualOverrideResolver {
             None => {
                 // No candidate row. If a privacy tag applied we already rejected
                 // above; otherwise a manual route to a model that is not in the
-                // available list cannot be validated for capabilities. Reject as
-                // unavailable so the caller surfaces a clear error rather than
-                // routing blind.
+                // freshly-enumerated `available` list cannot be validated for
+                // capabilities OR for locality, so we reject it as unavailable
+                // rather than routing BLIND. This is deliberate and fail-closed:
+                // `available` is re-enumerated per turn, so a transient
+                // enumeration gap (a provider slow/failing to list) surfaces as a
+                // clear "unavailable" error the caller can retry, instead of
+                // silently trusting a pin whose privacy/capability posture we
+                // cannot verify (Section 6.3 "manual routes still pass through
+                // hard-constraint validation"). We do NOT trust a named provider
+                // blind, because under a privacy tag that would risk leaking
+                // local-only data to a model we could not prove is local.
                 return Err(RoutingError::ManualRouteUnavailable(format!(
-                    "manual route {}/{} does not match any available model",
+                    "manual route {}/{} does not match any currently-available model \
+                     (it may be a transient enumeration gap; retry once the provider lists it)",
                     route.provider_id, route.model
                 )));
             }
@@ -159,6 +170,14 @@ mod tests {
     }
 
     fn request(available: Vec<AvailableModel>) -> RoutingRequest {
+        // Mirror the fixtures' intent: treat zero-priced candidates (the local
+        // LM Studio rows) as provably local. Tests exercising the leak case set
+        // `local_provider_ids` explicitly.
+        let local_provider_ids = available
+            .iter()
+            .filter(|m| m.price == TokenPrice::ZERO)
+            .map(|m| m.provider_id.clone())
+            .collect();
         RoutingRequest {
             messages: vec![ChatMessage::text(MessageRole::User, "hi")],
             privacy_tags: Vec::new(),
@@ -166,6 +185,7 @@ mod tests {
             manual_override: None,
             conversation_pref: None,
             available,
+            local_provider_ids,
             budget: None,
         }
     }
@@ -245,6 +265,24 @@ mod tests {
         let decision = resolver().decide(&req).await.unwrap();
         assert_eq!(decision.provider_id, "lmstudio");
         assert_eq!(decision.source, RouteSource::Manual);
+    }
+
+    #[tokio::test]
+    async fn manual_route_to_zero_priced_cloud_is_rejected_under_privacy_tag() {
+        // A manual pin to a zero-priced CLOUD model must be rejected under a
+        // LocalOnly tag: locality is decided by the provably-local set, not the
+        // price, so a mispriced cloud model can never leak local-only data.
+        let mut req = request(vec![model("openai", "gpt-4o", TokenPrice::ZERO)]);
+        // The default helper marked the zero-priced openai row local; clear it to
+        // model a cloud provider that is NOT provably local.
+        req.local_provider_ids = std::collections::BTreeSet::new();
+        req.privacy_tags = vec![PrivacyTag::LocalOnly];
+        req.manual_override = Some(ManualRoute {
+            provider_id: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+        });
+        let err = resolver().decide(&req).await.unwrap_err();
+        assert!(matches!(err, RoutingError::ManualRouteRejected(_)));
     }
 
     #[tokio::test]

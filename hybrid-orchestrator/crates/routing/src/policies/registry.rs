@@ -130,6 +130,8 @@ mod tests {
                 model("openai", "gpt-4o", TokenPrice::new(2.5, 10.0)),
                 model("lmstudio", "llama", TokenPrice::ZERO),
             ],
+            // The local LM Studio row is provably local here.
+            local_provider_ids: ["lmstudio".to_string()].into_iter().collect(),
             budget: None,
         }
     }

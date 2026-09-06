@@ -30,7 +30,7 @@ use futures_util::stream::{self, BoxStream};
 use mcp_client::McpServerHandle;
 use orchestrator_core::{
     run_turn, ConversationInit, CoreEvent, Decision, MessageContent, MessageStatus, PermissionGate,
-    PermissionRegistry, Role, RouteSource, SessionManager, TurnContext,
+    PermissionRegistry, PipelineError, PrivacyTag, Role, RouteSource, SessionManager, TurnContext,
 };
 use persistence::Db;
 use providers::{
@@ -228,6 +228,9 @@ async fn automatic_routing_runs_tool_loop_and_persists_route() {
         gate,
         events: tx.clone(),
         available: available_models(),
+        // No privacy tags in this turn, so locality is not exercised; the mock
+        // provider is nonetheless declared local for completeness.
+        local_provider_ids: [PROVIDER_ID.to_string()].into_iter().collect(),
     };
 
     let message = run_turn(&ctx, conversation.id, "please echo hello".to_string(), None)
@@ -305,6 +308,7 @@ async fn manual_override_records_manual_source() {
         gate,
         events: tx.clone(),
         available: available_models(),
+        local_provider_ids: [PROVIDER_ID.to_string()].into_iter().collect(),
     };
 
     let override_route = orchestrator_core::ManualRoute {
@@ -357,6 +361,7 @@ async fn ask_mode_blocks_then_unblocks_within_pipeline() {
     let conv_id = conversation.id;
     let handle_task = handle.clone();
     let available = available_models();
+    let local_provider_ids = [PROVIDER_ID.to_string()].into_iter().collect();
     let task = tokio::spawn(async move {
         let ctx = TurnContext {
             session_manager: &session_clone,
@@ -366,6 +371,7 @@ async fn ask_mode_blocks_then_unblocks_within_pipeline() {
             gate,
             events: tx_task,
             available,
+            local_provider_ids,
         };
         run_turn(&ctx, conv_id, "please echo hi".to_string(), None).await
     });
@@ -395,4 +401,78 @@ async fn ask_mode_blocks_then_unblocks_within_pipeline() {
         MessageContent::Text { text } => assert_eq!(text, "Done."),
         other => panic!("unexpected content: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn routing_error_emits_message_error_and_persists_error_status() {
+    // The failure side of the pipeline: a LocalOnly conversation whose only
+    // candidate is NOT provably local makes routing FAIL CLOSED with
+    // PrivacyConstraintUnsatisfiable. Assert the pipeline emits MessageError and
+    // persists an Error-status assistant message (its own contribution, distinct
+    // from the routing-crate unit tests that only cover the RoutingError itself).
+    let session_manager = SessionManager::new(Db::open_in_memory().await.unwrap());
+    let conversation = session_manager
+        .create_conversation(ConversationInit {
+            privacy_tags: vec![PrivacyTag::LocalOnly],
+            ..ConversationInit::default()
+        })
+        .await
+        .unwrap();
+
+    let (tx, mut rx) = unbounded_channel();
+
+    // The scripted provider is never reached: routing fails before any call.
+    let providers = provider_registry(vec![text_response("unreachable")]);
+    let policies = routing::PolicyRegistry::new();
+    let gate = PermissionGate::new(tx.clone(), PermissionRegistry::new());
+
+    // A single CLOUD candidate (nonzero price) and, crucially, an EMPTY
+    // provably-local set: nothing can satisfy the LocalOnly tag.
+    let available = vec![AvailableModel {
+        provider_id: PROVIDER_ID.to_string(),
+        model: MODEL.to_string(),
+        capabilities: Capabilities {
+            tools: false,
+            streaming: false,
+            ..Capabilities::default()
+        },
+        price: TokenPrice::new(2.5, 10.0),
+    }];
+
+    let ctx = TurnContext {
+        session_manager: &session_manager,
+        policies: &policies,
+        providers: &providers,
+        servers: Vec::new(),
+        gate,
+        events: tx.clone(),
+        available,
+        local_provider_ids: std::collections::BTreeSet::new(),
+    };
+
+    let err = run_turn(&ctx, conversation.id, "secret data".to_string(), None)
+        .await
+        .expect_err("routing must fail closed under LocalOnly with no local model");
+    assert!(matches!(err, PipelineError::Routing(_)));
+
+    // A MessageError was emitted over the event channel.
+    let events = drain(&mut rx);
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, CoreEvent::MessageError { .. })),
+        "MessageError emitted: {events:?}"
+    );
+
+    // An Error-status assistant message was persisted so the record is complete.
+    let persisted = session_manager
+        .list_messages(conversation.id)
+        .await
+        .unwrap();
+    let assistant = persisted
+        .iter()
+        .find(|m| m.role == Role::Assistant)
+        .expect("error-status assistant message persisted");
+    assert_eq!(assistant.status, MessageStatus::Error);
+    assert!(assistant.route.is_none());
 }

@@ -12,9 +12,25 @@
 //! Tauri command derives it from the user-entered per-provider rates persisted
 //! in the versioned `AppConfig` pricing table (architecture.md Section 6.2 /
 //! 10.4), seeded with bundled defaults per `ProviderKind`. Local providers
-//! (LM Studio) default to [`providers::TokenPrice::ZERO`], so a zero price is
-//! the robust "this is a local, no-cost model" signal this crate relies on (see
-//! [`is_local_price`] and the [`crate::policies::auto_default`] module doc).
+//! (LM Studio) default to [`providers::TokenPrice::ZERO`], so a zero price is a
+//! reasonable "this is a no-cost model" signal for the COST dimension (see
+//! [`is_local_price`]).
+//!
+//! ## Locality is COST-independent for the privacy gate
+//!
+//! A zero price is NOT trusted as proof of locality for the privacy hard
+//! constraint (architecture.md Section 6.2). Price is a cost signal, and a
+//! misconfigured or deliberately zero-priced CLOUD provider would otherwise
+//! read as "local" and be allowed under a `LocalOnly`/`Confidential` tag, which
+//! is exactly the leak the fail-closed rule exists to prevent. Instead the
+//! caller supplies the set of provably-local provider instance ids
+//! ([`RoutingRequest::local_provider_ids`], derived from the concrete
+//! `ProviderKind` at candidate-enumeration time), and [`is_provably_local`]
+//! keys off THAT set. Locality is therefore fail-closed: a candidate whose id
+//! is not in the provably-local set is treated as non-local regardless of its
+//! price.
+
+use std::collections::BTreeSet;
 
 use providers::{AvailableModel, ChatMessage, MessageRole, TokenPrice};
 
@@ -192,13 +208,27 @@ pub fn requires_local(privacy_tags: &[PrivacyTag]) -> bool {
         .any(|t| matches!(t, PrivacyTag::LocalOnly | PrivacyTag::Confidential))
 }
 
-/// Whether `price` marks a LOCAL, zero-cost model (architecture.md Section 6.2:
-/// "Local providers such as LM Studio default to zero token cost"). This is the
-/// robust locality signal the policies use (see the
-/// [`crate::policies::auto_default`] module doc for why price is preferred over
-/// guessing from a provider id).
+/// Whether `price` marks a zero-COST model (architecture.md Section 6.2:
+/// "Local providers such as LM Studio default to zero token cost"). This drives
+/// the COST signal only. It is deliberately NOT used to decide locality for the
+/// privacy hard constraint - see [`is_provably_local`] and the module doc for
+/// why a zero price is not trusted as proof of locality.
 pub fn is_local_price(price: &TokenPrice) -> bool {
     *price == TokenPrice::ZERO
+}
+
+/// Whether `candidate` is PROVABLY local for the privacy hard constraint
+/// (architecture.md Section 6.2). Locality is decided by membership in the
+/// caller-supplied `local_provider_ids` set (derived from the concrete
+/// `ProviderKind` when the candidate list is enumerated), NOT by price. This is
+/// fail-closed: a candidate whose provider id is not known to be local is
+/// treated as non-local, so a mispriced or zero-priced cloud model can never
+/// satisfy a `LocalOnly`/`Confidential` tag.
+pub fn is_provably_local(
+    candidate: &AvailableModel,
+    local_provider_ids: &BTreeSet<String>,
+) -> bool {
+    local_provider_ids.contains(&candidate.provider_id)
 }
 
 /// A rough token estimate for the prompt: ~4 chars per token (the common OpenAI
@@ -271,6 +301,7 @@ mod tests {
             manual_override: None,
             conversation_pref: None,
             available: Vec::new(),
+            local_provider_ids: BTreeSet::new(),
             budget: None,
         }
     }
@@ -354,6 +385,23 @@ mod tests {
         let local = model("local", TokenPrice::ZERO, Capabilities::default());
         assert_eq!(estimate_cost(&req, &local, TaskComplexity::High), 0.0);
         assert!(is_local_price(&local.price));
+    }
+
+    #[test]
+    fn provable_locality_keys_off_the_set_not_price() {
+        // A zero-priced CLOUD model absent from the local set is NOT provably
+        // local (fail-closed); a model present in the set is, regardless of price.
+        let cloud_zero = model("cloud", TokenPrice::ZERO, Capabilities::default());
+        let local_priced = model(
+            "lmstudio",
+            TokenPrice::new(0.1, 0.2),
+            Capabilities::default(),
+        );
+        let local_ids: BTreeSet<String> = ["lmstudio".to_string()].into_iter().collect();
+        assert!(!is_provably_local(&cloud_zero, &local_ids));
+        assert!(is_provably_local(&local_priced, &local_ids));
+        // Empty set => nothing is provably local (fail-closed).
+        assert!(!is_provably_local(&local_priced, &BTreeSet::new()));
     }
 
     #[test]

@@ -13,6 +13,8 @@
 //! Those crates remain the single source of truth; this module only re-exports
 //! them for ergonomics.
 
+use std::collections::BTreeSet;
+
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
@@ -45,6 +47,14 @@ pub struct RoutingRequest {
     /// The candidate provider/model list with capabilities + price
     /// (`providers::list_available_models`, Section 6.1 / 8.2).
     pub available: Vec<AvailableModel>,
+    /// The provider instance ids that are PROVABLY local (architecture.md
+    /// Section 6.2). The caller derives this from each candidate's concrete
+    /// `ProviderKind` (LM Studio, and a loopback GenericOpenAI endpoint) when it
+    /// enumerates `available`, so routing can decide the privacy hard constraint
+    /// on provable locality rather than trusting a zero price. Locality is
+    /// FAIL-CLOSED: an id absent from this set is treated as non-local under a
+    /// `LocalOnly`/`Confidential` tag.
+    pub local_provider_ids: BTreeSet<String>,
     /// Optional token/price budget signal (Section 6.1).
     pub budget: Option<CostBudget>,
 }

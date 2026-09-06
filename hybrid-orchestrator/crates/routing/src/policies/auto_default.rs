@@ -14,19 +14,34 @@
 //!    (Section 6.2), biased by the persona `routing_hint` and the `CostBudget`,
 //!    then pick the best and record a human-readable rationale.
 //!
-//! ## Determining locality
+//! ## Determining locality (fail-closed)
 //!
 //! [`providers::AvailableModel`] has no explicit `is_local` marker, and adding
-//! one would change the `providers` public API. Instead we use the ROBUST price
-//! signal already guaranteed by the pricing table: local providers (LM Studio,
-//! and any user-unpriced GenericOpenAI endpoint) resolve to
-//! [`providers::TokenPrice::ZERO`] (architecture.md Section 6.2:
-//! "Local providers such as LM Studio default to zero token cost"), whereas
-//! cloud kinds seed nonzero bundled defaults. So `price == ZERO` is treated as
-//! "local" (see [`crate::signals::is_local_price`]). This needs no change to the
-//! `providers` API and degrades safely: if a user deliberately zero-prices a
-//! cloud model they have declared it free/local for routing purposes, which is
-//! exactly the intent a zero price expresses.
+//! one would change the `providers` public API. A zero price is NOT trusted as
+//! proof of locality for the privacy hard constraint: price is a COST signal,
+//! and a misconfigured or deliberately zero-priced CLOUD provider would
+//! otherwise read as "local" and be permitted under a `LocalOnly`/`Confidential`
+//! tag - the exact leak the fail-closed rule exists to prevent. Instead the
+//! caller supplies [`RoutingRequest::local_provider_ids`] (the set of provably
+//! local provider instance ids, derived from each candidate's concrete
+//! `ProviderKind` at enumeration time), and the privacy filter keys off THAT set
+//! via [`crate::signals::is_provably_local`]. Locality is fail-closed: a
+//! candidate whose id is not in the provably-local set is treated as non-local
+//! regardless of its price, so an ambiguous candidate can never satisfy a
+//! privacy tag. The zero-price signal still drives the COST ranking (a free
+//! model is preferred on cost), which is independent of the privacy gate.
+//!
+//! ## Persona default route
+//!
+//! When no manual override or conversation pin applies (those are handled by the
+//! [`crate::policies::manual_override`] resolver that wraps this policy), a
+//! persona's [`domain::AgentPersona::default_route`] is honored as a soft
+//! preference BELOW the hard-constraint filter (architecture.md Section 6.1 /
+//! 8.4): if the persona names a preferred provider/model and that candidate
+//! survived the capability + privacy filter, it is selected directly with a
+//! rationale naming the persona default. It never overrides a privacy or
+//! capability constraint - a default route that was filtered out simply does not
+//! apply and ranking proceeds normally.
 
 use async_trait::async_trait;
 
@@ -34,7 +49,7 @@ use crate::policy::{
     AvailableModel, RouteSource, RoutingDecision, RoutingError, RoutingPolicy, RoutingRequest,
 };
 use crate::signals::{
-    estimate_complexity, estimate_cost, is_local_price, required_capabilities, requires_local,
+    estimate_complexity, estimate_cost, is_provably_local, required_capabilities, requires_local,
     within_budget, RequiredCapabilities, TaskComplexity,
 };
 use domain::RoutingHint;
@@ -126,17 +141,19 @@ impl AutoDefaultPolicy {
         }
 
         if local_required {
+            // Locality is decided by PROVABLE membership in the caller-supplied
+            // local set, never by a zero price (Section 6.2 fail-closed).
             let local: Vec<&AvailableModel> = cap_survivors
                 .iter()
                 .copied()
-                .filter(|m| is_local_price(&m.price))
+                .filter(|m| is_provably_local(m, &req.local_provider_ids))
                 .collect();
             if local.is_empty() {
                 // FAIL CLOSED: never fall back to a cloud model under a
                 // LocalOnly/Confidential tag (Section 6.2).
                 return Err(RoutingError::PrivacyConstraintUnsatisfiable(
-                    "a local-only/confidential tag applies but no local model \
-                     (zero-priced) is available"
+                    "a local-only/confidential tag applies but no provably-local \
+                     model is available"
                         .to_string(),
                 ));
             }
@@ -160,6 +177,27 @@ impl RoutingPolicy for AutoDefaultPolicy {
 
         // Phase 1: hard-constraint filter (fails closed on privacy).
         let survivors = Self::filter_candidates(req, required, local_required)?;
+
+        // Persona default route (Section 6.1 / 8.4): when it survived the
+        // hard-constraint filter, honor it as a preference below the pin/override
+        // (which the manual resolver handles) and above automatic ranking. It
+        // NEVER overrides a privacy/capability constraint - a filtered-out
+        // default simply does not apply.
+        if let Some(default_route) = req.persona.as_ref().and_then(|p| p.default_route.as_ref()) {
+            if let Some(model) = survivors.iter().copied().find(|m| {
+                m.provider_id == default_route.provider_id && m.model == default_route.model
+            }) {
+                return Ok(RoutingDecision {
+                    provider_id: model.provider_id.clone(),
+                    model: model.model.clone(),
+                    rationale: format!(
+                        "persona default route {}/{} (satisfies the hard-constraint filter)",
+                        model.provider_id, model.model
+                    ),
+                    source: RouteSource::Automatic,
+                });
+            }
+        }
 
         // Persona hint biases the quality/cost blend (Section 6.2 / 7.1).
         let hint = req.persona.as_ref().and_then(|p| p.routing_hint);
@@ -207,7 +245,13 @@ impl RoutingPolicy for AutoDefaultPolicy {
                 } else {
                     1.0
                 };
-                let local = is_local_price(&model.price);
+                // `local` here means "provably local" (used for the PreferLocal
+                // nudge and the rationale), decided by the provably-local set
+                // rather than a zero price - the same fail-closed signal the
+                // privacy filter uses. Cost preference is captured separately by
+                // `cost_score`, so a zero-priced cloud model is still preferred
+                // on COST without being mislabeled "local".
+                let local = is_provably_local(model, &req.local_provider_ids);
                 let mut score = quality_weight * quality + cost_weight * cost_score;
                 // A PreferLocal hint gives local models a small explicit nudge.
                 if matches!(hint, Some(RoutingHint::PreferLocal)) && local {
@@ -292,7 +336,10 @@ fn build_rationale(
         parts.push(format!("persona hint {hint:?}"));
     }
     if best.local {
-        parts.push("chose a local (zero-cost) model".to_string());
+        parts.push("chose a local model".to_string());
+    }
+    if best.cost <= 0.0 {
+        parts.push("zero estimated cost".to_string());
     } else {
         parts.push(format!("estimated cost {:.4}", best.cost));
         if req.budget.is_some() {
@@ -339,6 +386,14 @@ mod tests {
     }
 
     fn request(messages: Vec<ChatMessage>, available: Vec<AvailableModel>) -> RoutingRequest {
+        // By default treat every zero-priced candidate as provably local, which
+        // matches the intent of these fixtures (LM Studio at zero price). Tests
+        // that exercise the leak case set `local_provider_ids` explicitly.
+        let local_provider_ids = available
+            .iter()
+            .filter(|m| m.price == TokenPrice::ZERO)
+            .map(|m| m.provider_id.clone())
+            .collect();
         RoutingRequest {
             messages,
             privacy_tags: Vec::new(),
@@ -346,6 +401,7 @@ mod tests {
             manual_override: None,
             conversation_pref: None,
             available,
+            local_provider_ids,
             budget: None,
         }
     }
@@ -487,6 +543,118 @@ mod tests {
         let req = request(vec![ChatMessage::text(MessageRole::User, "hi")], vec![]);
         let err = AutoDefaultPolicy::new().decide(&req).await.unwrap_err();
         assert!(matches!(err, RoutingError::NoCandidate(_)));
+    }
+
+    #[tokio::test]
+    async fn zero_priced_cloud_is_not_local_under_privacy_tag() {
+        // A cloud model that a user (mis)priced at zero must NOT be treated as
+        // local under a LocalOnly tag: locality is decided by the provably-local
+        // set, not the price. With no provably-local candidate the policy FAILS
+        // CLOSED rather than leaking to the mispriced cloud model.
+        let mut req = request(
+            vec![ChatMessage::text(MessageRole::User, "secret data")],
+            vec![model(
+                "openai",
+                "gpt-4o",
+                TokenPrice::ZERO,
+                caps(true, true, Some(128_000)),
+            )],
+        );
+        // The default helper would have marked the zero-priced openai row local;
+        // clear it to model a cloud provider that is NOT provably local.
+        req.local_provider_ids = std::collections::BTreeSet::new();
+        req.privacy_tags = vec![PrivacyTag::LocalOnly];
+        let err = AutoDefaultPolicy::new().decide(&req).await.unwrap_err();
+        assert!(matches!(
+            err,
+            RoutingError::PrivacyConstraintUnsatisfiable(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn priced_local_is_allowed_under_privacy_tag_when_provably_local() {
+        // A local model the user gave a nonzero price is still routable under a
+        // LocalOnly tag because locality comes from the provably-local set.
+        let mut req = request(
+            vec![ChatMessage::text(MessageRole::User, "secret data")],
+            vec![model(
+                "lmstudio",
+                "llama",
+                TokenPrice::new(0.1, 0.2),
+                caps(true, false, Some(8_000)),
+            )],
+        );
+        req.local_provider_ids = ["lmstudio".to_string()].into_iter().collect();
+        req.privacy_tags = vec![PrivacyTag::Confidential];
+        let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
+        assert_eq!(decision.provider_id, "lmstudio");
+    }
+
+    #[tokio::test]
+    async fn persona_default_route_is_honored_when_it_survives_filter() {
+        use domain::{AgentPersona, ManualRoute, ModelParameters};
+        // Two adequate cloud models at low complexity; automatic ranking would
+        // prefer the cheaper one, but the persona default route pins the pricey
+        // one and it survives the (no-privacy) filter, so it wins.
+        let cheap = model(
+            "cheap",
+            "mini",
+            TokenPrice::new(0.5, 1.5),
+            caps(true, true, Some(128_000)),
+        );
+        let pricey = model(
+            "pricey",
+            "max",
+            TokenPrice::new(5.0, 20.0),
+            caps(true, true, Some(128_000)),
+        );
+        let mut req = request(
+            vec![ChatMessage::text(MessageRole::User, "hi")],
+            vec![cheap, pricey],
+        );
+        req.persona = Some(AgentPersona {
+            id: Default::default(),
+            name: "p".to_string(),
+            system_prompt: String::new(),
+            default_route: Some(ManualRoute {
+                provider_id: "pricey".to_string(),
+                model: "max".to_string(),
+            }),
+            routing_hint: None,
+            allowed_tool_servers: Vec::new(),
+            parameters: ModelParameters::default(),
+        });
+        let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
+        assert_eq!(decision.provider_id, "pricey");
+        assert_eq!(decision.source, RouteSource::Automatic);
+        assert!(decision.rationale.contains("persona default route"));
+    }
+
+    #[tokio::test]
+    async fn persona_default_route_ignored_when_filtered_out() {
+        use domain::{AgentPersona, ManualRoute, ModelParameters};
+        // The persona default names a cloud model, but a LocalOnly tag filters it
+        // out. The default must NOT override the privacy constraint: the local
+        // model is chosen instead.
+        let mut req = request(
+            vec![ChatMessage::text(MessageRole::User, "secret")],
+            vec![cloud(), local()],
+        );
+        req.privacy_tags = vec![PrivacyTag::LocalOnly];
+        req.persona = Some(AgentPersona {
+            id: Default::default(),
+            name: "p".to_string(),
+            system_prompt: String::new(),
+            default_route: Some(ManualRoute {
+                provider_id: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+            }),
+            routing_hint: None,
+            allowed_tool_servers: Vec::new(),
+            parameters: ModelParameters::default(),
+        });
+        let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
+        assert_eq!(decision.provider_id, "lmstudio");
     }
 
     #[tokio::test]

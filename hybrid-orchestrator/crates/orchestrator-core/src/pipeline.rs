@@ -18,7 +18,9 @@
 //!    persisted messages, prepending the persona `system_prompt` as a leading
 //!    `System` message when present.
 //! 3. Build a [`RoutingRequest`] from the conversation, persona, the per-message
-//!    override, and the supplied candidate models, then resolve a
+//!    override, the supplied candidate models, and the provably-local provider
+//!    id set (so a `LocalOnly`/`Confidential` tag is enforced on provable
+//!    locality, never a zero price), then resolve a
 //!    [`routing::RoutingDecision`] via the [`PolicyRegistry`]. A
 //!    [`routing::RoutingError`] emits [`CoreEvent::MessageError`] and persists an
 //!    `Error`-status message.
@@ -41,6 +43,7 @@
 //! Any failure along the way emits [`CoreEvent::MessageError`] and persists an
 //! `Error`-status assistant message so the conversation record is consistent.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -100,6 +103,14 @@ pub struct TurnContext<'a> {
     /// The caller supplies this (e.g. from `providers::list_available_models`),
     /// keeping the network-touching enumeration out of the pipeline.
     pub available: Vec<AvailableModel>,
+    /// The provider instance ids that are PROVABLY local (architecture.md
+    /// Section 6.2). The caller derives this from each configured provider's
+    /// concrete `ProviderKind` (LM Studio, and a loopback GenericOpenAI
+    /// endpoint) so routing can enforce the privacy hard constraint on provable
+    /// locality rather than trusting a zero price. May be EMPTY, in which case
+    /// no candidate is provably local and any `LocalOnly`/`Confidential` tag
+    /// fails closed.
+    pub local_provider_ids: BTreeSet<String>,
 }
 
 /// Failure of an assembled turn. Every variant is display-safe (Section 9.1);
@@ -232,6 +243,16 @@ async fn run_turn_inner(
         manual_override,
         conversation_pref: conversation.conversation_pref.clone(),
         available: ctx.available.clone(),
+        local_provider_ids: ctx.local_provider_ids.clone(),
+        // DEFERRED (no schema yet): a `CostBudget` needs a persisted source (a
+        // per-conversation or per-period budget on `Conversation`/`AppConfig`),
+        // which does not exist in the Phase 4 data model. The cost SIGNAL is
+        // fully wired and unit-tested in the routing crate (`estimate_cost` /
+        // `within_budget` / the out-of-budget penalty), so it activates the
+        // moment a budget source is threaded here; until then a budget-less turn
+        // is the correct behavior (an absent budget is a valid "no budget"
+        // signal). Populating a real budget is tracked with persona/config
+        // budgets (a later phase), not Phase 4.
         budget: None,
     };
     let decision = ctx

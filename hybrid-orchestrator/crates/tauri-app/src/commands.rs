@@ -14,7 +14,7 @@
 
 use orchestrator_core::{
     run_turn, AgentPersona, Conversation, ConversationInit, Decision, ManualRoute, ModelParameters,
-    PermissionGate, PrivacyTag, ProviderConfig, RoutingHint, SecretRef, TurnContext,
+    PermissionGate, PrivacyTag, ProviderConfig, ProviderKind, RoutingHint, SecretRef, TurnContext,
 };
 use persistence::config::{AppConfig, PricingConfig};
 use persistence::ProviderRepo;
@@ -497,6 +497,50 @@ fn pricing_table_from_config(config: &PricingConfig) -> PricingTable {
     table
 }
 
+/// Derive the set of provider instance ids that are PROVABLY local
+/// (architecture.md Section 6.2), from the concrete [`ProviderKind`] of each
+/// configured provider. This is the fail-closed locality signal routing uses
+/// for the privacy hard constraint (instead of trusting a zero price, which a
+/// misconfigured cloud provider could carry):
+///
+///   - [`ProviderKind::LmStudio`] runs on the local machine, so it is always
+///     local.
+///   - [`ProviderKind::GenericOpenAI`] is local ONLY when its endpoint is a
+///     loopback host (`localhost` / `127.0.0.1` / `[::1]`); a generic endpoint
+///     pointed at a remote host is treated as cloud.
+///   - every other kind is cloud.
+fn local_provider_ids(configs: &[ProviderConfig]) -> std::collections::BTreeSet<String> {
+    configs
+        .iter()
+        .filter(|cfg| match cfg.kind {
+            ProviderKind::LmStudio => true,
+            ProviderKind::GenericOpenAI => {
+                cfg.base_url.as_deref().is_some_and(is_loopback_endpoint)
+            }
+            _ => false,
+        })
+        .map(|cfg| cfg.id.clone())
+        .collect()
+}
+
+/// Whether `url` names a loopback host (a local endpoint). Conservative: any URL
+/// we cannot confidently classify as loopback is treated as NON-local so the
+/// privacy gate fails closed.
+fn is_loopback_endpoint(url: &str) -> bool {
+    // Strip an optional scheme, then take the authority up to the first `/`.
+    let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let authority = without_scheme.split('/').next().unwrap_or("");
+    // Drop credentials and port; keep the host (handles bracketed IPv6).
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(end) = host_port.strip_prefix('[') {
+        // IPv6 literal: `[::1]:1234` -> `::1`.
+        end.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or("")
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
 // --- Message pipeline (P4.6 / Section 2.2 / 8.1) ---------------------------
 
 /// Send a user message and drive the end-to-end pipeline (architecture.md
@@ -557,6 +601,10 @@ async fn send_message_inner(
     let available = list_models(&registry, &configs, &pricing)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
+    // The provably-local provider ids (from each row's concrete ProviderKind),
+    // so routing enforces LocalOnly/Confidential on provable locality rather
+    // than a zero price (Section 6.2 fail-closed).
+    let local_provider_ids = local_provider_ids(&configs);
 
     // Clone the shared subsystems into the spawned task so the command returns
     // immediately and the streamed events arrive over the bridge.
@@ -576,6 +624,7 @@ async fn send_message_inner(
             gate,
             events,
             available,
+            local_provider_ids,
         };
         // The pipeline emits MessageError + persists an Error-status message on
         // failure, so the returned error is already surfaced; nothing to do here.
@@ -873,6 +922,67 @@ mod tests {
             table.price_for(ProviderKind::LmStudio, "any"),
             TokenPrice::ZERO
         );
+    }
+
+    /// `local_provider_ids` classifies locality from the concrete
+    /// [`ProviderKind`] (Section 6.2 fail-closed), NOT from price: LM Studio is
+    /// always local, a loopback GenericOpenAI endpoint is local, a remote
+    /// GenericOpenAI endpoint is cloud, and every other kind is cloud.
+    #[test]
+    fn local_provider_ids_classifies_by_kind_and_endpoint() {
+        fn cfg(id: &str, kind: ProviderKind, base_url: Option<&str>) -> ProviderConfig {
+            ProviderConfig {
+                id: id.to_string(),
+                kind,
+                base_url: base_url.map(str::to_string),
+                api_key_ref: None,
+                extra: serde_json::Value::Null,
+            }
+        }
+
+        let configs = [
+            cfg("lm", ProviderKind::LmStudio, None),
+            cfg(
+                "local-generic",
+                ProviderKind::GenericOpenAI,
+                Some("http://127.0.0.1:1234/v1"),
+            ),
+            cfg(
+                "localhost-generic",
+                ProviderKind::GenericOpenAI,
+                Some("http://localhost:8080"),
+            ),
+            cfg(
+                "remote-generic",
+                ProviderKind::GenericOpenAI,
+                Some("https://api.example.com/v1"),
+            ),
+            // A GenericOpenAI with no endpoint cannot be proven local -> cloud.
+            cfg("bare-generic", ProviderKind::GenericOpenAI, None),
+            cfg("oai", ProviderKind::OpenAI, Some("http://127.0.0.1/v1")),
+        ];
+
+        let local = local_provider_ids(&configs);
+        assert!(local.contains("lm"));
+        assert!(local.contains("local-generic"));
+        assert!(local.contains("localhost-generic"));
+        assert!(!local.contains("remote-generic"));
+        assert!(!local.contains("bare-generic"));
+        // A loopback base_url does not make a cloud KIND local.
+        assert!(!local.contains("oai"));
+    }
+
+    /// `is_loopback_endpoint` recognizes loopback hosts across scheme/port/IPv6
+    /// forms and rejects remote hosts (conservative: unknown => not loopback).
+    #[test]
+    fn is_loopback_endpoint_recognizes_local_hosts() {
+        assert!(is_loopback_endpoint("http://localhost:1234/v1"));
+        assert!(is_loopback_endpoint("https://127.0.0.1"));
+        assert!(is_loopback_endpoint("http://[::1]:8080/v1"));
+        assert!(is_loopback_endpoint("localhost:1234"));
+        assert!(!is_loopback_endpoint("https://api.openai.com/v1"));
+        assert!(!is_loopback_endpoint("http://10.0.0.5:1234"));
+        assert!(!is_loopback_endpoint("http://user@evil.com/localhost"));
     }
 
     /// The `AvailableModel` shape that crosses IPC is display-safe: it serializes
