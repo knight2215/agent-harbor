@@ -7,17 +7,9 @@ name = "mcp-client"
 version = "0.1.0"
 
 [[package]]
-name = "persistence"
-version = "0.1.0"
-
-[[package]]
 name = "providers"
 version = "0.1.0"
 
 [[package]]
 name = "routing"
-version = "0.1.0"
-
-[[package]]
-name = "secrets"
 version = "0.1.0"

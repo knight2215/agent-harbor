@@ -5,32 +5,36 @@ resolver = "2"
 # (INTEGRATIONS_ONLY: crates.io returns 403). `cargo build --workspace` below
 # exercises exactly these.
 #
-# Phase 1 (FEAT-001) introduces the FIRST crates.io dependencies into a library
-# crate: `orchestrator-core` now pulls serde/serde_json/uuid/chrono/thiserror
-# for the Section 7.1 domain models. Cargo resolves the *entire* `members`
+# Phase 1 (FEAT-001) introduced the FIRST crates.io dependencies into a library
+# crate: `orchestrator-core` pulls serde/serde_json/uuid/chrono/thiserror for
+# the Section 7.1 domain models. Cargo resolves the *entire* `members`
 # dependency graph to build `Cargo.lock`, so a member that depends on an
 # offline-unreachable crate breaks every bare cargo command offline. This is the
 # exact situation `tauri-app` was in during Phase 0. The established remedy is to
 # move the networked crate under `[workspace] exclude` and build it explicitly
-# in CI via `--manifest-path` (CI has network). We extend that pattern to
-# `orchestrator-core` here.
+# in CI via `--manifest-path` (CI has network). We extended that pattern to
+# `orchestrator-core` in FEAT-001.
 #
-# `persistence` and `secrets` are STILL dependency-free in FEAT-001 and remain
-# members. They gain their own crates.io deps (sqlx, keyring, tokio, ...) in
-# FEAT-002; when that happens they move to `exclude` alongside `orchestrator-core`
-# and gain explicit CI `--manifest-path` steps, mirroring this arrangement.
+# Phase 1 (FEAT-002) gives `persistence` its own crates.io deps (sqlx + tokio +
+# serde/serde_json/uuid/chrono/thiserror) and `secrets` the `keyring` crate. Per
+# the plan FEAT-001 established, both therefore MOVE from `members` to `exclude`
+# here and gain explicit CI `--manifest-path` build/test/clippy/fmt steps. The
+# only crates that remain offline-buildable members are the still dependency-free
+# `providers`, `mcp-client`, and `routing`.
 members = [
     "crates/providers",
     "crates/mcp-client",
     "crates/routing",
-    "crates/persistence",
-    "crates/secrets",
 ]
 
 # Excluded (networked) crates: NOT workspace members because they depend on
 # crates.io crates that cannot be resolved offline.
 #
-#   - `orchestrator-core`: serde/serde_json/uuid/chrono/thiserror (FEAT-001).
+#   - `orchestrator-core`: serde/serde_json/uuid/chrono/thiserror + tokio, and
+#                          path deps on persistence/secrets (FEAT-001/002).
+#   - `persistence`:       sqlx + tokio + serde/serde_json/uuid/chrono/thiserror
+#                          (FEAT-002).
+#   - `secrets`:           keyring + serde + thiserror (FEAT-002).
 #   - `tauri-app`:         tauri + tauri-build + serde/serde_json (Phase 0).
 #
 # Cargo resolves the whole `members` dependency graph to build `Cargo.lock` even
@@ -58,13 +62,15 @@ members = [
 # EXIT PATH (do this once network access is available): move each excluded
 # entry from `exclude` into `members` (keeping it out of `default-members` so
 # bare offline `cargo build` still skips it), run a networked
-# `cargo build -p orchestrator-core -p tauri-app` to populate `Cargo.lock` with
-# the full dependency graph, and commit the updated `Cargo.lock` in the same
-# change. That reconnects the crates to the workspace lockfile without breaking
-# the offline default build. The per-crate `--manifest-path` CI steps can then
-# be collapsed back into `--workspace` runs.
+# `cargo build -p orchestrator-core -p persistence -p secrets -p tauri-app` to
+# populate `Cargo.lock` with the full dependency graph, and commit the updated
+# `Cargo.lock` in the same change. That reconnects the crates to the workspace
+# lockfile without breaking the offline default build. The per-crate
+# `--manifest-path` CI steps can then be collapsed back into `--workspace` runs.
 exclude = [
     "crates/orchestrator-core",
+    "crates/persistence",
+    "crates/secrets",
     "crates/tauri-app",
 ]
 
@@ -79,11 +85,16 @@ license = "MIT"
 # already pins where applicable (serde 1, serde_json 1).
 #
 # FEAT-001 uses: serde, serde_json, uuid, chrono, thiserror.
-# The remaining entries (tokio, async-trait, sqlx, keyring) are declared here
-# now for consistency; they are consumed by the crates that need them in
-# FEAT-002 (persistence: sqlx; secrets: keyring; core/providers: tokio,
-# async-trait). Declaring a version here does NOT pull the crate into any build
-# until a crate actually depends on it.
+# FEAT-002 consumes: sqlx (persistence), keyring (secrets), tokio
+# (persistence + orchestrator-core SessionManager). `async-trait` is declared
+# for later phases. NOTE: because every crate that consumes these is under
+# `[workspace] exclude`, the excluded crates cannot use `{ workspace = true }`
+# (an excluded crate has no workspace root to inherit from); they pin the same
+# versions as concrete literals in their own manifests, kept in sync with this
+# table. This table remains the single place the intended versions are recorded
+# and is the source of truth once the EXIT PATH above rejoins the crates as
+# members. Declaring a version here does NOT pull the crate into any build until
+# a crate actually depends on it.
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -179,3 +179,40 @@ export interface ProviderConfig {
   apiKeyRef: SecretRef | null;
   extra: unknown;
 }
+
+/** Connection state of an MCP server. Mirrors Rust `McpConnectionState`. */
+export type McpConnectionState = 'connecting' | 'connected' | 'disconnected';
+
+/**
+ * Events emitted by the core to the frontend (architecture.md Section 8).
+ * Mirrors Rust `CoreEvent`, an internally-tagged enum discriminated on `type`.
+ *
+ * Event hygiene (Section 9.1 / 9.2): payloads carry only display-safe data
+ * (ids, deltas, statuses, rationales), never secrets or credentials.
+ */
+export type CoreEvent =
+  | { type: 'messageDelta'; conversationId: string; messageId: string; delta: string }
+  | {
+      type: 'messageComplete';
+      conversationId: string;
+      messageId: string;
+      status: MessageStatus;
+      route: RouteMetadata | null;
+      usage: TokenUsage | null;
+    }
+  | { type: 'messageError'; conversationId: string; messageId: string; message: string }
+  | { type: 'conversationUpdated'; conversationId: string }
+  | { type: 'conversationCreated'; conversationId: string }
+  | { type: 'conversationDeleted'; conversationId: string }
+  | { type: 'mcpStateChanged'; serverId: string; state: McpConnectionState }
+  | { type: 'mcpError'; serverId: string; message: string }
+  | {
+      type: 'permissionRequested';
+      requestId: string;
+      serverId: string;
+      toolName: string;
+      mode: PermissionMode;
+      rationale: string;
+    }
+  | { type: 'providersChanged' }
+  | { type: 'personasChanged' };

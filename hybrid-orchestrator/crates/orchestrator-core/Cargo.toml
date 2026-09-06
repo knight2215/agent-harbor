@@ -25,8 +25,14 @@ secrets = { path = "../secrets" }
 # under `[workspace] exclude` and verified in CI - see the root Cargo.toml
 # rationale and .github/workflows/ci.yml. Versions mirror the root
 # `[workspace.dependencies]` table.
+#
+# FEAT-002 adds `tokio` (the SessionManager is async and holds per-conversation
+# async locks per Section 7.5). The `persistence` path dep gives the
+# SessionManager its repositories; `secrets` (already above) is the canonical
+# home of `SecretRef`, re-exported by this crate's models.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
+tokio = { version = "1", features = ["full"] }

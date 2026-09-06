@@ -1,7 +1,39 @@
 [package]
 name = "persistence"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# Concrete literals rather than `*.workspace = true` inheritance. This crate is
+# under `[workspace] exclude` in the root Cargo.toml (it gained crates.io deps
+# in Phase 1 / FEAT-002 - notably `sqlx` - that are offline-unreachable), so it
+# is not a member of any workspace. When CI builds it standalone via
+# `--manifest-path crates/persistence/Cargo.toml`, there is no workspace root to
+# inherit from, and `*.workspace = true` (for package keys OR for
+# `<dep> = { workspace = true }`) would fail to parse. Keeping the manifest
+# self-contained mirrors the Phase 0 `tauri-app` / FEAT-001 `orchestrator-core`
+# precedent. Versions are kept in sync with the root `[workspace.dependencies]`
+# table.
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 
+# First crates.io dependencies for this crate (Phase 1 / FEAT-002). `sqlx` (and
+# the async runtime it needs) are unreachable in the offline sandbox (crates.io
+# 403), which is why this crate moved from `members` to `[workspace] exclude` in
+# the root Cargo.toml and is verified in CI - see the root Cargo.toml rationale
+# and .github/workflows/ci.yml. Versions mirror the root
+# `[workspace.dependencies]` table.
+#
+# NOTE on sqlx features: we use the runtime `sqlx::query(...)` APIs and the
+# `sqlx::migrate!` macro, NOT the compile-time-checked `query!` macros, so no
+# live DATABASE_URL is needed at build time. The `sqlite` feature bundles a
+# self-contained SQLite; no system libsqlite3 is required.
 [dependencies]
+orchestrator-core = { path = "../orchestrator-core" }
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "chrono", "uuid", "migrate"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"

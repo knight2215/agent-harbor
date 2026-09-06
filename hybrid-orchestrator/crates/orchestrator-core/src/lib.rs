@@ -1,9 +1,10 @@
 //! `orchestrator-core` crate: domain models and message pipeline.
 //!
 //! Framework-agnostic (no Tauri dependency). Coordinates routing, providers,
-//! MCP, and persistence. Phase 1 introduces the real Section 7.1 domain models
-//! (see [`models`]); the session manager, pipeline, and events land in later
-//! phases.
+//! MCP, and persistence. Phase 1 provides the Section 7.1 domain models (see
+//! [`models`]), the [`session::SessionManager`] (Section 7.5), and the
+//! [`events::CoreEvent`] surface (Section 8). The streaming pipeline lands in a
+//! later phase.
 
 pub mod events;
 pub mod models;
@@ -20,16 +21,21 @@ pub use models::{
     ToolResult,
 };
 
+// Section 8 event surface and Section 7.5 session manager.
+pub use events::{CoreEvent, McpConnectionState};
+pub use session::{ConversationInit, SessionError, SessionManager};
+
 #[cfg(test)]
 mod tests {
-    /// Smoke test that references an item from each of the five library crates
-    /// orchestrator-core depends on, proving the dependency edges compile.
+    /// Smoke test that references an item from the still-placeholder library
+    /// crates orchestrator-core depends on, proving the dependency edges
+    /// compile. `persistence` and `secrets` now expose real APIs (exercised by
+    /// their own crates' tests and by the session manager tests here), so they
+    /// no longer expose a `placeholder()`.
     #[test]
     fn smoke() {
         providers::placeholder();
         mcp_client::placeholder();
         routing::placeholder();
-        persistence::placeholder();
-        secrets::placeholder();
     }
 }

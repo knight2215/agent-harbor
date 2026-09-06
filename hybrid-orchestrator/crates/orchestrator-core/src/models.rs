@@ -10,14 +10,12 @@
 //!
 //! `SecretRef` note: architecture.md Section 3.3 places the canonical
 //! `SecretRef` in the `secrets` crate, and permits `orchestrator-core` to
-//! depend on `secrets`. During Phase 1 (FEAT-001) the `secrets` crate is
-//! deliberately kept dependency-free so it remains offline-buildable (it gains
-//! its `keyring`/serde dependencies in FEAT-002). To avoid forcing serde into
-//! `secrets` prematurely (which would pull it out of the offline-buildable set)
-//! while still giving the models a serializable handle, we define a lightweight
-//! `SecretRef` newtype here. FEAT-002 reconciles this with the canonical
-//! `secrets::SecretRef` (either by re-exporting this type from `secrets`, or by
-//! adding serde to `secrets` and re-exporting from here). The invariant is
+//! depend on `secrets`. FEAT-001 temporarily defined a lightweight `SecretRef`
+//! newtype here to keep `secrets` offline-buildable. FEAT-002 reconciles this:
+//! the canonical, serde-serializable `SecretRef` now lives in the `secrets`
+//! crate and is RE-EXPORTED here (see `crate::models::SecretRef`), so there is a
+//! single source of truth. The dependency direction stays correct
+//! (`orchestrator-core -> secrets`, never the reverse). The invariant is
 //! unchanged: `SecretRef` is only an opaque keystore handle, never the secret.
 
 use chrono::{DateTime, Utc};
@@ -25,14 +23,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-/// Opaque reference into the OS keychain. Never contains secret material; the
-/// raw key is resolved against the keystore at call time and never crosses IPC.
-///
-/// Canonical home is the `secrets` crate (Section 3.3); defined here as a
-/// lightweight newtype during FEAT-001 to keep `secrets` offline-buildable.
-/// See the module-level note.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SecretRef(pub String);
+/// Re-export of the canonical [`secrets::SecretRef`] (architecture.md Section
+/// 3.3). Never contains secret material; the raw key is resolved against the
+/// keystore inside the core at call time and never crosses IPC.
+pub use secrets::SecretRef;
 
 /// A conversation and its per-conversation settings (Section 7.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
