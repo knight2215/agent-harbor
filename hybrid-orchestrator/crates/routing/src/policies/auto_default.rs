@@ -116,11 +116,11 @@ fn quality_for_complexity(model: &AvailableModel, complexity: TaskComplexity) ->
 impl AutoDefaultPolicy {
     /// Phase 1: filter candidates by hard constraints (capabilities + privacy).
     /// Returns the survivors, or an `Err` that FAILS CLOSED for privacy.
-    fn filter_candidates<'a>(
-        req: &'a RoutingRequest,
+    fn filter_candidates(
+        req: &RoutingRequest,
         required: RequiredCapabilities,
         local_required: bool,
-    ) -> Result<Vec<&'a AvailableModel>, RoutingError> {
+    ) -> Result<Vec<&AvailableModel>, RoutingError> {
         if req.available.is_empty() {
             return Err(RoutingError::NoCandidate(
                 "the available-model list is empty".to_string(),
