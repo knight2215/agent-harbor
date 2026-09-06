@@ -44,7 +44,6 @@
 //! logic in [`decode_sse_data_frames`] can be reused per chunk.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value;

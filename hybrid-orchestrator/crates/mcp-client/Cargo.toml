@@ -64,3 +64,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # tokio macros/rt provide the `#[tokio::test]` harness used by the stdio
 # round-trip and lifecycle tests.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }
+# uuid is used only by tests (the `#[cfg(test)]` module in session.rs and the
+# integration test in tests/stdio_roundtrip.rs) to build `McpServerConfig`
+# fixtures. Kept as a concrete literal matching the version + features every
+# other workspace crate (domain, orchestrator-core, persistence, tauri-app)
+# declares, since this crate is excluded from the workspace and cannot inherit.
+uuid = { version = "1", features = ["v4", "serde"] }
