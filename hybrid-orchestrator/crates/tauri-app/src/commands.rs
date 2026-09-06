@@ -424,7 +424,7 @@ mod tests {
     use super::*;
     use orchestrator_core::SessionManager;
     use persistence::Db;
-    use secrets::{InMemorySecretStore, SecretError, SecretStore};
+    use secrets::{InMemorySecretStore, SecretError};
     use std::sync::Arc;
 
     async fn test_state() -> AppState {
