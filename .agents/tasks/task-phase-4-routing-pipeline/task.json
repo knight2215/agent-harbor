@@ -1,0 +1,7 @@
+{
+  "task_id": "task-phase-4-routing-pipeline",
+  "task_description": "Phase 4: implement the pluggable routing policy engine (RoutingPolicy trait, complexity/privacy/cost signals, auto-default policy, manual-override precedence, policy registry) in the `routing` crate, and wire it into the full end-to-end message pipeline (message -> route -> provider -> Phase 3 tool loop with permission gating -> persist route metadata + usage) in orchestrator-core, plus a send_message Tauri command + minimal frontend IPC wrapper. Move `routing` to [workspace] exclude with matching CI steps, and flip README Phase 4 to DONE. Reference architecture.md Sections 6/2.2/4.4/7 and tasks.md Phase 4 (P4.1-P4.6). Network is INTEGRATIONS_ONLY: routing + orchestrator-core + tauri-app + frontend are CI-verified; offline self-checks are rustfmt + prettier + clippy-lint self-audit.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002"],
+  "blocked_reason": null
+}

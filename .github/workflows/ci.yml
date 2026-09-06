@@ -48,8 +48,16 @@ name: CI
 #                                   + async-trait + thiserror
 #                                   (Phase 3 / FEAT-001; stdio tests spawn a
 #                                   bundled cross-platform mock MCP server bin)
-#   The only crate that remains an offline-buildable `members` entry is the
-#   still dependency-free `routing`.
+#     - crates/routing           -> async-trait + serde/serde_json + thiserror
+#                                   plus path deps on providers + domain, which
+#                                   pull in the crates.io HTTP/DB/keyring stack
+#                                   transitively (Phase 4 / FEAT-001; unit tests
+#                                   use no live network)
+#   After Phase 4 NO crate remains an offline-buildable `members` entry: every
+#   crate now carries crates.io deps (directly or transitively), so the
+#   `members` array in hybrid-orchestrator/Cargo.toml is empty and
+#   `cargo build --workspace` builds nothing offline. Every crate is validated
+#   in CI via `--manifest-path`.
 #   Cargo resolves the whole `members` dependency graph to build Cargo.lock, so
 #   an excluded crate is invisible to `cargo build --workspace` (and to
 #   `cargo build -p <crate>`). Therefore CI builds/tests/clippies each excluded
@@ -198,6 +206,9 @@ jobs:
       - name: cargo fmt (check, mcp-client)
         run: cargo fmt --manifest-path crates/mcp-client/Cargo.toml --check
 
+      - name: cargo fmt (check, routing)
+        run: cargo fmt --manifest-path crates/routing/Cargo.toml --check
+
       - name: cargo build (workspace)
         run: cargo build --workspace
 
@@ -297,6 +308,25 @@ jobs:
 
       - name: cargo test (mcp-client)
         run: cargo test --manifest-path crates/mcp-client/Cargo.toml
+
+      # --- Rust: routing (excluded from the workspace, built explicitly) ------
+      # routing is under `[workspace] exclude` because Phase 4 (FEAT-001) gave it
+      # path deps on `providers` and `domain`, which carry the crates.io HTTP/DB/
+      # keyring stack transitively (reqwest/sqlx/keyring/...) - unreachable
+      # offline. The `--workspace` commands above do NOT touch it. Build/test/
+      # clippy it directly via its manifest; its `path` deps on the excluded
+      # `providers`/`domain` crates are resolved transitively here. Built AFTER
+      # providers + domain (which it depends on) and BEFORE orchestrator-core
+      # (which path-depends on routing). Its unit tests build in-memory
+      # `AvailableModel` candidates directly, so they use no live network.
+      - name: cargo build (routing)
+        run: cargo build --manifest-path crates/routing/Cargo.toml
+
+      - name: cargo clippy (routing)
+        run: cargo clippy --manifest-path crates/routing/Cargo.toml --all-targets -- -D warnings
+
+      - name: cargo test (routing)
+        run: cargo test --manifest-path crates/routing/Cargo.toml
 
       # --- Rust: orchestrator-core (excluded from the workspace, built explicitly)
       # orchestrator-core is under `[workspace] exclude` because it carries

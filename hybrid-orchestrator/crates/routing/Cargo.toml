@@ -1,7 +1,47 @@
 [package]
 name = "routing"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# Concrete literals rather than `*.workspace = true` inheritance. Phase 4
+# (FEAT-001) gives this crate path deps on `providers` and `domain`, which carry
+# crates.io deps (reqwest/sqlx/keyring/... transitively) that are offline-
+# unreachable. It therefore MOVES from `[workspace] members` to
+# `[workspace] exclude` in the root Cargo.toml and is no longer a member of any
+# workspace. When CI builds it standalone via
+# `--manifest-path crates/routing/Cargo.toml`, there is no workspace root to
+# inherit from, and `*.workspace = true` (for package keys OR for
+# `<dep> = { workspace = true }`) would fail to parse. Keeping the manifest
+# self-contained mirrors the Phase 0 `tauri-app` and Phase 2 `providers`
+# manifests. Versions are kept in sync with the root `[workspace.dependencies]`
+# table.
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 
 [dependencies]
+# Downward path deps only (architecture.md Section 3.3). Phase 4 REUSES the
+# Section 6.1 / 7.1 DTOs rather than duplicating them:
+#   - `domain`    owns ManualRoute / PrivacyTag / RouteSource / RouteMetadata /
+#                 AgentPersona / RoutingHint (the routing request/decision types
+#                 build on these).
+#   - `providers` owns AvailableModel / Capabilities / ChatMessage / TokenPrice
+#                 (the candidate list + per-model capability/price the signals
+#                 read).
+domain = { path = "../domain" }
+providers = { path = "../providers" }
+
+# crates.io deps the engine needs, pinned as CONCRETE literals (this crate is
+# `[workspace] exclude`d, so it has no workspace root to inherit from). Kept in
+# sync with the root `[workspace.dependencies]` table.
+#   - `async-trait` implements the `RoutingPolicy` async trait.
+#   - `serde` + `serde_json` derive/serialize the CostBudget + decision types.
+#   - `thiserror` derives `RoutingError`.
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[dev-dependencies]
+# `#[tokio::test]` drives the async `RoutingPolicy::decide` in the unit tests.
+# Only the `macros` + `rt` features are needed (no full runtime). Concrete
+# literals (this crate is `[workspace] exclude`d) kept in sync with the root
+# `[workspace.dependencies]` table.
+tokio = { version = "1", features = ["macros", "rt"] }

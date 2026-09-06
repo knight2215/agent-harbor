@@ -61,7 +61,9 @@ mod tests {
     /// registry constructor. `mcp-client` gained its real API in Phase 3
     /// (FEAT-001); it no longer exposes `placeholder()`, so we reference its
     /// namespacing helper (also exercised by the `tools_bridge` module).
-    /// `routing` is still a placeholder crate.
+    /// `routing` gained its real API in Phase 4 (FEAT-001); it no longer exposes
+    /// `placeholder()`, so we construct its default [`routing::PolicyRegistry`]
+    /// and assert the built-in automatic policy is active.
     #[test]
     fn smoke() {
         let registry = providers::builtin_registry();
@@ -71,6 +73,8 @@ mod tests {
             mcp_client::namespace_tool("server", "tool"),
             format!("server{}tool", mcp_client::NAMESPACE_SEPARATOR)
         );
-        routing::placeholder();
+        // Reference a real `routing` item now that `placeholder()` is gone.
+        let policies = routing::PolicyRegistry::default();
+        assert_eq!(policies.active_id(), "autoDefault");
     }
 }
