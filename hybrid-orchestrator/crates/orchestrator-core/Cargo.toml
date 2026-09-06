@@ -1,12 +1,46 @@
 [package]
 name = "orchestrator-core"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+# Concrete literals rather than `*.workspace = true` inheritance. This crate is
+# under `[workspace] exclude` in the root Cargo.toml (it gained crates.io deps in
+# Phase 1 / FEAT-001 that are offline-unreachable), so it is not a member of any
+# workspace. When CI builds it standalone via
+# `--manifest-path crates/orchestrator-core/Cargo.toml`, there is no workspace
+# root to inherit from, and `*.workspace = true` (for package keys OR for
+# `<dep> = { workspace = true }`) would fail to parse. Keeping the manifest
+# self-contained mirrors the Phase 0 `tauri-app` manifest. Versions are kept in
+# sync with the root `[workspace.dependencies]` table.
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
 
 [dependencies]
 providers = { path = "../providers" }
 mcp-client = { path = "../mcp-client" }
 routing = { path = "../routing" }
+# Downward path deps only (architecture.md Section 3.3). `domain` is the leaf
+# crate that owns the Section 7.1 DTOs (re-exported at this crate's root);
+# `persistence` gives the SessionManager its repositories. Note: `persistence`
+# does NOT depend back on this crate - it depends on `domain` too - so the graph
+# stays acyclic. This crate no longer needs a direct `secrets` dep: `SecretRef`
+# reaches it transitively through `domain`, which re-exports `secrets::SecretRef`.
+domain = { path = "../domain" }
 persistence = { path = "../persistence" }
-secrets = { path = "../secrets" }
+
+# First crates.io dependencies in a library crate (Phase 1, FEAT-001). These are
+# unreachable in the offline sandbox (crates.io 403), which is why this crate is
+# under `[workspace] exclude` and verified in CI - see the root Cargo.toml
+# rationale and .github/workflows/ci.yml. Versions mirror the root
+# `[workspace.dependencies]` table.
+#
+# FEAT-002 adds `tokio` (the SessionManager is async and holds per-conversation
+# async locks per Section 7.5). The Section 7.1 DTOs (and their derives) now live
+# in `domain`, but this crate still needs `serde`/`serde_json` for its OWN
+# serde-derived types (the `CoreEvent`/`McpConnectionState` event surface in
+# events.rs), plus `chrono` for `Utc::now()`, `uuid` for ids, `tokio` for the
+# async locks, and `thiserror` for `SessionError`.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }

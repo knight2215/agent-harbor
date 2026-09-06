@@ -1,21 +1,22 @@
-//! `persistence` crate: SQLite storage and versioned config schema (placeholder).
+//! `persistence` crate: SQLite storage and versioned config schema
+//! (architecture.md Section 7.2).
 //!
-//! Phase 0 scaffold. The real database pool, repositories, and config
-//! migration land in later phases.
+//! [`Db`] wraps a `sqlx` SQLite connection pool and runs versioned migrations
+//! at startup (`migrations/`). Typed repositories in [`repositories`] provide
+//! CRUD over the Section 7.1 domain models, mapping structured fields to/from
+//! JSON TEXT columns. [`config`] persists [`config::AppConfig`] with a
+//! `schema_version` (Section 10.4).
+//!
+//! Secrets are NEVER stored here (Section 7.2 / 9.1): the providers table holds
+//! only the `SecretRef` handle string.
+//!
+//! We use the runtime `sqlx::query(...)` APIs (NOT the compile-time-checked
+//! `query!` macros) so no live `DATABASE_URL` is needed at build time.
 
 pub mod config;
 pub mod db;
 pub mod repositories;
 
-/// Placeholder marker so dependents can reference an item from this crate,
-/// proving the dependency edge compiles. Replaced with real API in later phases.
-pub fn placeholder() {}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn smoke() {
-        // Exercises the placeholder marker so the smoke test does real work.
-        super::placeholder();
-    }
-}
+pub use config::AppConfig;
+pub use db::{Db, PersistenceError};
+pub use repositories::{ConversationRepo, McpServerRepo, MessageRepo, PersonaRepo, ProviderRepo};

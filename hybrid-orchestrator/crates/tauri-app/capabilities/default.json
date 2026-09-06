@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Least-privilege capability set for the main window (architecture.md Section 9.2). Grants only Tauri's core defaults required for the window to run. The custom `app_version` command is NOT authorized here: in Tauri v2 user-defined `#[tauri::command]` handlers are gated solely by being registered in `generate_handler!` (see src/main.rs), not by a capability permission token. Capability permissions like `core:app:*` govern Tauri's built-in plugins, which Phase 0 does not use.",
+  "description": "Least-privilege capability set for the main window (architecture.md Section 9.2). Grants only Tauri's core defaults required for the window to run. The custom commands (app_version, list/create/rename/set_conversation_tags/delete conversations, list/create/update/delete personas, set_provider_secret) are NOT authorized here: in Tauri v2 user-defined `#[tauri::command]` handlers are gated solely by being registered in `generate_handler!` (see src/lib.rs), not by a capability permission token. Capability permissions like `core:app:*` govern Tauri's built-in plugins, which this app does not use. No filesystem, shell, or network capabilities are granted to the webview (Section 9.2 least privilege).",
   "windows": ["main"],
   "permissions": [
     "core:default"

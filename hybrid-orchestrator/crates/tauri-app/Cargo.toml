@@ -30,6 +30,19 @@ secrets = { path = "../secrets" }
 tauri = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Async runtime for the DB init (block_on) and the core-event bridge channel.
+# Concrete literal versions (kept in sync with the root `[workspace.dependencies]`)
+# because this crate is under `[workspace] exclude` and has no workspace root to
+# inherit from when built via `--manifest-path`.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 
 [build-dependencies]
 tauri-build = "2"
+
+[dev-dependencies]
+# The restart-survival integration test (tests/restart_survival.rs) opens a
+# temp SQLite file and drives async APIs. tauri-app is built/tested in CI via
+# `--manifest-path`, where these resolve.
+tempfile = "3"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
