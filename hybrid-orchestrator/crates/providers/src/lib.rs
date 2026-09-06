@@ -3,9 +3,9 @@
 //! (architecture.md Section 4).
 //!
 //! Phase 2 (FEAT-001) implements the foundation (contract P2.1, registry P2.2,
-//! capability + shared HTTP/SSE client P2.3). The concrete adapters under
-//! [`adapters`] are filled in by FEAT-002/003/004; they remain compiling stubs
-//! here.
+//! capability + shared HTTP/SSE client P2.3). FEAT-002 adds the native
+//! OpenAI-compatible adapters (P2.4-P2.6); FEAT-003 adds the Anthropic, Gemini,
+//! and Bedrock translation shims (P2.7-P2.9) under [`adapters`].
 //!
 //! This crate carries crates.io deps (reqwest/futures/aws-sigv4/...), so it is
 //! under `[workspace] exclude` in the root Cargo.toml and built/tested in CI via
@@ -22,7 +22,8 @@ pub mod adapters {
     //! The native OpenAI-compatible adapters (openai, lmstudio, generic_openai,
     //! azure_openai) are implemented (FEAT-002) and share the single code path
     //! in [`native`]. The translation-shim adapters (anthropic, gemini,
-    //! bedrock) remain compiling stubs, filled in by FEAT-003.
+    //! bedrock) are implemented (FEAT-003): each presents the internal
+    //! OpenAI-compatible contract while translating to its native wire format.
     pub mod native;
 
     pub mod azure_openai;
@@ -30,8 +31,9 @@ pub mod adapters {
     pub mod lmstudio;
     pub mod openai;
 
-    // Translation-shim placeholders (FEAT-003): each module compiles but does
-    // not yet implement [`crate::contract::ChatProvider`].
+    // Translation shims (FEAT-003): each presents [`crate::contract::ChatProvider`]
+    // while translating to a native wire format (Anthropic Messages API, Gemini
+    // generateContent, Bedrock SigV4 + per-model bodies).
     pub mod anthropic;
     pub mod bedrock;
     pub mod gemini;
@@ -53,6 +55,12 @@ pub use adapters::azure_openai::AzureOpenAiFactory;
 pub use adapters::generic_openai::GenericOpenAiFactory;
 pub use adapters::lmstudio::LmStudioFactory;
 pub use adapters::openai::OpenAiFactory;
+
+// Translation-shim adapter factories (FEAT-003). Registering these on a
+// `ProviderRegistry` wires up the Anthropic / Gemini / Bedrock kinds.
+pub use adapters::anthropic::AnthropicFactory;
+pub use adapters::bedrock::BedrockFactory;
+pub use adapters::gemini::GeminiFactory;
 
 // Re-export the reused domain types so downstream crates can refer to them
 // through this crate's surface (single source of truth remains `domain`).
