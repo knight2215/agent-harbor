@@ -6,9 +6,10 @@ name: CI
 #
 #   1. `build` (routine gate) - runs on EVERY push and pull_request across the
 #      ubuntu + windows matrix. It is the authoritative correctness gate:
-#      `cargo fmt --check`, `cargo build/test/clippy` over the workspace AND
-#      every `[workspace] exclude`d crate (via `--manifest-path`), plus the
-#      frontend install / ESLint / Prettier / vitest suite. It does NOT bundle a
+#      `cargo fmt --check`, `cargo build/test/clippy` over every crate
+#      individually via `--manifest-path` (the workspace has no members - see
+#      below), plus the frontend install / ESLint / Prettier / vitest suite. It
+#      does NOT bundle a
 #      Tauri installer, so it finishes in a few minutes instead of ~40.
 #
 #   2. `tauri-bundle` (gated release check) - runs ONLY on manual dispatch
@@ -55,13 +56,11 @@ name: CI
 #                                   use no live network)
 #   After Phase 4 NO crate remains an offline-buildable `members` entry: every
 #   crate now carries crates.io deps (directly or transitively), so the
-#   `members` array in hybrid-orchestrator/Cargo.toml is empty and
-#   `cargo build --workspace` builds nothing offline. Every crate is validated
-#   in CI via `--manifest-path`.
-#   Cargo resolves the whole `members` dependency graph to build Cargo.lock, so
-#   an excluded crate is invisible to `cargo build --workspace` (and to
-#   `cargo build -p <crate>`). Therefore CI builds/tests/clippies each excluded
-#   crate EXPLICITLY via `--manifest-path crates/<crate>/Cargo.toml`. The gated
+#   `members` array in hybrid-orchestrator/Cargo.toml is empty. With no members
+#   there is nothing for `cargo fmt --all` or `cargo {build,test,clippy}
+#   --workspace` to act on, so CI does NOT run any workspace-level cargo step;
+#   instead it fmt-checks/builds/tests/clippies each excluded crate EXPLICITLY
+#   via `--manifest-path crates/<crate>/Cargo.toml`. The gated
 #   `tauri-bundle` job's `tauri build` step compiles tauri-app (and,
 #   transitively, orchestrator-core) as part of bundling the installer as well.
 #
@@ -179,12 +178,13 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      # --- Rust: workspace (the offline-buildable `routing` member) -----------
-      - name: cargo fmt (check, workspace members)
-        run: cargo fmt --all --check
-
-      # Excluded crates are invisible to `cargo fmt --all`, so fmt-check them
-      # explicitly via their manifests to keep formatting enforced everywhere.
+      # --- Rust: per-crate checks ---------------------------------------------
+      # The workspace has NO members: every crate is `[workspace] exclude`d
+      # (they all carry crates.io deps, directly or transitively, that are
+      # unreachable in the offline sandbox). There is therefore nothing for a
+      # `cargo fmt --all` / `cargo {build,test,clippy} --workspace` invocation to
+      # act on, so each crate is fmt-checked / built / clippied / tested
+      # individually via `--manifest-path` below.
       - name: cargo fmt (check, orchestrator-core)
         run: cargo fmt --manifest-path crates/orchestrator-core/Cargo.toml --check
 
@@ -208,15 +208,6 @@ jobs:
 
       - name: cargo fmt (check, routing)
         run: cargo fmt --manifest-path crates/routing/Cargo.toml --check
-
-      - name: cargo build (workspace)
-        run: cargo build --workspace
-
-      - name: cargo test (workspace)
-        run: cargo test --workspace
-
-      - name: cargo clippy (workspace)
-        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # --- Rust: secrets (excluded from the workspace, built explicitly) ------
       # secrets is under `[workspace] exclude` because it carries the crates.io
