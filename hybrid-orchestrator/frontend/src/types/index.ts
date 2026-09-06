@@ -27,36 +27,36 @@
 export type SecretRef = string;
 
 /** Message author role. Mirrors Rust `Role`. */
-export type Role = 'system' | 'user' | 'assistant' | 'tool';
+export type Role = "system" | "user" | "assistant" | "tool";
 
 /** Lifecycle status of a message. Mirrors Rust `MessageStatus`. */
-export type MessageStatus = 'pending' | 'streaming' | 'complete' | 'error';
+export type MessageStatus = "pending" | "streaming" | "complete" | "error";
 
 /** How a route was decided. Mirrors Rust `RouteSource`. */
-export type RouteSource = 'manual' | 'conversationPin' | 'automatic';
+export type RouteSource = "manual" | "conversationPin" | "automatic";
 
 /** Coarse routing preference expressed by a persona. Mirrors Rust `RoutingHint`. */
-export type RoutingHint = 'preferLocal' | 'preferQuality' | 'preferCheap' | 'preferSpeed';
+export type RoutingHint = "preferLocal" | "preferQuality" | "preferCheap" | "preferSpeed";
 
 /** The supported provider families. Mirrors Rust `ProviderKind`. */
 export type ProviderKind =
-  | 'openAI'
-  | 'anthropic'
-  | 'bedrock'
-  | 'gemini'
-  | 'azure'
-  | 'lmStudio'
-  | 'genericOpenAI';
+  | "openAI"
+  | "anthropic"
+  | "bedrock"
+  | "gemini"
+  | "azure"
+  | "lmStudio"
+  | "genericOpenAI";
 
 /** Permission gate applied to an MCP server's tool invocations. Mirrors Rust `PermissionMode`. */
-export type PermissionMode = 'ask' | 'allow' | 'deny';
+export type PermissionMode = "ask" | "allow" | "deny";
 
 /**
  * Data-handling constraint tag. Mirrors Rust `PrivacyTag`.
  * `localOnly` / `confidential` are hard constraints that force local routing;
  * `Custom(String)` is serialized externally-tagged as `{ custom: string }`.
  */
-export type PrivacyTag = 'localOnly' | 'confidential' | { custom: string };
+export type PrivacyTag = "localOnly" | "confidential" | { custom: string };
 
 /** A manual provider/model selection. Mirrors Rust `ManualRoute`. */
 export interface ManualRoute {
@@ -90,10 +90,10 @@ export interface Attachment {
  * enum discriminated on `type`.
  */
 export type MessageContent =
-  | { type: 'text'; text: string }
-  | { type: 'toolCalls'; calls: ToolCall[] }
-  | { type: 'toolResults'; results: ToolResult[] }
-  | { type: 'attachments'; attachments: Attachment[] };
+  | { type: "text"; text: string }
+  | { type: "toolCalls"; calls: ToolCall[] }
+  | { type: "toolResults"; results: ToolResult[] }
+  | { type: "attachments"; attachments: Attachment[] };
 
 /** Which provider/model answered a message and why. Mirrors Rust `RouteMetadata`. */
 export interface RouteMetadata {
@@ -162,8 +162,8 @@ export interface AgentPersona {
  * tuples.
  */
 export type McpTransport =
-  | { type: 'stdio'; command: string; args: string[]; env: Array<[string, string]> }
-  | { type: 'httpSse'; url: string; headers: Array<[string, string]> };
+  | { type: "stdio"; command: string; args: string[]; env: Array<[string, string]> }
+  | { type: "httpSse"; url: string; headers: Array<[string, string]> };
 
 /** Configuration for a single MCP tool server. Mirrors Rust `McpServerConfig`. */
 export interface McpServerConfig {
@@ -184,7 +184,7 @@ export interface ProviderConfig {
 }
 
 /** Connection state of an MCP server. Mirrors Rust `McpConnectionState`. */
-export type McpConnectionState = 'connecting' | 'connected' | 'disconnected';
+export type McpConnectionState = "connecting" | "connected" | "disconnected";
 
 /**
  * Events emitted by the core to the frontend (architecture.md Section 8).
@@ -194,28 +194,28 @@ export type McpConnectionState = 'connecting' | 'connected' | 'disconnected';
  * (ids, deltas, statuses, rationales), never secrets or credentials.
  */
 export type CoreEvent =
-  | { type: 'messageDelta'; conversationId: string; messageId: string; delta: string }
+  | { type: "messageDelta"; conversationId: string; messageId: string; delta: string }
   | {
-      type: 'messageComplete';
+      type: "messageComplete";
       conversationId: string;
       messageId: string;
       status: MessageStatus;
       route: RouteMetadata | null;
       usage: TokenUsage | null;
     }
-  | { type: 'messageError'; conversationId: string; messageId: string; message: string }
-  | { type: 'conversationUpdated'; conversationId: string }
-  | { type: 'conversationCreated'; conversationId: string }
-  | { type: 'conversationDeleted'; conversationId: string }
-  | { type: 'mcpStateChanged'; serverId: string; state: McpConnectionState }
-  | { type: 'mcpError'; serverId: string; message: string }
+  | { type: "messageError"; conversationId: string; messageId: string; message: string }
+  | { type: "conversationUpdated"; conversationId: string }
+  | { type: "conversationCreated"; conversationId: string }
+  | { type: "conversationDeleted"; conversationId: string }
+  | { type: "mcpStateChanged"; serverId: string; state: McpConnectionState }
+  | { type: "mcpError"; serverId: string; message: string }
   | {
-      type: 'permissionRequested';
+      type: "permissionRequested";
       requestId: string;
       serverId: string;
       toolName: string;
       mode: PermissionMode;
       rationale: string;
     }
-  | { type: 'providersChanged' }
-  | { type: 'personasChanged' };
+  | { type: "providersChanged" }
+  | { type: "personasChanged" };
