@@ -25,7 +25,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use super::jsonrpc::{JsonRpcMessage, JsonRpcNotification, JsonRpcRequest};
-use super::Transport;
+use super::{Transport, NOTIFICATION_BUFFER};
 use crate::error::{JsonRpcErrorPayload, TransportError};
 
 /// The table of in-flight requests awaiting a correlated response, keyed by
@@ -40,8 +40,12 @@ pub struct StdioTransport {
     stdin: Mutex<ChildStdin>,
     /// In-flight requests awaiting responses.
     pending: PendingMap,
-    /// Server -> client notifications drained by the lifecycle layer.
-    notifications: Mutex<mpsc::UnboundedReceiver<JsonRpcNotification>>,
+    /// Server -> client notifications, drained by [`next_notification`]. This
+    /// is a BOUNDED channel with a drop-newest-on-full policy (see
+    /// [`NOTIFICATION_BUFFER`]): a chatty long-lived server that emits progress/
+    /// log notifications faster than they are drained (or with no consumer at
+    /// all) cannot grow memory without bound - excess notifications are dropped.
+    notifications: Mutex<mpsc::Receiver<JsonRpcNotification>>,
     /// The child handle, kept so [`shutdown`](Transport::shutdown) can kill it.
     child: Mutex<Child>,
 }
@@ -81,7 +85,7 @@ impl StdioTransport {
             .ok_or_else(|| TransportError::Spawn("child stdout was not captured".to_string()))?;
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
-        let (notif_tx, notif_rx) = mpsc::unbounded_channel();
+        let (notif_tx, notif_rx) = mpsc::channel(NOTIFICATION_BUFFER);
 
         // Background reader: parse newline-delimited JSON-RPC frames and route
         // them to pending requests or the notification channel.
@@ -113,9 +117,15 @@ impl StdioTransport {
                                 }
                             }
                             Ok(JsonRpcMessage::Notification(note)) => {
-                                // Receiver dropped => nobody is listening; stop.
-                                if notif_tx.send(note).is_err() {
-                                    break;
+                                // Bounded channel with a drop policy: never block
+                                // the reader (that would stall correlated
+                                // responses) and never grow memory without bound.
+                                // On `Full`, drop this notification; on `Closed`
+                                // (receiver gone => nobody is listening), stop.
+                                match notif_tx.try_send(note) {
+                                    Ok(()) => {}
+                                    Err(mpsc::error::TrySendError::Full(_)) => {}
+                                    Err(mpsc::error::TrySendError::Closed(_)) => break,
                                 }
                             }
                             Err(_) => {

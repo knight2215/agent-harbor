@@ -14,8 +14,9 @@
 //! P3.6).
 //!
 //! This crate carries crates.io deps (tokio process/io/sync/time, serde_json for
-//! the in-crate JSON-RPC layer, reqwest + rustls-`ring` + futures/bytes for the
-//! HTTP/SSE transport), so it is under `[workspace] exclude` in the root
+//! the in-crate JSON-RPC layer, reqwest + rustls-`ring` for the HTTP/SSE
+//! transport; the SSE decoder is a plain `str::split`, no futures/bytes), so it
+//! is under `[workspace] exclude` in the root
 //! Cargo.toml and built/tested/clippied in CI via
 //! `--manifest-path crates/mcp-client/Cargo.toml` (the offline sandbox cannot
 //! resolve those deps). The stdio transport is exercised end to end against a

@@ -25,8 +25,9 @@ name: CI
 #                                   (Phase 2 / FEAT-001; tests use mocked HTTP+SSE)
 #     - crates/mcp-client        -> tokio (process/io/sync/time) + serde_json
 #                                   (in-crate JSON-RPC) + reqwest (rustls-tls) +
-#                                   rustls/ring + futures/futures-util/bytes
-#                                   (HTTP/SSE transport) + async-trait + thiserror
+#                                   rustls/ring (HTTP/SSE transport; the SSE
+#                                   decoder is a plain str::split, no futures)
+#                                   + async-trait + thiserror
 #                                   (Phase 3 / FEAT-001; stdio tests spawn a
 #                                   bundled cross-platform mock MCP server bin)
 #   Cargo resolves the whole `members` dependency graph to build Cargo.lock, so
@@ -244,9 +245,10 @@ jobs:
       # mcp-client is under `[workspace] exclude` because Phase 3 (FEAT-001) gave
       # it crates.io deps unreachable offline: tokio (process/io/sync/time for
       # the stdio transport + per-tool timeouts), serde/serde_json (the in-crate
-      # JSON-RPC 2.0 layer), reqwest (rustls-tls) + rustls/`ring` +
-      # futures/futures-util/bytes (the HTTP/SSE transport + SSE decoder,
-      # mirroring providers), async-trait (the `Transport` trait), and thiserror.
+      # JSON-RPC 2.0 layer), reqwest (rustls-tls) + rustls/`ring` (the HTTP/SSE
+      # transport; the SSE decoder is a plain `str::split` over the buffered POST
+      # body, so no futures/bytes stream machinery), async-trait (the
+      # `Transport` trait), and thiserror.
       # The `--workspace` commands above do NOT touch it. Build/test/clippy it
       # directly via its manifest; its `path` deps on the excluded
       # `domain`/`providers` crates are resolved transitively here. Built BEFORE

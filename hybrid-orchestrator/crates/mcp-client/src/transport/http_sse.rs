@@ -19,6 +19,29 @@
 //! end to end by the bundled mock server; the HTTP/SSE transport is validated in
 //! CI against a mocked HTTP server (mirroring how `providers` tests its client),
 //! since the offline sandbox cannot reach a network.
+//!
+//! ## KNOWN LIMITATION: buffered, request-scoped SSE (not true server-push)
+//!
+//! [`HttpSseTransport::post`] awaits [`reqwest::Response::text`], which BUFFERS
+//! the entire HTTP response body before [`decode_sse_data_frames`] splits it
+//! into `data:` frames. As a result SSE is consumed per request/response rather
+//! than as a persistent server -> client stream: a POST's response is decoded in
+//! full once the body completes, and any notifications interleaved in that body
+//! are surfaced then (not incrementally as they arrive). This satisfies the
+//! request/response MCP methods (`initialize`, `tools/list`, `tools/call`) but
+//! does NOT deliver the long-lived server-push streaming described in
+//! architecture.md Section 5.2.
+//!
+//! This is a deliberate, scoped choice: a streamed decoder (holding a
+//! [`reqwest::Response`] byte stream open and feeding an incremental SSE frame
+//! parser) is a larger rewrite that cannot be exercised in the offline sandbox
+//! (crates.io is unreachable and there is no live server), so it carries real
+//! regression risk with no local verification. The stdio transport - which IS
+//! exercised end to end - already provides a fully async notification path, and
+//! nothing in the current lifecycle consumes server-push notifications. When a
+//! future phase needs live HTTP server-push, replace `post()`'s buffering with a
+//! streamed body reader and an incremental frame parser; the frame-splitting
+//! logic in [`decode_sse_data_frames`] can be reused per chunk.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -28,7 +51,7 @@ use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 
 use super::jsonrpc::{JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
-use super::Transport;
+use super::{Transport, NOTIFICATION_BUFFER};
 use crate::error::{JsonRpcErrorPayload, TransportError};
 
 /// A JSON-RPC transport over HTTP with SSE for server -> client streaming.
@@ -37,9 +60,12 @@ pub struct HttpSseTransport {
     headers: Vec<(String, String)>,
     http: reqwest::Client,
     next_id: AtomicU64,
-    /// Server -> client notifications observed on POST SSE responses.
-    notif_rx: Mutex<mpsc::UnboundedReceiver<JsonRpcNotification>>,
-    notif_tx: mpsc::UnboundedSender<JsonRpcNotification>,
+    /// Server -> client notifications observed on POST SSE responses. BOUNDED
+    /// with a drop-on-full policy (see [`NOTIFICATION_BUFFER`]) so a chatty
+    /// server whose notifications are never drained cannot grow memory without
+    /// bound.
+    notif_rx: Mutex<mpsc::Receiver<JsonRpcNotification>>,
+    notif_tx: mpsc::Sender<JsonRpcNotification>,
 }
 
 impl HttpSseTransport {
@@ -51,7 +77,7 @@ impl HttpSseTransport {
         // crypto provider installed before the client is used; install `ring`
         // once here so the reqwest connector's TLS init succeeds.
         crate::crypto::ensure_crypto_provider();
-        let (notif_tx, notif_rx) = mpsc::unbounded_channel();
+        let (notif_tx, notif_rx) = mpsc::channel(NOTIFICATION_BUFFER);
         HttpSseTransport {
             url: url.into(),
             headers,
@@ -93,6 +119,10 @@ impl HttpSseTransport {
             .map(|ct| ct.contains("text/event-stream"))
             .unwrap_or(false);
 
+        // KNOWN LIMITATION (see the module-level docs): this BUFFERS the whole
+        // body before SSE decoding, so streaming is request-scoped rather than a
+        // persistent server-push stream. Acceptable for request/response MCP; a
+        // streamed decoder is deferred (a risky rewrite unverifiable offline).
         let text = resp
             .text()
             .await
@@ -136,7 +166,8 @@ impl Transport for HttpSseTransport {
                     // A response to a different id; ignore (single-flight POST).
                 }
                 Ok(JsonRpcMessage::Notification(note)) => {
-                    let _ = self.notif_tx.send(note);
+                    // Drop on full / closed; never block or grow unbounded.
+                    let _ = self.notif_tx.try_send(note);
                 }
                 Err(e) => return Err(TransportError::Protocol(e.to_string())),
             }
@@ -173,7 +204,8 @@ impl Transport for HttpSseTransport {
                 if let Ok(JsonRpcMessage::Notification(note)) =
                     serde_json::from_str::<JsonRpcMessage>(trimmed)
                 {
-                    let _ = self.notif_tx.send(note);
+                    // Drop on full / closed; never block or grow unbounded.
+                    let _ = self.notif_tx.try_send(note);
                 }
             }
         }

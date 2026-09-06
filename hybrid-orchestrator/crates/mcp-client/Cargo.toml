@@ -15,9 +15,10 @@ edition = "2021"
 license = "MIT"
 
 # NOTE: This crate depends on external crates.io crates (tokio for process/io/
-# sync/time, serde/serde_json for the JSON-RPC layer, reqwest + SSE stream for
-# the HTTP/SSE transport, futures/futures-util/bytes for the SSE decoder,
-# async-trait for the `Transport` trait, thiserror for error types). Those
+# sync/time, serde/serde_json for the JSON-RPC layer, reqwest for the HTTP/SSE
+# transport, async-trait for the `Transport` trait, thiserror for error types).
+# The SSE decoder is a plain `str::split` over the buffered POST body, so it
+# needs no `futures`/`futures-util`/`bytes` stream machinery. Those
 # resolve only where crates.io is reachable (CI), so this crate is placed under
 # `[workspace] exclude` in the root Cargo.toml (NOT under `members`); bare
 # offline cargo commands never try to resolve them. CI builds/tests/clippies it
@@ -58,9 +59,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 # `providers`, and install it once at client-construction time (see
 # `src/crypto.rs`).
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-futures = "0.3"
-futures-util = "0.3"
-bytes = "1"
 
 [dev-dependencies]
 # tokio macros/rt provide the `#[tokio::test]` harness used by the stdio

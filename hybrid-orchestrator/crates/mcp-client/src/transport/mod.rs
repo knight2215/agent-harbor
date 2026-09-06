@@ -22,6 +22,19 @@ use serde_json::Value;
 use crate::error::TransportError;
 use jsonrpc::JsonRpcNotification;
 
+/// Capacity of the bounded server -> client notification channel used by both
+/// transports.
+///
+/// Notifications are advisory (progress / log pushes). The lifecycle layer does
+/// not currently consume them, and even once it does a burst can outpace the
+/// consumer. A BOUNDED channel with a drop-newest-on-full policy (the transports
+/// use `try_send`) guarantees a chatty long-lived server cannot grow client
+/// memory without bound: once the buffer fills, further notifications are
+/// dropped rather than queued forever. This is the intended behavior for
+/// best-effort notifications; correlated request/response traffic is unaffected
+/// because it uses a separate per-request `oneshot`.
+pub const NOTIFICATION_BUFFER: usize = 256;
+
 /// The async transport contract shared by the stdio and HTTP/SSE transports.
 ///
 /// A transport owns the connection to a single MCP server. [`request`](Transport::request)

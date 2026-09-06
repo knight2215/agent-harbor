@@ -186,7 +186,15 @@ impl PermissionGate {
             PermissionMode::Deny => PermissionOutcome::Deny {
                 reason: format!("permission denied: server policy denies tool `{tool_name}`"),
             },
-            PermissionMode::Ask => self.prompt(server_id, tool_name, mode, rationale).await,
+            // Pass the EFFECTIVE mode (after per-tool overrides), not the server
+            // default, so the emitted `PermissionRequested.mode` reflects what
+            // actually applies to this tool. When no override is present
+            // `effective == mode`, so this is a no-op today; it matters once
+            // per-tool overrides are wired.
+            PermissionMode::Ask => {
+                self.prompt(server_id, tool_name, effective, rationale)
+                    .await
+            }
         }
     }
 

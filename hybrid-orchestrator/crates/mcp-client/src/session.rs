@@ -285,15 +285,32 @@ impl McpServerHandle {
     ///
     /// Marks the handle `Connecting`, then retries [`connect`](Self::connect) up
     /// to `max_reconnect_attempts` times with a delay of
-    /// `reconnect_base_delay * 2^attempt` between tries. On success the tools
+    /// `reconnect_base_delay * 2^(attempt-1)` between tries. On success the tools
     /// cache is refreshed (via the `tools/list` inside `connect`). On exhausting
     /// all attempts the handle is left `Disconnected` and the last error
     /// returned.
+    ///
+    /// The backoff multiplier and the resulting `Duration` are computed with
+    /// SATURATING arithmetic so a large `max_reconnect_attempts` set via the
+    /// public [`HandleLimits`] can never overflow-panic (`2u32.pow` overflows
+    /// past ~32 attempts, and the `Duration` multiply can overflow earlier). The
+    /// exponent is capped so the multiplier stays within `u32`, and the delay
+    /// saturates at [`Duration::MAX`] rather than wrapping.
     pub async fn reconnect(&self) -> Result<(), McpError> {
+        /// Max shift for the backoff multiplier: `1u32 << 31` is the largest
+        /// power of two that fits in a `u32`, so the exponent is capped here.
+        const MAX_BACKOFF_SHIFT: u32 = 31;
+
         let mut last_err: Option<McpError> = None;
         for attempt in 0..self.limits.max_reconnect_attempts {
             if attempt > 0 {
-                let delay = self.limits.reconnect_base_delay * 2u32.pow(attempt - 1);
+                let shift = (attempt - 1).min(MAX_BACKOFF_SHIFT);
+                let multiplier = 1u32 << shift;
+                let delay = self
+                    .limits
+                    .reconnect_base_delay
+                    .checked_mul(multiplier)
+                    .unwrap_or(Duration::MAX);
                 tokio::time::sleep(delay).await;
             }
             match self.connect().await {
