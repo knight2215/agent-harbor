@@ -22,8 +22,6 @@ export type CoreEvent = unknown;
  * @param handler invoked for each event received on the core channel.
  * @returns a promise resolving to an unlisten function that tears down the subscription.
  */
-export function onCoreEvent(
-  handler: (event: Event<CoreEvent>) => void,
-): Promise<UnlistenFn> {
+export function onCoreEvent(handler: (event: Event<CoreEvent>) => void): Promise<UnlistenFn> {
   return listen<CoreEvent>(CORE_EVENT_CHANNEL, handler);
 }
