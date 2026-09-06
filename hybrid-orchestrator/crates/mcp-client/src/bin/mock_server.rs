@@ -15,7 +15,7 @@
 //! - `tools/call`
 //!     - `echo`  -> echoes its `arguments` straight back in the result.
 //!     - `slow`  -> sleeps for a configurable number of milliseconds before
-//!                  replying (used to exercise the per-tool timeout path).
+//!       replying (used to exercise the per-tool timeout path).
 //! - `notifications/initialized` (a notification, no `id`) -> ignored.
 //!
 //! It uses ONLY the standard library (blocking stdin/stdout + `thread::sleep`),
