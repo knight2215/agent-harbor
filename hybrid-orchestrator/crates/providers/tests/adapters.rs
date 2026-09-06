@@ -21,7 +21,8 @@ use providers::adapters::generic_openai::build_generic_openai;
 use providers::adapters::lmstudio::build_lmstudio;
 use providers::adapters::openai::build_openai;
 use providers::{
-    negotiate, Capabilities, ChatMessage, ChatProvider, ChatRequest, MessageRole, ToolSpec,
+    ensure_crypto_provider, negotiate, Capabilities, ChatMessage, ChatProvider, ChatRequest,
+    MessageRole, ToolSpec,
 };
 use secrets::{InMemorySecretStore, SecretStore};
 use serde_json::{json, Value};
@@ -65,6 +66,7 @@ fn simple_request(model: &str) -> ChatRequest {
 
 #[tokio::test]
 async fn openai_non_streaming_sends_bearer_and_decodes_response() {
+    ensure_crypto_provider();
     let server = MockServer::start().await;
     let store = InMemorySecretStore::new();
     let key_ref = store.store("openai", "sk-test-123").unwrap();
@@ -98,6 +100,7 @@ async fn openai_non_streaming_sends_bearer_and_decodes_response() {
 
 #[tokio::test]
 async fn openai_streaming_normalizes_sse_into_ordered_deltas() {
+    ensure_crypto_provider();
     let server = MockServer::start().await;
     let store = InMemorySecretStore::new();
     let key_ref = store.store("openai", "sk-test-123").unwrap();
@@ -139,6 +142,7 @@ async fn openai_streaming_normalizes_sse_into_ordered_deltas() {
 
 #[tokio::test]
 async fn openai_lists_models() {
+    ensure_crypto_provider();
     let server = MockServer::start().await;
     let store = InMemorySecretStore::new();
     let key_ref = store.store("openai", "sk-test-123").unwrap();
@@ -172,6 +176,7 @@ async fn openai_lists_models() {
 
 #[tokio::test]
 async fn lmstudio_sends_no_authorization_header() {
+    ensure_crypto_provider();
     let server = MockServer::start().await;
     let store = InMemorySecretStore::new();
 
@@ -210,6 +215,7 @@ async fn lmstudio_sends_no_authorization_header() {
 
 #[tokio::test]
 async fn generic_uses_user_base_url_and_optional_bearer() {
+    ensure_crypto_provider();
     let server = MockServer::start().await;
     let store = InMemorySecretStore::new();
     let key_ref = store.store("generic", "user-key").unwrap();
@@ -243,6 +249,7 @@ async fn generic_uses_user_base_url_and_optional_bearer() {
 
 #[tokio::test]
 async fn azure_rewrites_path_adds_api_version_and_uses_api_key_header() {
+    ensure_crypto_provider();
     let server = MockServer::start().await;
     let store = InMemorySecretStore::new();
     let key_ref = store.store("azure", "az-secret").unwrap();
@@ -279,6 +286,7 @@ async fn azure_rewrites_path_adds_api_version_and_uses_api_key_header() {
 
 #[tokio::test]
 async fn capability_negotiation_omits_tools_when_model_reports_no_tools() {
+    ensure_crypto_provider();
     let server = MockServer::start().await;
     let store = InMemorySecretStore::new();
     let key_ref = store.store("openai", "sk-test-123").unwrap();
@@ -328,6 +336,7 @@ async fn capability_negotiation_omits_tools_when_model_reports_no_tools() {
 /// messages round-trip and `stream` is present in the outbound body.
 #[tokio::test]
 async fn openai_body_translation_includes_model_and_messages() {
+    ensure_crypto_provider();
     let server = MockServer::start().await;
     let store = InMemorySecretStore::new();
     let key_ref = store.store("openai", "sk-test-123").unwrap();

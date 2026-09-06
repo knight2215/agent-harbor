@@ -82,10 +82,15 @@ impl AnthropicAdapter {
         }
     }
 
-    /// The auth + version + content-type headers for every request.
+    /// The auth + version headers for every request.
+    ///
+    /// `Content-Type: application/json` is intentionally NOT set here: the
+    /// shared [`HttpSseClient`] POST helpers use reqwest's `.json()`, which
+    /// already sets it once. Setting it again through `apply_headers` would make
+    /// reqwest APPEND a duplicate value (`application/json,application/json`),
+    /// which breaks exact-match `content-type` assertions.
     fn request_headers(&self) -> Vec<(String, String)> {
         vec![
-            ("Content-Type".to_string(), "application/json".to_string()),
             ("x-api-key".to_string(), self.api_key.clone()),
             (
                 "anthropic-version".to_string(),

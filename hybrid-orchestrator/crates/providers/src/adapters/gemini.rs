@@ -85,10 +85,13 @@ impl GeminiAdapter {
     /// logs, and reqwest transport errors that stringify the request URL), so a
     /// header avoids leaking the key into those paths (review issue 6).
     fn request_headers(&self) -> Vec<(String, String)> {
-        vec![
-            ("Content-Type".to_string(), "application/json".to_string()),
-            ("x-goog-api-key".to_string(), self.api_key.clone()),
-        ]
+        // `Content-Type: application/json` is intentionally NOT set here: the
+        // shared `HttpSseClient` POST helpers use reqwest's `.json()`, which
+        // already sets it once. Setting it again through `apply_headers` would
+        // make reqwest APPEND a duplicate value
+        // (`application/json,application/json`), breaking exact-match
+        // `content-type` assertions.
+        vec![("x-goog-api-key".to_string(), self.api_key.clone())]
     }
 
     /// The path for the non-streaming or streaming endpoint. The API key is NOT

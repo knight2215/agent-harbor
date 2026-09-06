@@ -139,11 +139,18 @@ impl NativeAdapter {
         }
     }
 
-    /// The `Content-Type` + auth headers for a request.
+    /// The auth headers for a request.
+    ///
+    /// `Content-Type: application/json` is intentionally NOT set here. The
+    /// shared [`HttpSseClient`] POST helpers build the body with reqwest's
+    /// `.json()`, which already sets `Content-Type: application/json` exactly
+    /// once. Adding it again through `apply_headers` made reqwest APPEND a
+    /// second identical value (reqwest's `.header()` appends rather than
+    /// replaces), so the wire header became `application/json,application/json`
+    /// and an exact-match `content-type` mock matcher (tests/adapters.rs)
+    /// returned 404. Letting `.json()` own the header keeps it single-valued.
     fn request_headers(&self) -> Vec<(String, String)> {
-        let mut headers = vec![("Content-Type".to_string(), "application/json".to_string())];
-        headers.extend(self.auth.headers());
-        headers
+        self.auth.headers()
     }
 
     /// Serialize a [`ChatRequest`] to the outbound JSON body, forcing the

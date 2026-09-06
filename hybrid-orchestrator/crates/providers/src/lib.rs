@@ -15,7 +15,7 @@
 pub mod builtins;
 pub mod capability;
 pub mod contract;
-pub(crate) mod crypto;
+pub mod crypto;
 pub mod registry;
 
 pub mod adapters {
@@ -44,6 +44,11 @@ pub mod adapters {
 // Ergonomic re-exports of the key public types (used by tauri-app and the rest
 // of the core).
 pub use capability::{negotiate, HttpSseClient, Negotiated};
+// The process-wide rustls crypto-provider installer. Re-exported so callers
+// (and integration tests) can install the `ring` default deterministically
+// before constructing any rustls-backed client, independent of which adapter
+// path builds the first client.
+pub use crypto::ensure_crypto_provider;
 pub use contract::{
     Capabilities, ChatChoice, ChatDelta, ChatMessage, ChatProvider, ChatRequest, ChatResponse,
     FinishReason, FunctionCall, FunctionSpec, MessageRole, ModelInfo, ProviderError, ToolCall,
