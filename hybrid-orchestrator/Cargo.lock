@@ -7,17 +7,6 @@ name = "mcp-client"
 version = "0.1.0"
 
 [[package]]
-name = "orchestrator-core"
-version = "0.1.0"
-dependencies = [
- "mcp-client",
- "persistence",
- "providers",
- "routing",
- "secrets",
-]
-
-[[package]]
 name = "persistence"
 version = "0.1.0"
 

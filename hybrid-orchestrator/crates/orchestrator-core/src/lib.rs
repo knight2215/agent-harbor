@@ -1,16 +1,24 @@
-//! `orchestrator-core` crate: domain models and message pipeline (placeholder).
+//! `orchestrator-core` crate: domain models and message pipeline.
 //!
-//! Phase 0 scaffold. Framework-agnostic (no Tauri dependency). Coordinates
-//! routing, providers, MCP, and persistence. The real session manager,
-//! pipeline, and events land in later phases.
+//! Framework-agnostic (no Tauri dependency). Coordinates routing, providers,
+//! MCP, and persistence. Phase 1 introduces the real Section 7.1 domain models
+//! (see [`models`]); the session manager, pipeline, and events land in later
+//! phases.
 
 pub mod events;
+pub mod models;
 pub mod pipeline;
 pub mod session;
 
-/// Placeholder marker so dependents can reference an item from this crate,
-/// proving the dependency edge compiles. Replaced with real API in later phases.
-pub fn placeholder() {}
+// Re-export the domain models at the crate root so dependents can write
+// `orchestrator_core::Conversation` etc. These are the authoritative DTOs
+// mirrored by hand into `frontend/src/types/index.ts`.
+pub use models::{
+    AgentPersona, Attachment, Conversation, ManualRoute, McpServerConfig, McpTransport, Message,
+    MessageContent, MessageStatus, ModelParameters, PermissionMode, PrivacyTag, ProviderConfig,
+    ProviderKind, Role, RouteMetadata, RouteSource, RoutingHint, SecretRef, TokenUsage, ToolCall,
+    ToolResult,
+};
 
 #[cfg(test)]
 mod tests {

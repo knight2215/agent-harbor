@@ -1,24 +1,36 @@
 name: CI
 
-# Phase 0 CI pipeline (tasks.md P0.6).
+# CI pipeline (tasks.md P0.6, extended in Phase 1 / P1.1).
 #
 # Runs the full workspace build/test/clippy, the frontend vitest suite, and a
-# `tauri build` on a matrix of target operating systems. Unlike the Phase 0
-# offline sandbox, GitHub Actions has network access, so this is the
-# authoritative place where the FULL build is exercised: the six library crates
-# AND the tauri-app crate (which needs the external `tauri` crate from
-# crates.io), plus the npm dependencies for the frontend.
+# `tauri build` on a matrix of target operating systems. Unlike the offline
+# sandbox, GitHub Actions has network access, so this is the authoritative place
+# where the FULL build is exercised: the offline-buildable library crates AND
+# the crates that carry crates.io dependencies (which are unreachable offline),
+# plus the npm dependencies for the frontend.
 #
 # IMPORTANT WORKSPACE ARRANGEMENT:
-#   crates/tauri-app is under `[workspace] exclude` in hybrid-orchestrator/
-#   Cargo.toml (NOT `members`). This was forced by the offline sandbox: cargo
-#   resolves the whole `members` dependency graph to build Cargo.lock, and
-#   `tauri` is unreachable offline. A consequence is that `cargo build
-#   --workspace` (and `cargo build -p tauri-app`) will NOT include tauri-app,
-#   because an excluded package is invisible to the workspace. Therefore CI
-#   builds/tests/clippies tauri-app EXPLICITLY via
-#   `--manifest-path crates/tauri-app/Cargo.toml`. The final `tauri build`
-#   step compiles tauri-app as part of bundling the installer as well.
+#   Some crates are under `[workspace] exclude` in hybrid-orchestrator/
+#   Cargo.toml (NOT `members`) because they depend on crates.io crates that are
+#   unreachable in the offline sandbox:
+#     - crates/tauri-app         -> `tauri` + `tauri-build` (since Phase 0)
+#     - crates/orchestrator-core -> serde/serde_json/uuid/chrono/thiserror
+#                                   (since Phase 1 / FEAT-001)
+#   Cargo resolves the whole `members` dependency graph to build Cargo.lock, so
+#   an excluded crate is invisible to `cargo build --workspace` (and to
+#   `cargo build -p <crate>`). Therefore CI builds/tests/clippies each excluded
+#   crate EXPLICITLY via `--manifest-path crates/<crate>/Cargo.toml`. The final
+#   `tauri build` step compiles tauri-app (and, transitively, orchestrator-core)
+#   as part of bundling the installer as well.
+#
+#   `orchestrator-core` path-depends on the five member library crates, so
+#   building it standalone still pulls those in through their `path`
+#   dependencies - its Section 3.3 dependency edges are validated here in CI.
+#
+# NOTE for FEAT-002: when `persistence` (sqlx) and `secrets` (keyring) gain
+# their own crates.io deps they will likewise move to `[workspace] exclude`;
+# add matching `--manifest-path crates/persistence/Cargo.toml` and
+# `--manifest-path crates/secrets/Cargo.toml` build/test/clippy steps then.
 
 on:
   push:
@@ -103,8 +115,16 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # --- Rust: workspace (the six library crates) ---------------------------
-      - name: cargo fmt (check)
+      - name: cargo fmt (check, workspace members)
         run: cargo fmt --all --check
+
+      # Excluded crates are invisible to `cargo fmt --all`, so fmt-check them
+      # explicitly via their manifests to keep formatting enforced everywhere.
+      - name: cargo fmt (check, orchestrator-core)
+        run: cargo fmt --manifest-path crates/orchestrator-core/Cargo.toml --check
+
+      - name: cargo fmt (check, tauri-app)
+        run: cargo fmt --manifest-path crates/tauri-app/Cargo.toml --check
 
       - name: cargo build (workspace)
         run: cargo build --workspace
@@ -114,6 +134,21 @@ jobs:
 
       - name: cargo clippy (workspace)
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # --- Rust: orchestrator-core (excluded from the workspace, built explicitly)
+      # orchestrator-core is under `[workspace] exclude` because it carries
+      # crates.io deps (serde/serde_json/uuid/chrono/thiserror) that are
+      # unreachable offline (Phase 1 / FEAT-001). The `--workspace` commands
+      # above do NOT touch it. Build/test/clippy it directly via its manifest;
+      # its `path` deps on the member libs are resolved transitively here.
+      - name: cargo build (orchestrator-core)
+        run: cargo build --manifest-path crates/orchestrator-core/Cargo.toml
+
+      - name: cargo clippy (orchestrator-core)
+        run: cargo clippy --manifest-path crates/orchestrator-core/Cargo.toml --all-targets -- -D warnings
+
+      - name: cargo test (orchestrator-core)
+        run: cargo test --manifest-path crates/orchestrator-core/Cargo.toml
 
       # --- Rust: tauri-app (excluded from the workspace, built explicitly) ----
       # tauri-app is under `[workspace] exclude`, so the `--workspace` commands
