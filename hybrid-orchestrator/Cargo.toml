@@ -52,11 +52,22 @@ resolver = "2"
 # bundled CROSS-PLATFORM mock MCP server (a `[[bin]]` in the crate), never live
 # network; the HTTP/SSE transport is exercised against a mocked server.
 #
-# The only crate that remains an offline-buildable member is the still
-# dependency-free `routing`.
-members = [
-    "crates/routing",
-]
+# Phase 4 (FEAT-001) fills in the `routing` crate with the real policy engine,
+# giving it path deps on `providers` and `domain`. Both of those carry crates.io
+# deps transitively (reqwest/sqlx/keyring/...), so `routing` is now
+# offline-unreachable too. Following the SAME pattern as every crate above, it
+# therefore MOVES from `members` to `exclude` and gains explicit CI
+# `--manifest-path crates/routing/Cargo.toml` build/test/clippy/fmt steps. Its
+# unit tests use no live network (they build in-memory `AvailableModel`
+# candidates directly).
+#
+# With `routing` moved out, NO crate remains an offline-buildable `members`
+# entry: every crate in the tree now carries crates.io deps (directly or
+# transitively). The `members` array is kept present but EMPTY (do NOT delete
+# the key) so the workspace stays well-formed; `cargo build --workspace` simply
+# builds nothing offline, which is acceptable and fully covered by the per-crate
+# CI steps. Every crate is validated in CI via `--manifest-path`.
+members = []
 
 # Excluded (networked) crates: NOT workspace members because they depend on
 # crates.io crates that cannot be resolved offline.
@@ -87,6 +98,12 @@ members = [
 #                          process + HTTP/SSE stack, so it joined the excluded
 #                          set in Phase 3 (FEAT-001); its stdio tests spawn a
 #                          bundled cross-platform mock MCP server.
+#   - `routing`:           async-trait + serde/serde_json + thiserror, plus path
+#                          deps on `providers` and `domain` (Phase 4 / FEAT-001).
+#                          It carries no crates.io deps of its own beyond those,
+#                          but its path deps pull in the crates.io HTTP/DB/keyring
+#                          stack transitively, so it joined the excluded set in
+#                          Phase 4; its unit tests use no live network.
 #   - `secrets`:           keyring + serde + thiserror (FEAT-002).
 #   - `tauri-app`:         tauri + tauri-build + serde/serde_json (Phase 0).
 #
@@ -120,8 +137,8 @@ members = [
 # entry from `exclude` into `members` (keeping it out of `default-members` so
 # bare offline `cargo build` still skips it), run a networked
 # `cargo build -p domain -p mcp-client -p orchestrator-core -p persistence -p
-# secrets -p tauri-app` to populate `Cargo.lock` with the full dependency graph,
-# and commit
+# routing -p secrets -p tauri-app` to populate `Cargo.lock` with the full
+# dependency graph, and commit
 # the updated `Cargo.lock` in the same change. That reconnects the crates to the
 # workspace lockfile without breaking the offline default build. The per-crate
 # `--manifest-path` CI steps can then be collapsed back into `--workspace` runs.
@@ -131,6 +148,7 @@ exclude = [
     "crates/orchestrator-core",
     "crates/persistence",
     "crates/providers",
+    "crates/routing",
     "crates/secrets",
     "crates/tauri-app",
 ]

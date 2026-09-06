@@ -7,8 +7,11 @@
 
 use std::sync::Arc;
 
+use mcp_client::McpServerHandle;
 use orchestrator_core::{CoreEvent, PermissionRegistry, SessionManager};
+use persistence::config::AppConfig;
 use persistence::{Db, PersistenceError};
+use routing::PolicyRegistry;
 use secrets::{KeyringSecretStore, SecretStore};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
@@ -35,9 +38,23 @@ pub struct AppState {
     /// 9.4). The core's `PermissionGate` registers a pending request when it
     /// emits a [`CoreEvent::PermissionRequested`]; the `resolve_permission`
     /// command delivers the user's decision here to unblock the awaiting
-    /// invocation. Phase 3 (FEAT-002) wires this seam; the tool-invocation
-    /// pipeline that constructs the gate around it lands in a later phase.
+    /// invocation. Phase 3 (FEAT-002) wires this seam; Phase 4 (FEAT-002) wires
+    /// the pipeline that constructs the `PermissionGate` around it in
+    /// `send_message`.
     pub permission_registry: PermissionRegistry,
+    /// The routing policy registry (architecture.md Section 6.4). Holds the
+    /// selectable/persisted active automatic policy; the `send_message`
+    /// pipeline calls [`PolicyRegistry::resolve`] to route each turn. The active
+    /// id is read from `AppConfig.active_routing_policy` at
+    /// [`AppState::initialize`], defaulting to the built-in `autoDefault`.
+    /// Behind `Arc` so it is cheaply cloned into the spawned pipeline task.
+    pub policies: Arc<PolicyRegistry>,
+    /// Connected MCP server handles the pipeline attaches tools from
+    /// (architecture.md Section 5). EMPTY for now: the MCP server-manager wiring
+    /// that connects and tracks handles lands in Phase 5, so the pipeline runs
+    /// with zero connected servers (no tools attached) until then. The pipeline
+    /// tolerates an empty set (it simply skips tool attachment).
+    pub mcp_servers: Arc<Vec<Arc<McpServerHandle>>>,
 }
 
 impl AppState {
@@ -51,6 +68,23 @@ impl AppState {
         db_path: impl AsRef<std::path::Path>,
     ) -> Result<(Self, UnboundedReceiver<CoreEvent>), PersistenceError> {
         let db = Db::open(db_path).await?;
+
+        // Read the persisted active routing policy id (Section 6.4 / 10.4) and
+        // select it, falling back to the built-in `autoDefault` if it is unset
+        // or names a policy this build does not register.
+        let app_config = AppConfig::load(&db).await?;
+        let mut policies = PolicyRegistry::new();
+        if let Some(active) = app_config.active_routing_policy.as_deref() {
+            // A stale/unknown persisted id must not fail startup: keep the
+            // default active policy in that case.
+            let _ = policies.set_active(active);
+        }
+
+        // The provider registry + candidate model list are (re)built per turn in
+        // the `send_message` command path from the persisted `ProviderConfig`
+        // rows and pricing (mirroring `list_available_models_inner`), so nothing
+        // provider-related is built here.
+
         let session_manager = Arc::new(SessionManager::new(db));
         let secret_store: Arc<dyn SecretStore + Send + Sync> = Arc::new(KeyringSecretStore::new());
         let (core_events, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -59,6 +93,10 @@ impl AppState {
             secret_store,
             core_events,
             permission_registry: PermissionRegistry::new(),
+            policies: Arc::new(policies),
+            // No MCP server manager yet (Phase 5); the pipeline tolerates an
+            // empty set by attaching no tools.
+            mcp_servers: Arc::new(Vec::new()),
         };
         Ok((state, rx))
     }
@@ -77,6 +115,11 @@ impl AppState {
             secret_store,
             core_events,
             permission_registry: PermissionRegistry::new(),
+            // Tests default to the built-in `autoDefault` policy and no connected
+            // MCP servers; a test that needs a specific policy can override the
+            // field on the returned state.
+            policies: Arc::new(PolicyRegistry::new()),
+            mcp_servers: Arc::new(Vec::new()),
         };
         (state, rx)
     }

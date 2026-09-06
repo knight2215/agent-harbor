@@ -56,13 +56,19 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
+# Phase 4 (FEAT-002): the message pipeline drives `ChatProvider::chat_stream`'s
+# `BoxStream` via `StreamExt::next`, so `futures-util` is now a NON-test
+# dependency (it was dev-only for the tool-loop test before). Concrete literal
+# (this crate is `[workspace] exclude`d, so no `{ workspace = true }`), kept in
+# sync with the root `[workspace.dependencies]` table.
+futures-util = "0.3"
 
 [dev-dependencies]
 # FEAT-002 integration test (tests/tool_loop.rs) drives the function-calling
 # bridge with a MOCK `ChatProvider` and a self-re-invoked mock MCP server over
-# stdio. `async-trait` implements the `ChatProvider` trait for the mock;
-# `futures-util` provides the `BoxStream` its `chat_stream` returns. Concrete
-# literals (this crate is `[workspace] exclude`d) kept in sync with the root
-# `[workspace.dependencies]` table.
+# stdio. `async-trait` implements the `ChatProvider` trait for the mock
+# (`futures-util`, used by both the pipeline and the tests' `BoxStream`, now
+# lives in `[dependencies]` above). Concrete literals (this crate is
+# `[workspace] exclude`d) kept in sync with the root `[workspace.dependencies]`
+# table.
 async-trait = "0.1"
-futures-util = "0.3"

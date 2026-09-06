@@ -113,3 +113,23 @@ export function deletePersona(personaId: string): Promise<void> {
 export function setProviderSecret(providerId: string, secret: string): Promise<SecretRef> {
   return invoke<SecretRef>("set_provider_secret", { providerId, secret });
 }
+
+// --- Message pipeline (P4.6 / Section 8.1) ----------------------------------
+
+/**
+ * Send a user message and drive the end-to-end pipeline (architecture.md
+ * Section 8.1). The assistant response is delivered by STREAMING core events
+ * (`messageDelta` / `messageComplete` / `messageError`) over the event bridge,
+ * not through this call's return value: the command validates its arguments,
+ * kicks off the pipeline turn, and resolves once the turn is under way.
+ *
+ * `overrideRoute` is the optional per-message manual override (Section 6.3,
+ * highest precedence); omit it (or pass `null`) for automatic routing.
+ */
+export function sendMessage(
+  conversationId: string,
+  content: string,
+  overrideRoute?: ManualRoute | null,
+): Promise<void> {
+  return invoke<void>("send_message", { conversationId, content, overrideRoute });
+}

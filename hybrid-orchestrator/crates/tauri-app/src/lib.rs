@@ -56,6 +56,7 @@ pub fn run() {
             commands::delete_persona,
             commands::set_provider_secret,
             commands::list_available_models,
+            commands::send_message,
             commands::resolve_permission,
         ])
         .run(tauri::generate_context!())

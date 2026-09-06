@@ -3,8 +3,9 @@
 //! Framework-agnostic (no Tauri dependency). Coordinates routing, providers,
 //! MCP, and persistence. Phase 1 provides the Section 7.1 domain models (see
 //! [`models`]), the [`session::SessionManager`] (Section 7.5), and the
-//! [`events::CoreEvent`] surface (Section 8). The streaming pipeline lands in a
-//! later phase.
+//! [`events::CoreEvent`] surface (Section 8). Phase 4 (FEAT-002) fills in the
+//! end-to-end streaming pipeline (see [`pipeline::run_turn`], Section 2.2):
+//! `message -> route -> provider -> tool loop -> persist`.
 //!
 //! ## Domain models live in the leaf `domain` crate
 //!
@@ -50,6 +51,11 @@ pub use session::{ConversationInit, SessionError, SessionManager};
 pub use permission::{Decision, PermissionGate, PermissionOutcome, PermissionRegistry};
 pub use tools_bridge::{validate_arguments, ToolBridge};
 
+// Phase 4 (FEAT-002): the end-to-end message pipeline (architecture.md Section
+// 2.2, P4.6) that assembles route -> provider -> tool loop -> persist. Re-exports
+// kept ALPHABETICALLY ORDERED.
+pub use pipeline::{run_turn, PipelineError, TurnContext, MAX_TOOL_LOOP_ITERATIONS};
+
 #[cfg(test)]
 mod tests {
     /// Smoke test that references an item from the library crates
@@ -61,7 +67,9 @@ mod tests {
     /// registry constructor. `mcp-client` gained its real API in Phase 3
     /// (FEAT-001); it no longer exposes `placeholder()`, so we reference its
     /// namespacing helper (also exercised by the `tools_bridge` module).
-    /// `routing` is still a placeholder crate.
+    /// `routing` gained its real API in Phase 4 (FEAT-001); it no longer exposes
+    /// `placeholder()`, so we construct its default [`routing::PolicyRegistry`]
+    /// and assert the built-in automatic policy is active.
     #[test]
     fn smoke() {
         let registry = providers::builtin_registry();
@@ -71,6 +79,8 @@ mod tests {
             mcp_client::namespace_tool("server", "tool"),
             format!("server{}tool", mcp_client::NAMESPACE_SEPARATOR)
         );
-        routing::placeholder();
+        // Reference a real `routing` item now that `placeholder()` is gone.
+        let policies = routing::PolicyRegistry::default();
+        assert_eq!(policies.active_id(), "autoDefault");
     }
 }
