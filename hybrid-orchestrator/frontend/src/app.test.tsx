@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { App } from "./app";
+import { useConversationsStore } from "./state/conversations";
 
 // Mock the Tauri IPC bridge so the test runs without a live backend. The shell
 // mounts every surface, so `invoke` is routed per-command and `listen` (used by
@@ -51,6 +52,18 @@ describe("<App />", () => {
     } catch {
       // Ignore storage errors in constrained envs.
     }
+    // Reset the shared conversations store to its real, complete default shape
+    // before each test. The store is a module-level singleton, so a prior
+    // test that seeds an active conversation must not bleed a partial state
+    // (e.g. an activated conversation with an undefined `messages`) into a
+    // sibling. Every field the shell reads is set to its real initial value.
+    useConversationsStore.setState({
+      conversations: [],
+      activeConversationId: null,
+      messages: [],
+      pendingOverride: null,
+      pendingPermissions: [],
+    });
   });
 
   it("renders the app version read at runtime via getVersion()", async () => {
