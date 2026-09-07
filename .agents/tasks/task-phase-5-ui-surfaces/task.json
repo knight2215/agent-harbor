@@ -1,0 +1,15 @@
+{
+  "task_id": "task-phase-5-ui-surfaces",
+  "task_description": "Phase 5 (architecture.md Section 8, tasks.md P5.1-P5.7): implement the five React UI surfaces (chat, model selector, tool/MCP manager, agent config editor, conversation history) wired to real Tauri commands/events, plus the shared IPC + Zustand-store plumbing and the supporting Rust #[tauri::command] additions and least-privilege capability wiring. Flip README Phase 5 status to DONE. Frontend-heavy; local gate is prettier --check only (eslint/tsc/vitest + all cargo per-crate checks deferred to CI on ubuntu+windows). Work on branch phase-5-ui-surfaces off main.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null,
+  "verification": {
+    "build": "deferred-ci",
+    "tests": "deferred-ci",
+    "test_quality": "pass",
+    "docker_build": "skipped",
+    "summary": "All four features completed. LOCAL: `NODE_OPTIONS= npx prettier --check .` passes across the whole frontend (the only locally runnable gate; global prettier 3.9.6). DEFERRED TO CI (no node_modules, npm registry 403 offline; crates.io unreachable so cargo cannot run locally): frontend eslint/tsc/vitest and all cargo per-crate fmt/build/clippy -D warnings/test on ubuntu+windows. Inspection confirms: 14 new #[tauri::command] handlers all registered in generate_handler! (27 total), 25 Rust unit tests via the _inner pattern, AppState's new runtime McpRegistry wired into send_message via snapshot().await with matching TurnContext.servers type (Vec<Arc<McpServerHandle>>), all cross-crate imports resolve, capabilities/default.json valid JSON at core:default least privilege, README Phase 5 flipped to DONE. Test quality: each surface has vitest+RTL suites exercising rendering, mocked-invoke command calls, and event-driven store transitions (synthetic CoreEvents via applyCoreEvent); a resolve_permission wiring gap found during review was fixed (commit 0a00b77) so Ask-mode prompts actually unblock the core. No macOS added; tauri-bundle stays gated.",
+    "test_quality_note": "Tests exercise real store/component logic (delta accumulation, completion finalize, pin clearing, override consume-and-clear, transport-shaped McpServerInput, full PersonaInput, event fan-out + unlisten), not static assertions; they would fail if the covered code path were reverted."
+  }
+}

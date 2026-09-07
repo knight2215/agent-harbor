@@ -1,12 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentPersona,
+  AvailableModel,
   Conversation,
+  ExportFormat,
   ManualRoute,
+  McpServerConfig,
+  McpServerInput,
+  Message,
   ModelParameters,
+  OpenedConversation,
+  PermissionDecision,
+  PermissionMode,
   PrivacyTag,
+  RouteExplanation,
   RoutingHint,
   SecretRef,
+  ToolDescriptorView,
 } from "../types";
 
 /**
@@ -104,6 +114,18 @@ export function deletePersona(personaId: string): Promise<void> {
 
 // --- Secret entry (P1.7) ----------------------------------------------------
 
+// --- Model selector data (P2.10 / Section 8.2) ------------------------------
+
+/**
+ * List every available model across all configured providers, with per-model
+ * capabilities and price, for the model selector (architecture.md Section 8.2).
+ * DISPLAY-SAFE: the rows never carry secret material. Backed by
+ * `list_available_models`.
+ */
+export function listAvailableModels(): Promise<AvailableModel[]> {
+  return invoke<AvailableModel[]>("list_available_models");
+}
+
 /**
  * Store a provider API key in the OS keystore and receive back ONLY its opaque
  * {@link SecretRef} handle (architecture.md Section 9.1). The plaintext key
@@ -132,4 +154,129 @@ export function sendMessage(
   overrideRoute?: ManualRoute | null,
 ): Promise<void> {
   return invoke<void>("send_message", { conversationId, content, overrideRoute });
+}
+
+/**
+ * Fetch the ordered message history for a conversation (architecture.md Section
+ * 8.1 chat surface; also used on resume, Section 8.5). Backed by `get_messages`.
+ */
+export function getMessages(conversationId: string): Promise<Message[]> {
+  return invoke<Message[]>("get_messages", { conversationId });
+}
+
+/**
+ * Pin (or clear) the per-conversation route (architecture.md Section 6.3 / 8.2).
+ * Pass `route = null` to return the conversation to Automatic routing. Backed by
+ * `set_conversation_route`.
+ *
+ * NOTE: the per-MESSAGE override is NOT a command; per Section 8.2 it is a
+ * transient value owned by the conversations store and passed to
+ * {@link sendMessage}'s `overrideRoute` argument, then cleared after the send.
+ */
+export function setConversationRoute(
+  conversationId: string,
+  route: ManualRoute | null,
+): Promise<Conversation> {
+  return invoke<Conversation>("set_conversation_route", { conversationId, route });
+}
+
+/**
+ * Assign (or clear) a persona for a conversation (architecture.md Section 8.4 /
+ * 8.5). Pass `personaId = null` to detach. Backed by `assign_persona`.
+ */
+export function assignPersona(
+  conversationId: string,
+  personaId: string | null,
+): Promise<Conversation> {
+  return invoke<Conversation>("assign_persona", { conversationId, personaId });
+}
+
+/**
+ * Explain how the active conversation is routed, for the "why this model"
+ * tooltip (architecture.md Section 8.2). Backed by `get_route_explanation`.
+ */
+export function getRouteExplanation(conversationId: string): Promise<RouteExplanation> {
+  return invoke<RouteExplanation>("get_route_explanation", { conversationId });
+}
+
+// --- MCP server management (Section 8.3) ------------------------------------
+
+/** List every configured MCP server. Backed by `list_mcp_servers`. */
+export function listMcpServers(): Promise<McpServerConfig[]> {
+  return invoke<McpServerConfig[]>("list_mcp_servers");
+}
+
+/** Add a new MCP server (connects in the background when enabled). Backed by `add_mcp_server`. */
+export function addMcpServer(config: McpServerInput): Promise<McpServerConfig> {
+  return invoke<McpServerConfig>("add_mcp_server", { config });
+}
+
+/** Update an existing MCP server (reconnects when enabled). Backed by `update_mcp_server`. */
+export function updateMcpServer(id: string, config: McpServerInput): Promise<McpServerConfig> {
+  return invoke<McpServerConfig>("update_mcp_server", { id, config });
+}
+
+/** Remove an MCP server (tears down its handle). Backed by `remove_mcp_server`. */
+export function removeMcpServer(id: string): Promise<void> {
+  return invoke<void>("remove_mcp_server", { id });
+}
+
+/** Enable or disable an MCP server (connect/teardown + persist). Backed by `set_mcp_enabled`. */
+export function setMcpEnabled(id: string, enabled: boolean): Promise<McpServerConfig> {
+  return invoke<McpServerConfig>("set_mcp_enabled", { id, enabled });
+}
+
+/** Refresh an MCP server's tool list (reconnect + re-list). Backed by `refresh_mcp_tools`. */
+export function refreshMcpTools(id: string): Promise<ToolDescriptorView[]> {
+  return invoke<ToolDescriptorView[]>("refresh_mcp_tools", { id });
+}
+
+/**
+ * Set an MCP server's tool-invocation permission mode (architecture.md Section
+ * 5.6 / 8.3). `toolName` is accepted for forward compatibility but the Phase 5
+ * schema persists only the per-server mode. Backed by `set_tool_permission`.
+ */
+export function setToolPermission(
+  serverId: string,
+  toolName: string | null,
+  mode: PermissionMode,
+): Promise<McpServerConfig> {
+  return invoke<McpServerConfig>("set_tool_permission", { serverId, toolName, mode });
+}
+
+// --- Conversation export / resume / cancellation (Section 8.1 / 8.5) --------
+
+/** Export a conversation to a display-safe string. Backed by `export_conversation`. */
+export function exportConversation(conversationId: string, format: ExportFormat): Promise<string> {
+  return invoke<string>("export_conversation", { conversationId, format });
+}
+
+/** Load a conversation and its messages for resume. Backed by `open_conversation`. */
+export function openConversation(conversationId: string): Promise<OpenedConversation> {
+  return invoke<OpenedConversation>("open_conversation", { conversationId });
+}
+
+/**
+ * Request cancellation of an in-flight generation (architecture.md Section 8.1
+ * Composer stop button). The Phase 4 pipeline has no cancellation seam yet, so
+ * this is a validated no-op on the backend; the command exists so the UI's stop
+ * control has something to call. Backed by `stop_generation`.
+ */
+export function stopGeneration(conversationId: string): Promise<void> {
+  return invoke<void>("stop_generation", { conversationId });
+}
+
+/**
+ * Resolve a pending Ask-mode tool-permission request (architecture.md Section
+ * 9.4). The core blocks the tool invocation until the user answers; this
+ * forwards the request's `requestId` and the user's `{ allow, remember }`
+ * {@link PermissionDecision} to unblock it. Returns `true` if a request with
+ * `requestId` was awaiting a decision (now unblocked), `false` otherwise
+ * (already resolved, timed out, or an unknown id). Backed by `resolve_permission`.
+ */
+export function resolvePermission(
+  requestId: string,
+  decision: PermissionDecision,
+): Promise<boolean> {
+  return invoke<boolean>("resolve_permission", { requestId, decision });
 }

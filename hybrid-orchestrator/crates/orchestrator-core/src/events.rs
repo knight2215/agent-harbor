@@ -11,21 +11,23 @@
 //! secret material, `SecretRef` handles, raw provider responses, or credentials.
 //!
 //! The variants map to the surfaces in Section 8:
-//!   - chat:        messageDelta, messageComplete, messageError, permissionRequested
+//!   - chat:        messageStarted, messageDelta, messageComplete, messageError, permissionRequested
 //!   - history:     conversationUpdated, conversationCreated, conversationDeleted
 //!   - MCP manager: mcpStateChanged, mcpError
 //!   - selectors:   providersChanged, personasChanged
 //!
-//! `#[allow(dead_code)]`: these variants and their fields are constructed by the
-//! pipeline and the tauri-app event bridge in later Phase 1/2 work (FEAT-003
-//! wires the bridge; the streaming pipeline emits the message events). The
-//! allow keeps clippy `-D warnings` clean until then; remove it once every
-//! variant is constructed.
+//! Most variants are now constructed by the pipeline and the tauri-app event
+//! bridge (message/conversation-update events by the streaming pipeline, MCP
+//! and permission events by the tauri-app commands). The four still-unemitted
+//! lifecycle/selector variants (`ConversationCreated`, `ConversationDeleted`,
+//! `ProvidersChanged`, `PersonasChanged`) carry a per-variant
+//! `#[allow(dead_code)]` to keep clippy `-D warnings` clean until the surfaces
+//! that emit them land; drop each one as its emitter is wired.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::models::{MessageStatus, PermissionMode, RouteMetadata, TokenUsage};
+use crate::models::{MessageStatus, PermissionMode, Role, RouteMetadata, TokenUsage};
 
 /// Connection state of an MCP server, reported to the Tool/MCP manager surface
 /// (Section 8.3). Display-safe; carries no secrets.
@@ -39,11 +41,22 @@ pub enum McpConnectionState {
 
 /// Events emitted by the core to the frontend (architecture.md Section 8).
 ///
-/// Exactly eleven variants, serialized as a `type`-tagged camelCase union.
-#[allow(dead_code)] // constructed by the pipeline / tauri-app bridge in later Phase 1/2 work (FEAT-003)
+/// Exactly twelve variants, serialized as a `type`-tagged camelCase union.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CoreEvent {
+    /// A message was created and is about to stream (Section 7.4). Emitted BEFORE
+    /// the first [`CoreEvent::MessageDelta`] for both the persisted user message
+    /// (`role: User`, already `Complete`) and the assistant reply (`role:
+    /// Assistant`, `streaming`), so the frontend can seed a placeholder keyed on
+    /// `messageId` before any delta arrives. Without it the deltas reference an
+    /// id the store has never seen and are dropped.
+    #[serde(rename_all = "camelCase")]
+    MessageStarted {
+        conversation_id: Uuid,
+        message_id: Uuid,
+        role: Role,
+    },
     /// A chunk of streamed assistant output (Section 7.4). `delta` is the new
     /// text appended to the message identified by `messageId`.
     #[serde(rename_all = "camelCase")]
@@ -74,9 +87,11 @@ pub enum CoreEvent {
     #[serde(rename_all = "camelCase")]
     ConversationUpdated { conversation_id: Uuid },
     /// A new conversation was created.
+    #[allow(dead_code)] // no emitter wired yet (conversation lifecycle surface)
     #[serde(rename_all = "camelCase")]
     ConversationCreated { conversation_id: Uuid },
     /// A conversation was deleted.
+    #[allow(dead_code)] // no emitter wired yet (conversation lifecycle surface)
     #[serde(rename_all = "camelCase")]
     ConversationDeleted { conversation_id: Uuid },
     /// An MCP server's connection state or tool list changed (Section 8.3).
@@ -101,8 +116,10 @@ pub enum CoreEvent {
         rationale: String,
     },
     /// The set or availability of providers/models changed (Section 8.2).
+    #[allow(dead_code)] // no emitter wired yet (provider/model selector surface)
     ProvidersChanged,
     /// The set of personas changed (Section 8.4).
+    #[allow(dead_code)] // no emitter wired yet (persona selector surface)
     PersonasChanged,
 }
 
@@ -125,6 +142,22 @@ mod tests {
         // Unit-like variant still tags on `type`.
         let json = serde_json::to_string(&CoreEvent::ProvidersChanged).unwrap();
         assert_eq!(json, "{\"type\":\"providersChanged\"}");
+    }
+
+    #[test]
+    fn message_started_round_trips_camel_case() {
+        let ev = CoreEvent::MessageStarted {
+            conversation_id: Uuid::nil(),
+            message_id: Uuid::nil(),
+            role: Role::Assistant,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\":\"messageStarted\""));
+        assert!(json.contains("\"conversationId\""));
+        assert!(json.contains("\"messageId\""));
+        assert!(json.contains("\"role\":\"assistant\""));
+        let back: CoreEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, CoreEvent::MessageStarted { .. }));
     }
 
     #[test]

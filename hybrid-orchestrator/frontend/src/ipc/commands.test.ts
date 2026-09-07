@@ -20,7 +20,24 @@ import {
   deletePersona,
   setProviderSecret,
   sendMessage,
+  listAvailableModels,
+  getMessages,
+  setConversationRoute,
+  assignPersona,
+  getRouteExplanation,
+  listMcpServers,
+  addMcpServer,
+  updateMcpServer,
+  removeMcpServer,
+  setMcpEnabled,
+  refreshMcpTools,
+  setToolPermission,
+  exportConversation,
+  openConversation,
+  stopGeneration,
+  resolvePermission,
 } from "./commands";
+import type { McpServerInput } from "../types";
 
 describe("ipc/commands wrappers", () => {
   beforeEach(() => {
@@ -123,6 +140,141 @@ describe("ipc/commands wrappers", () => {
       conversationId: "c-1",
       content: "hello",
       overrideRoute: { providerId: "openai", model: "gpt-4o" },
+    });
+  });
+
+  it("listAvailableModels invokes list_available_models", async () => {
+    invoke.mockResolvedValue([]);
+    await listAvailableModels();
+    expect(invoke).toHaveBeenCalledWith("list_available_models");
+  });
+
+  it("getMessages forwards conversationId", async () => {
+    invoke.mockResolvedValue([]);
+    await getMessages("c-1");
+    expect(invoke).toHaveBeenCalledWith("get_messages", { conversationId: "c-1" });
+  });
+
+  it("setConversationRoute forwards conversationId + route (and null clears)", async () => {
+    await setConversationRoute("c-1", { providerId: "openai", model: "gpt-4o" });
+    expect(invoke).toHaveBeenCalledWith("set_conversation_route", {
+      conversationId: "c-1",
+      route: { providerId: "openai", model: "gpt-4o" },
+    });
+
+    await setConversationRoute("c-1", null);
+    expect(invoke).toHaveBeenLastCalledWith("set_conversation_route", {
+      conversationId: "c-1",
+      route: null,
+    });
+  });
+
+  it("assignPersona forwards conversationId + personaId (and null clears)", async () => {
+    await assignPersona("c-1", "p-1");
+    expect(invoke).toHaveBeenCalledWith("assign_persona", {
+      conversationId: "c-1",
+      personaId: "p-1",
+    });
+
+    await assignPersona("c-1", null);
+    expect(invoke).toHaveBeenLastCalledWith("assign_persona", {
+      conversationId: "c-1",
+      personaId: null,
+    });
+  });
+
+  it("getRouteExplanation forwards conversationId", async () => {
+    invoke.mockResolvedValue({ rationale: "auto", source: "automatic" });
+    await getRouteExplanation("c-1");
+    expect(invoke).toHaveBeenCalledWith("get_route_explanation", { conversationId: "c-1" });
+  });
+
+  it("listMcpServers invokes list_mcp_servers", async () => {
+    invoke.mockResolvedValue([]);
+    await listMcpServers();
+    expect(invoke).toHaveBeenCalledWith("list_mcp_servers");
+  });
+
+  it("addMcpServer forwards the config", async () => {
+    const config: McpServerInput = {
+      name: "fs",
+      transport: { type: "stdio", command: "mcp-fs", args: [], env: [] },
+      permissionMode: "ask",
+      enabled: true,
+    };
+    await addMcpServer(config);
+    expect(invoke).toHaveBeenCalledWith("add_mcp_server", { config });
+  });
+
+  it("updateMcpServer forwards id + config", async () => {
+    const config: McpServerInput = {
+      name: "remote",
+      transport: { type: "httpSse", url: "https://x/sse", headers: [["A", "B"]] },
+      permissionMode: "allow",
+      enabled: false,
+    };
+    await updateMcpServer("s-1", config);
+    expect(invoke).toHaveBeenCalledWith("update_mcp_server", { id: "s-1", config });
+  });
+
+  it("removeMcpServer forwards id", async () => {
+    await removeMcpServer("s-1");
+    expect(invoke).toHaveBeenCalledWith("remove_mcp_server", { id: "s-1" });
+  });
+
+  it("setMcpEnabled forwards id + enabled", async () => {
+    await setMcpEnabled("s-1", true);
+    expect(invoke).toHaveBeenCalledWith("set_mcp_enabled", { id: "s-1", enabled: true });
+  });
+
+  it("refreshMcpTools forwards id", async () => {
+    invoke.mockResolvedValue([]);
+    await refreshMcpTools("s-1");
+    expect(invoke).toHaveBeenCalledWith("refresh_mcp_tools", { id: "s-1" });
+  });
+
+  it("setToolPermission forwards serverId + toolName + mode", async () => {
+    await setToolPermission("s-1", "read_file", "deny");
+    expect(invoke).toHaveBeenCalledWith("set_tool_permission", {
+      serverId: "s-1",
+      toolName: "read_file",
+      mode: "deny",
+    });
+
+    await setToolPermission("s-1", null, "allow");
+    expect(invoke).toHaveBeenLastCalledWith("set_tool_permission", {
+      serverId: "s-1",
+      toolName: null,
+      mode: "allow",
+    });
+  });
+
+  it("exportConversation forwards conversationId + format", async () => {
+    invoke.mockResolvedValue("# transcript");
+    await exportConversation("c-1", "markdown");
+    expect(invoke).toHaveBeenCalledWith("export_conversation", {
+      conversationId: "c-1",
+      format: "markdown",
+    });
+  });
+
+  it("openConversation forwards conversationId", async () => {
+    invoke.mockResolvedValue({ conversation: {}, messages: [] });
+    await openConversation("c-1");
+    expect(invoke).toHaveBeenCalledWith("open_conversation", { conversationId: "c-1" });
+  });
+
+  it("stopGeneration forwards conversationId", async () => {
+    await stopGeneration("c-1");
+    expect(invoke).toHaveBeenCalledWith("stop_generation", { conversationId: "c-1" });
+  });
+
+  it("resolvePermission forwards requestId + decision and returns the awaiting flag", async () => {
+    invoke.mockResolvedValue(true);
+    await expect(resolvePermission("r-1", { allow: true, remember: false })).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledWith("resolve_permission", {
+      requestId: "r-1",
+      decision: { allow: true, remember: false },
     });
   });
 });

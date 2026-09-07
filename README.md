@@ -32,7 +32,19 @@ Phases 0 through 4 are implemented and merged; Phases 5 and 6 are pending.
   `message -> route -> provider -> tool loop -> persist` pipeline
   (`orchestrator_core::run_turn`) and the `send_message` command that drives it
   and streams over the core-event bridge.
-- **Phase 5 - UI surfaces**: PENDING.
+- **Phase 5 - UI surfaces**: DONE. The five wired React surfaces - chat
+  (streaming message list, per-message route badges, Ask-mode permission
+  prompt), model selector (Auto vs manual pin, Local/Cloud provider-model
+  picker with capability/cost hints), tool/MCP manager (transport-aware server
+  form, live connection health, tool inspector, permission modes), agent editor
+  (personas with system prompt, model parameters, default route, allowed tools,
+  routing hint), and conversation history (search, rename/tag/duplicate/export/
+  delete, session resume) - assembled into an app shell with a single top-level
+  core-event subscription that fans events into the Zustand stores, backed by
+  the new Tauri commands (get_messages, set_conversation_route, assign_persona,
+  get_route_explanation, MCP server CRUD + set_mcp_enabled + refresh_mcp_tools +
+  set_tool_permission, export_conversation, open_conversation, stop_generation)
+  and a runtime MCP handle manager.
 - **Phase 6 - Security hardening + extensibility validation**: PENDING.
 
 ## Repository layout
