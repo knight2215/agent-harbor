@@ -153,6 +153,14 @@ impl NativeAdapter {
         self.auth.headers()
     }
 
+    /// Test-only view of the auth headers this adapter would send, so sibling
+    /// adapter modules (e.g. LM Studio) can assert the local path sends no
+    /// implicit `Authorization` header when no `api_key_ref` is configured.
+    #[cfg(test)]
+    pub(crate) fn auth_headers_for_test(&self) -> Vec<(String, String)> {
+        self.request_headers()
+    }
+
     /// Serialize a [`ChatRequest`] to the outbound JSON body, forcing the
     /// `stream` flag to `stream`.
     fn body(req: &ChatRequest, stream: bool) -> Result<serde_json::Value, ProviderError> {

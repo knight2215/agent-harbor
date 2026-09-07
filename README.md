@@ -4,6 +4,15 @@ Agent Harbor is a cross-platform desktop application that orchestrates AI chat
 providers, MCP tool servers, and routing policies behind a single Tauri (Rust
 core) + React/TypeScript (Vite) frontend.
 
+**The app is feature-complete per the specification.** All phases (0 through 6)
+are implemented and merged: the full `message -> route -> provider -> tool
+loop -> persist` pipeline, the five wired React surfaces, security hardening,
+and validated extension seams. See [Implementation status](#implementation-status)
+for the per-phase breakdown, [Build, test, and run](#build-test-and-run) to build
+and launch it, and [Extending the app](#extending-the-app) plus
+[docs/EXTENDING.md](docs/EXTENDING.md) to add a provider, routing policy, or MCP
+server.
+
 The authoritative design lives in the specs:
 
 - [Hybrid Orchestrator architecture](.kiro/specs/hybrid-orchestrator/architecture.md)
@@ -11,7 +20,8 @@ The authoritative design lives in the specs:
 
 ## Implementation status
 
-Phases 0 through 4 are implemented and merged; Phases 5 and 6 are pending.
+All phases (0 through 6) are implemented and merged; the app is feature-complete
+per the specification.
 
 - **Phase 0 - Scaffold**: DONE. Full crate layout, a launching Tauri shell, a
   rendering React frontend, and CI.
@@ -45,7 +55,19 @@ Phases 0 through 4 are implemented and merged; Phases 5 and 6 are pending.
   get_route_explanation, MCP server CRUD + set_mcp_enabled + refresh_mcp_tools +
   set_tool_permission, export_conversation, open_conversation, stop_generation)
   and a runtime MCP handle manager.
-- **Phase 6 - Security hardening + extensibility validation**: PENDING.
+- **Phase 6 - Security hardening + extensibility validation**: DONE. Audited
+  secret handling and least-privilege IPC (permanent regression tests assert no
+  command return or core event carries secret material), a loopback-preferred
+  base-URL validator (accept loopback, warn + recommend TLS off-host, block
+  link-local/metadata targets) implemented and unit-tested as an enforcement
+  seam staged for the provider-config write path - not yet an active runtime
+  guarantee, since no IPC command currently accepts a raw provider `base_url`
+  (see [docs/EXTENDING.md](docs/EXTENDING.md)), a hardened MCP child-process
+  environment
+  (`env_clear` + minimal allowlist, no inherited secrets) with enforced Ask-mode
+  permission prompts and persona/conversation tool gating, and validated +
+  documented provider/policy/MCP extension seams (zero-core-edit demos plus
+  [docs/EXTENDING.md](docs/EXTENDING.md)).
 
 ## Repository layout
 
@@ -92,22 +114,25 @@ agent-harbor/
 
 ### Rust core (from `hybrid-orchestrator/`)
 
+Every crate is under `[workspace] exclude` (the `members` array is empty - see
+the offline note below), so the bare workspace commands (`cargo build`,
+`cargo test`, `cargo clippy --all-targets`, `cargo fmt --all`) act on **nothing**
+and there is no workspace-level cargo step. Build, test, lint, and format each
+crate explicitly through its manifest, exactly as CI does:
+
 ```sh
 cd hybrid-orchestrator
-cargo build                                   # no-op offline: every crate is now excluded (see note)
-cargo test                                    # run the crate smoke tests
-cargo clippy --all-targets -- -D warnings     # lint (warnings are errors)
-cargo fmt --all --check                       # check formatting
-```
 
-The crates that carry crates.io dependencies are under `[workspace] exclude`
-(see the offline note below), so the bare workspace commands above do not touch
-them. Build/test them explicitly via their manifests, for example:
-
-```sh
+# Per crate (repeat for domain, secrets, persistence, providers, mcp-client,
+# routing, orchestrator-core, tauri-app):
+cargo fmt   --manifest-path crates/orchestrator-core/Cargo.toml --check
 cargo build --manifest-path crates/orchestrator-core/Cargo.toml
-cargo build --manifest-path crates/tauri-app/Cargo.toml
+cargo test  --manifest-path crates/orchestrator-core/Cargo.toml
+cargo clippy --manifest-path crates/orchestrator-core/Cargo.toml --all-targets -- -D warnings
 ```
+
+CI runs this fmt/build/test/clippy set for all eight crates on `ubuntu-latest`
+and `windows-latest` (see [Continuous integration](#continuous-integration)).
 
 ### Frontend (from `hybrid-orchestrator/frontend/`)
 
@@ -124,9 +149,13 @@ npm run format       # Prettier (write); use format:check in CI
 
 ```sh
 cd hybrid-orchestrator
-cargo tauri dev --config crates/tauri-app/tauri.conf.json     # dev shell
-cargo tauri build --config crates/tauri-app/tauri.conf.json   # signed installer
+cargo tauri dev --config crates/tauri-app/tauri.conf.json     # run the app (dev shell)
+cargo tauri build --config crates/tauri-app/tauri.conf.json   # produce an installer bundle
 ```
+
+You can also produce an installer without a local Tauri CLI by triggering the
+gated `tauri-bundle` CI job (manual `workflow_dispatch` or a `v*` version tag) -
+see [Continuous integration](#continuous-integration).
 
 ## Sandbox / offline constraint
 
@@ -195,6 +224,24 @@ omitted):
   runs `tauri build` to produce an installer on the same matrix. It is gated to
   run **only** on manual dispatch (`workflow_dispatch`) and on version-tag pushes
   (`v*`), so the slow bundle step does not run on every commit.
+
+## Extending the app
+
+The architecture is built around traits + registries so the three most common
+extensions add code (or, for MCP servers, no code at all) without modifying the
+core pipeline. See **[docs/EXTENDING.md](docs/EXTENDING.md)** for step-by-step
+guides, real file references, and the Phase 6 demo tests that prove each seam
+works with zero edits to `orchestrator-core` or `routing`:
+
+- **Add a provider** - implement `ChatProvider` + `ProviderFactory` and register
+  it in `builtin_registry()`; any OpenAI-compatible endpoint needs no new adapter
+  at all (add it at runtime as a `GenericOpenAI` provider config).
+- **Add a routing policy** - implement `RoutingPolicy::decide`, register it in
+  the `PolicyRegistry`, and select it active; the manual-override precedence
+  wrapper applies automatically.
+- **Add an MCP server** - a runtime, no-code path via the Tool/MCP Server
+  Manager: specify a stdio command or HTTP/SSE URL and the client handshakes,
+  discovers, and exposes tools automatically.
 
 ## Lockfile policy
 

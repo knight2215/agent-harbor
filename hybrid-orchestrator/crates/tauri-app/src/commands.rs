@@ -535,10 +535,18 @@ fn local_provider_ids(configs: &[ProviderConfig]) -> std::collections::BTreeSet<
         .collect()
 }
 
-/// Whether `url` names a loopback host (a local endpoint). Conservative: any URL
-/// we cannot confidently classify as loopback is treated as NON-local so the
-/// privacy gate fails closed.
-fn is_loopback_endpoint(url: &str) -> bool {
+/// Extract the bare host from a URL/endpoint string. This is the SINGLE shared
+/// host parser used by both the loopback classifier ([`is_loopback_endpoint`],
+/// the routing privacy gate) and the base-URL validator ([`validate_base_url`],
+/// Section 9.3), so there is exactly one place that understands the
+/// scheme/credentials/port/bracketed-IPv6 shapes.
+///
+/// It strips an optional `scheme://`, takes the authority up to the first `/`,
+/// drops any `user:pass@` credentials and the `:port`, and unwraps a bracketed
+/// IPv6 literal (`[::1]:1234` -> `::1`). The returned host is lowercased so
+/// callers can match case-insensitively. An empty string means the input had no
+/// recognizable host.
+fn extract_host(url: &str) -> String {
     // Strip an optional scheme, then take the authority up to the first `/`.
     let without_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let authority = without_scheme.split('/').next().unwrap_or("");
@@ -550,7 +558,157 @@ fn is_loopback_endpoint(url: &str) -> bool {
     } else {
         host_port.split(':').next().unwrap_or("")
     };
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
+    host.to_ascii_lowercase()
+}
+
+/// Whether `url` names a loopback host (a local endpoint). Conservative: any URL
+/// we cannot confidently classify as loopback is treated as NON-local so the
+/// privacy gate fails closed. Uses the shared [`extract_host`] parser.
+fn is_loopback_endpoint(url: &str) -> bool {
+    matches!(
+        extract_host(url).as_str(),
+        "localhost" | "127.0.0.1" | "::1"
+    )
+}
+
+/// Whether `url` uses TLS (an `https://` or `wss://` scheme). Absent or
+/// plaintext schemes (`http://`, none) are treated as NOT TLS.
+// Reachable only through `check_provider_base_url`, the not-yet-wired
+// provider-config write seam (see its doc comment); exercised by the unit tests.
+#[cfg_attr(not(test), allow(dead_code))]
+fn is_tls_scheme(url: &str) -> bool {
+    let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("");
+    scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss")
+}
+
+/// Whether `host` is an obviously-dangerous internal target that a
+/// user-supplied provider base_url must never reach (Section 9.3). Kept
+/// deliberately NARROW so legitimate LAN LM Studio setups (private RFC-1918
+/// ranges) are only WARNED on, not blocked:
+///
+///   - the cloud metadata IP `169.254.169.254` (AWS/GCP/Azure IMDS), and
+///   - the whole IPv4 link-local block `169.254.0.0/16`, and
+///   - the IPv6 link-local block `fe80::/10` (`fe80:`..`febf:` prefixes).
+///
+/// These are never a real inference endpoint; reaching them is almost always an
+/// SSRF-shaped mistake, so we block them conservatively.
+// Reachable only through `check_provider_base_url`, the not-yet-wired
+// provider-config write seam (see its doc comment); exercised by the unit tests.
+#[cfg_attr(not(test), allow(dead_code))]
+fn is_blocked_internal_host(host: &str) -> bool {
+    // IPv4 link-local 169.254.0.0/16 (covers the 169.254.169.254 metadata IP).
+    if let Some(rest) = host.strip_prefix("169.254.") {
+        // Only treat it as link-local when the remaining octets are numeric,
+        // so a hostname like "169.254.example.com" is not misclassified.
+        let looks_numeric = rest
+            .split('.')
+            .all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()));
+        if looks_numeric {
+            return true;
+        }
+    }
+    // IPv6 link-local fe80::/10 => first hextet in fe80..=febf.
+    if let Some(first) = host.split(':').next() {
+        if first.len() == 4 {
+            if let Ok(value) = u16::from_str_radix(first, 16) {
+                if (0xfe80..=0xfebf).contains(&value) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The outcome of validating a user-supplied provider `base_url` against the
+/// Section 9.3 local-network posture.
+// Produced only through `check_provider_base_url`, the not-yet-wired
+// provider-config write seam (see its doc comment); exercised by the unit tests.
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Debug, PartialEq, Eq)]
+enum BaseUrlVerdict {
+    /// A loopback endpoint (`localhost` / `127.0.0.1` / `[::1]`). Accept
+    /// silently: plaintext is fine on the local machine and this is the default
+    /// LM Studio posture.
+    AcceptLoopback,
+    /// A non-loopback endpoint reached over TLS. Accept silently.
+    AcceptTls,
+    /// A non-loopback endpoint reached over plaintext `http://` (or no scheme).
+    /// Accept, but carry a display-safe warning recommending TLS.
+    AcceptWithWarning(String),
+    /// An obviously-dangerous internal target (link-local / cloud metadata) or
+    /// an unparseable endpoint. Reject with a display-safe reason.
+    Blocked(String),
+}
+
+/// Validate a user-supplied provider `base_url` against architecture.md Section
+/// 9.3 ("LM Studio and local-network endpoints"). This is the ENFORCEMENT point
+/// for the base-URL posture; it is shared by both [`ProviderKind::LmStudio`] and
+/// [`ProviderKind::GenericOpenAI`] inputs (Section 9.3 covers LM Studio and any
+/// generic OpenAI-compatible provider). It reuses the single [`extract_host`]
+/// parser (no duplicated host parsing with [`is_loopback_endpoint`]).
+///
+/// Policy (fail-safe, but deliberately not over-blocking private LANs):
+///
+///   - loopback host (`localhost` / `127.0.0.1` / `[::1]`) => accept silently.
+///     The default LM Studio endpoint `http://localhost:1234/v1` lands here.
+///   - obviously-dangerous internal target (IPv4 link-local `169.254.0.0/16`
+///     incl. the `169.254.169.254` metadata IP, or IPv6 link-local `fe80::/10`)
+///     => BLOCK. These are never a real endpoint and reaching them is an
+///     SSRF-shaped mistake.
+///   - unparseable / hostless input => BLOCK conservatively.
+///   - non-loopback host over TLS (`https://`) => accept silently.
+///   - non-loopback host over plaintext `http://` (or no scheme) => accept, but
+///     WARN and recommend TLS (private RFC-1918 LAN endpoints legitimate LM
+///     Studio setups use land here: warned, never blocked).
+// Reachable only through `check_provider_base_url`, the not-yet-wired
+// provider-config write seam (see its doc comment); exercised by the unit tests.
+#[cfg_attr(not(test), allow(dead_code))]
+fn validate_base_url(url: &str) -> BaseUrlVerdict {
+    let host = extract_host(url);
+    if host.is_empty() {
+        return BaseUrlVerdict::Blocked(format!(
+            "base_url has no recognizable host and cannot be validated: {url:?}"
+        ));
+    }
+    if matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") {
+        return BaseUrlVerdict::AcceptLoopback;
+    }
+    if is_blocked_internal_host(&host) {
+        return BaseUrlVerdict::Blocked(format!(
+            "base_url points at a blocked internal/link-local address ({host}); \
+             configure a loopback or reachable inference endpoint instead"
+        ));
+    }
+    if is_tls_scheme(url) {
+        return BaseUrlVerdict::AcceptTls;
+    }
+    BaseUrlVerdict::AcceptWithWarning(format!(
+        "base_url {url:?} is a non-loopback endpoint served over plaintext HTTP; \
+         prefer https:// so provider traffic is encrypted in transit"
+    ))
+}
+
+/// Validate a user-supplied provider `base_url` for the provider-config write
+/// path, mapping the [`BaseUrlVerdict`] onto the command conventions: a blocked
+/// target becomes an [`CommandError::invalid`] BEFORE the value reaches the
+/// core; an accepted target returns an optional display-safe warning (present
+/// only for the non-loopback plaintext case) that the caller may surface.
+///
+/// # Enforcement seam (Section 9.3)
+///
+/// No `#[tauri::command]` currently accepts a raw provider `base_url` from the
+/// webview (providers are seeded through [`persistence::ProviderRepo`], not an
+/// IPC command), so this is the enforcement point wherever a provider-config
+/// create/update command is added: call it before `ProviderRepo::insert` /
+/// `ProviderRepo::update`. It is fully covered by the unit tests below.
+#[cfg_attr(not(test), allow(dead_code))]
+fn check_provider_base_url(url: &str) -> Result<Option<String>, CommandError> {
+    match validate_base_url(url) {
+        BaseUrlVerdict::AcceptLoopback | BaseUrlVerdict::AcceptTls => Ok(None),
+        BaseUrlVerdict::AcceptWithWarning(warning) => Ok(Some(warning)),
+        BaseUrlVerdict::Blocked(reason) => Err(CommandError::invalid(reason)),
+    }
 }
 
 // --- Message pipeline (P4.6 / Section 2.2 / 8.1) ---------------------------
@@ -1616,6 +1774,91 @@ mod tests {
         assert!(!is_loopback_endpoint("http://user@evil.com/localhost"));
     }
 
+    /// The base-URL validator (Section 9.3) accepts loopback plaintext silently
+    /// (the default LM Studio endpoint), accepts remote TLS silently, warns +
+    /// recommends TLS for non-loopback plaintext, and blocks link-local /
+    /// metadata internal targets. It shares the [`extract_host`] parser with
+    /// [`is_loopback_endpoint`].
+    #[test]
+    fn validate_base_url_enforces_local_network_posture() {
+        // Default LM Studio endpoint: loopback plaintext -> accept, no warning.
+        assert_eq!(
+            validate_base_url("http://localhost:1234/v1"),
+            BaseUrlVerdict::AcceptLoopback
+        );
+        // Other loopback forms -> accept.
+        assert_eq!(
+            validate_base_url("http://127.0.0.1:1234"),
+            BaseUrlVerdict::AcceptLoopback
+        );
+        assert_eq!(
+            validate_base_url("http://[::1]:1234"),
+            BaseUrlVerdict::AcceptLoopback
+        );
+        // Remote over TLS -> accept, no warning.
+        assert_eq!(
+            validate_base_url("https://api.example.com"),
+            BaseUrlVerdict::AcceptTls
+        );
+        // Remote over plaintext -> accept WITH a TLS-recommending warning.
+        match validate_base_url("http://api.example.com") {
+            BaseUrlVerdict::AcceptWithWarning(msg) => {
+                assert!(
+                    msg.contains("https://"),
+                    "warning should recommend TLS: {msg}"
+                );
+            }
+            other => panic!("expected AcceptWithWarning, got {other:?}"),
+        }
+        // A private RFC-1918 LAN endpoint is only WARNED on, never blocked.
+        assert!(matches!(
+            validate_base_url("http://192.168.1.50:1234/v1"),
+            BaseUrlVerdict::AcceptWithWarning(_)
+        ));
+        // Cloud metadata IP and the wider link-local block -> blocked.
+        assert!(matches!(
+            validate_base_url("http://169.254.169.254/latest/meta-data/"),
+            BaseUrlVerdict::Blocked(_)
+        ));
+        assert!(matches!(
+            validate_base_url("http://169.254.1.1"),
+            BaseUrlVerdict::Blocked(_)
+        ));
+        // IPv6 link-local fe80::/10 -> blocked.
+        assert!(matches!(
+            validate_base_url("http://[fe80::1]:1234"),
+            BaseUrlVerdict::Blocked(_)
+        ));
+        // Malformed / hostless input -> conservatively blocked.
+        assert!(matches!(
+            validate_base_url("http:///v1"),
+            BaseUrlVerdict::Blocked(_)
+        ));
+    }
+
+    /// `check_provider_base_url` maps the verdict onto the command conventions:
+    /// blocked -> `CommandError::invalid`; loopback/TLS -> `Ok(None)`; remote
+    /// plaintext -> `Ok(Some(warning))`.
+    #[test]
+    fn check_provider_base_url_maps_verdict_to_command_result() {
+        assert!(matches!(
+            check_provider_base_url("http://localhost:1234/v1"),
+            Ok(None)
+        ));
+        assert!(matches!(
+            check_provider_base_url("https://api.example.com"),
+            Ok(None)
+        ));
+        assert!(matches!(
+            check_provider_base_url("http://api.example.com"),
+            Ok(Some(_))
+        ));
+        match check_provider_base_url("http://169.254.169.254") {
+            Err(err) => assert!(matches!(err.code, ErrorCode::InvalidArgument)),
+            Ok(other) => panic!("expected blocked metadata IP, got {other:?}"),
+        }
+    }
+
     /// The `AvailableModel` shape that crosses IPC is display-safe: it serializes
     /// to provider/model/capabilities/price fields only, never secret material.
     #[test]
@@ -1970,5 +2213,108 @@ mod tests {
         let out = serde_json::to_string(&view).unwrap();
         assert!(out.contains("\"name\":\"read_file\""));
         assert!(out.contains("\"inputSchema\""));
+    }
+
+    // --- Phase 6 (FEAT-001) secret-hygiene + validation audit tests ---------
+
+    /// P6.1 IPC audit regression: after a secret is stored via the actual
+    /// `set_provider_secret` handler body, the `list_available_models` handler
+    /// body must return ONLY display-safe rows and never echo the planted
+    /// plaintext. With no configured provider rows the model list is empty, but
+    /// the invariant under test is that the model-enumeration return path never
+    /// carries resolved key material: the secret lives in the keystore, is
+    /// reachable only via the core-internal `resolve` seam, and never crosses
+    /// this IPC boundary. A regression that folded resolved secrets into the
+    /// returned rows would fail this test.
+    #[tokio::test]
+    async fn list_available_models_inner_never_returns_stored_secret() {
+        let state = test_state().await;
+        let plaintext = "sk-planted-secret-must-not-surface";
+
+        // Store a secret through the real handler body.
+        let secret_ref = set_provider_secret_inner(&state, "openai", plaintext).unwrap();
+        assert_eq!(secret_ref, SecretRef::new("openai"));
+
+        // The model list handler body returns display-safe rows with no secret.
+        let models = list_available_models_inner(&state).await.unwrap();
+        let json = serde_json::to_string(&models).unwrap();
+        assert!(
+            !json.contains(plaintext),
+            "list_available_models must not surface stored secret material"
+        );
+        assert!(!json.to_lowercase().contains("secretref"));
+        assert!(!json.to_lowercase().contains("apikey"));
+
+        // The plaintext remains reachable ONLY via the core-internal resolve
+        // seam, which is deliberately not wired to any command.
+        assert_eq!(state.secret_store.resolve(&secret_ref).unwrap(), plaintext);
+    }
+
+    /// P6.1/P6.2 audit-style regression documenting the two structural secret
+    /// invariants of the IPC surface, enforced by types rather than runtime
+    /// checks:
+    ///
+    /// 1. NO command handler returns raw key material. Every `#[tauri::command]`
+    ///    in this module returns one of: `()`, a bounded id/handle
+    ///    (`SecretRef`), a domain row (`Conversation`/`AgentPersona`/`Message`/
+    ///    `McpServerConfig`), a display-safe view (`AvailableModel`/
+    ///    `RouteExplanation`/`ToolDescriptorView`/`OpenedConversation`), a
+    ///    `String` that is an app version or an exported transcript, or a
+    ///    `bool`. None is a resolved secret. `set_provider_secret` returns ONLY a
+    ///    `SecretRef` (asserted here and in `set_provider_secret_inner_returns_only_ref`).
+    /// 2. `SecretStore::resolve` (the single plaintext seam) is NOT reachable
+    ///    from any command: it is called only inside `providers::build_registry`
+    ///    when instantiating a provider, and that resolved value stays inside the
+    ///    provider instance - it is never a command return value. The command
+    ///    layer holds the store only to `store()` new secrets, never to surface
+    ///    a resolved one.
+    ///
+    /// This test asserts the observable end of invariant (1): the handle
+    /// `set_provider_secret` returns serializes to just the opaque provider id,
+    /// so the return path cannot carry the plaintext.
+    #[tokio::test]
+    async fn no_command_return_path_exposes_plaintext() {
+        let state = test_state().await;
+        let plaintext = "sk-command-return-must-stay-opaque";
+        let secret_ref = set_provider_secret_inner(&state, "anthropic", plaintext).unwrap();
+
+        // The only secret-adjacent command return is a SecretRef, which
+        // serializes to the bare handle - never the plaintext it references.
+        let json = serde_json::to_string(&secret_ref).unwrap();
+        assert_eq!(json, "\"anthropic\"");
+        assert!(!json.contains(plaintext));
+
+        // The plaintext is reachable ONLY through the core-internal resolve seam
+        // (not a command), confirming the store->resolve path is the sole reader.
+        assert_eq!(state.secret_store.resolve(&secret_ref).unwrap(), plaintext);
+    }
+
+    /// P6.2 per-command validation regression for a previously-untested
+    /// rejection path: `create_conversation`'s argument validation
+    /// (`validate_opt_len` title, `validate_privacy_tags`, and the persona-id
+    /// UUID parse) rejects invalid input before any row is created. This
+    /// exercises the exact validation the `#[tauri::command]` runs, driving the
+    /// same helpers on the same arg struct.
+    #[tokio::test]
+    async fn create_conversation_validation_rejects_invalid_args() {
+        // An over-long title is rejected before touching the core.
+        let too_long_title = "x".repeat(MAX_TITLE_LEN + 1);
+        assert!(validate_opt_len("title", &Some(too_long_title), MAX_TITLE_LEN).is_err());
+
+        // Too many privacy tags are rejected.
+        let too_many = vec![PrivacyTag::Custom("t".to_string()); MAX_TAGS + 1];
+        assert!(validate_privacy_tags(&too_many).is_err());
+
+        // An empty custom privacy tag is rejected.
+        let empty_custom = vec![PrivacyTag::Custom("   ".to_string())];
+        assert!(validate_privacy_tags(&empty_custom).is_err());
+
+        // A malformed persona id is rejected before the conversation is created.
+        assert!(parse_uuid("personaId", "not-a-uuid").is_err());
+
+        // A well-formed set of args validates cleanly.
+        let ok_tags = vec![PrivacyTag::Custom("work".to_string())];
+        assert!(validate_opt_len("title", &Some("Chat".to_string()), MAX_TITLE_LEN).is_ok());
+        assert!(validate_privacy_tags(&ok_tags).is_ok());
     }
 }

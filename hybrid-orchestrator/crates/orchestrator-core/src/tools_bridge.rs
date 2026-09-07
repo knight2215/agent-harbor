@@ -198,6 +198,70 @@ impl ToolBridge {
     }
 }
 
+/// The set of MCP server ids whose tools may be exposed to the model for a turn
+/// (architecture.md Sections 5.6 / 9.4 tool gating), computed from the currently
+/// `connected` server ids by applying the conversation gate AND the persona gate
+/// independently.
+///
+/// # Gating rule (each gate restricts only when it is present)
+///
+/// There are two independent allow-lists. A gate is "present" when its list is
+/// NON-EMPTY; an EMPTY list means that gate imposes NO restriction:
+///
+/// 1. Conversation gate: [`Conversation::enabled_tool_servers`]. When non-empty,
+///    a server must appear in it. When empty, the conversation does not restrict
+///    (it has not opted into per-conversation gating; the creation flow does not
+///    populate this list today).
+/// 2. Persona gate: [`AgentPersona::allowed_tool_servers`] of the active persona
+///    (if any). When non-empty, a server must appear in it. When empty, the
+///    persona does not restrict; this matches how personas are created
+///    (`PersonaInput.allowed_tool_servers` is `#[serde(default)]`, so an
+///    unspecified allow-list defaults to empty and means "this persona does not
+///    gate tools", NOT "deny all").
+///
+/// A server is exposed only when it satisfies BOTH gates. Concretely:
+///
+/// - no conversation gate + no persona (or empty persona) => pass-through: every
+///   `connected` server is exposed (genuine backward compatibility);
+/// - persona restricts + no conversation gate => only persona-allowed connected
+///   servers (the persona restriction is enforced even when the conversation
+///   never opted in, the Section 9.4 correctness requirement);
+/// - conversation restricts + no persona restriction => only conversation-
+///   enabled connected servers;
+/// - both restrict => intersection (conversation ∩ persona), still limited to
+///   `connected` servers.
+///
+/// The result preserves the order of `connected`. A server that is not currently
+/// connected is never exposed regardless of the gates.
+///
+/// [`Conversation::enabled_tool_servers`]: crate::Conversation
+/// [`AgentPersona::allowed_tool_servers`]: crate::AgentPersona
+pub fn effective_tool_servers(
+    connected: &[Uuid],
+    conversation: &crate::Conversation,
+    persona: Option<&crate::AgentPersona>,
+) -> Vec<Uuid> {
+    let conversation_gate = &conversation.enabled_tool_servers;
+    let persona_gate = persona.map(|p| p.allowed_tool_servers.as_slice());
+
+    connected
+        .iter()
+        .copied()
+        .filter(|id| {
+            // A non-empty conversation list restricts to its members; an empty
+            // list does not restrict.
+            let conversation_ok = conversation_gate.is_empty() || conversation_gate.contains(id);
+            // A non-empty persona allow-list restricts to its members; an empty
+            // (or absent) persona list does not restrict.
+            let persona_ok = match persona_gate {
+                Some(gate) if !gate.is_empty() => gate.contains(id),
+                _ => true,
+            };
+            conversation_ok && persona_ok
+        })
+        .collect()
+}
+
 /// Decode the OpenAI-encoded JSON-STRING tool arguments into a [`Value`]. An
 /// empty/whitespace string means "no arguments" and decodes to an empty object.
 /// Returns a display-safe error string when the string is not valid JSON.
@@ -312,7 +376,109 @@ fn tool_error_message(call_id: &str, message: &str) -> ChatMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{AgentPersona, Conversation, ManualRoute, ModelParameters, PrivacyTag};
+    use chrono::Utc;
     use serde_json::json;
+
+    fn conversation_with(enabled: Vec<Uuid>, persona_id: Option<Uuid>) -> Conversation {
+        let now = Utc::now();
+        Conversation {
+            id: Uuid::new_v4(),
+            title: "t".to_string(),
+            created_at: now,
+            updated_at: now,
+            persona_id,
+            conversation_pref: None::<ManualRoute>,
+            privacy_tags: Vec::<PrivacyTag>::new(),
+            enabled_tool_servers: enabled,
+        }
+    }
+
+    fn persona_with(allowed: Vec<Uuid>) -> AgentPersona {
+        AgentPersona {
+            id: Uuid::new_v4(),
+            name: "p".to_string(),
+            system_prompt: String::new(),
+            default_route: None,
+            routing_hint: None,
+            allowed_tool_servers: allowed,
+            parameters: ModelParameters::default(),
+        }
+    }
+
+    #[test]
+    fn effective_tool_servers_no_persona_uses_conversation_gate() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let conv = conversation_with(vec![a, b], None);
+        // Both connected + both enabled + no persona -> both exposed.
+        assert_eq!(effective_tool_servers(&[a, b], &conv, None), vec![a, b]);
+    }
+
+    #[test]
+    fn effective_tool_servers_intersects_conversation_and_persona() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        // Conversation enables A and B; persona allows only A -> only A survives.
+        let persona = persona_with(vec![a]);
+        let conv = conversation_with(vec![a, b], Some(persona.id));
+        assert_eq!(
+            effective_tool_servers(&[a, b], &conv, Some(&persona)),
+            vec![a]
+        );
+    }
+
+    #[test]
+    fn effective_tool_servers_persona_empty_allowlist_imposes_no_restriction() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        // An EMPTY persona allow-list means "this persona does not gate tools"
+        // (matches `PersonaInput.allowed_tool_servers` #[serde(default)]), so the
+        // conversation gate alone applies: only A (enabled) is exposed.
+        let persona = persona_with(Vec::new());
+        let conv = conversation_with(vec![a], Some(persona.id));
+        assert_eq!(
+            effective_tool_servers(&[a, b], &conv, Some(&persona)),
+            vec![a]
+        );
+    }
+
+    #[test]
+    fn effective_tool_servers_empty_conversation_still_enforces_persona() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        // The regression for the Section 9.4 gap: the conversation never opted
+        // into gating (empty enabled_tool_servers, the current default) but the
+        // persona restricts to A. Both servers are connected; only A must be
+        // exposed. Before the fix this pass-through branch bypassed the persona.
+        let persona = persona_with(vec![a]);
+        let conv = conversation_with(Vec::new(), Some(persona.id));
+        assert_eq!(
+            effective_tool_servers(&[a, b], &conv, Some(&persona)),
+            vec![a]
+        );
+    }
+
+    #[test]
+    fn effective_tool_servers_no_gates_is_passthrough() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        // No conversation gate + no persona -> every connected server exposed
+        // (genuine backward compatibility).
+        let conv = conversation_with(Vec::new(), None);
+        assert_eq!(effective_tool_servers(&[a, b], &conv, None), vec![a, b]);
+    }
+
+    #[test]
+    fn effective_tool_servers_never_exposes_a_disconnected_server() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        // Conversation + persona both allow B, but B is not connected -> nothing
+        // is exposed (the gate cannot conjure an absent server).
+        let persona = persona_with(vec![b]);
+        let conv = conversation_with(vec![b], Some(persona.id));
+        assert!(effective_tool_servers(&[a], &conv, Some(&persona)).is_empty());
+    }
 
     #[test]
     fn validate_arguments_requires_object_and_required_props() {

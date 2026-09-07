@@ -11,11 +11,17 @@
 //! implements just enough of MCP for the tests:
 //!
 //! - `initialize`      -> returns a fixed protocol version + `tools` capability.
-//! - `tools/list`      -> returns two tools: `echo` and `slow`.
+//! - `tools/list`      -> returns three tools: `echo`, `slow`, and `reportEnv`.
 //! - `tools/call`
-//!     - `echo`  -> echoes its `arguments` straight back in the result.
-//!     - `slow`  -> sleeps for a configurable number of milliseconds before
+//!     - `echo`      -> echoes its `arguments` straight back in the result.
+//!     - `slow`      -> sleeps for a configurable number of milliseconds before
 //!       replying (used to exercise the per-tool timeout path).
+//!     - `reportEnv` -> reads the environment variable named by its `name`
+//!       argument FROM THE CHILD'S OWN ENVIRONMENT and returns its value (or
+//!       `null` when unset). Used only by the controlled-environment sandbox
+//!       test to prove a parent secret is NOT inherited while a configured var
+//!       IS. Additive and backward-compatible with the existing round-trip
+//!       tests, which use only `echo`/`slow`.
 //! - `notifications/initialized` (a notification, no `id`) -> ignored.
 //!
 //! It uses ONLY the standard library (blocking stdin/stdout + `thread::sleep`),
@@ -80,6 +86,15 @@ fn main() {
                                 "type": "object",
                                 "properties": { "delayMs": { "type": "integer" } }
                             }
+                        },
+                        {
+                            "name": "reportEnv",
+                            "description": "report the value of an env var from the child's own environment",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": { "name": { "type": "string" } },
+                                "required": ["name"]
+                            }
                         }
                     ]
                 }
@@ -122,6 +137,21 @@ fn handle_tools_call(id: &Value, msg: &Value) -> Value {
                 "jsonrpc": "2.0",
                 "id": id,
                 "result": { "slept": delay_ms, "isError": false }
+            })
+        }
+        "reportEnv" => {
+            // Read the requested variable from THIS (child) process's own
+            // environment. A missing variable reports `null`, so the test can
+            // distinguish "absent" (secret not inherited) from a present value.
+            let name = arguments.get("name").and_then(Value::as_str).unwrap_or("");
+            let value = match std::env::var(name) {
+                Ok(v) => Value::String(v),
+                Err(_) => Value::Null,
+            };
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": { "name": name, "value": value, "isError": false }
             })
         }
         other => json!({

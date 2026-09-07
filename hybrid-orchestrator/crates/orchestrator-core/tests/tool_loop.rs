@@ -25,7 +25,10 @@ use async_trait::async_trait;
 use futures_util::stream::{self, BoxStream};
 
 use mcp_client::McpServerHandle;
-use orchestrator_core::{CoreEvent, Decision, PermissionGate, PermissionRegistry, ToolBridge};
+use orchestrator_core::{
+    effective_tool_servers, AgentPersona, Conversation, CoreEvent, Decision, ManualRoute,
+    ModelParameters, PermissionGate, PermissionRegistry, PrivacyTag, ToolBridge,
+};
 use providers::{
     Capabilities, ChatDelta, ChatMessage, ChatProvider, ChatRequest, ChatResponse, MessageRole,
     ModelInfo, ProviderError,
@@ -314,4 +317,174 @@ async fn ask_mode_emits_event_then_unblocks_on_resolve() {
     let content = msg.content.unwrap();
     assert!(content.contains("echoed"), "content: {content}");
     assert!(!content.contains("\"isError\":true"), "content: {content}");
+}
+
+#[tokio::test]
+async fn persona_conversation_gating_exposes_only_allowed_server_tools() {
+    // Two connected servers, each exposing a bare `echo` (namespaced by id).
+    let allowed_id = Uuid::new_v4();
+    let disabled_id = Uuid::new_v4();
+    let allowed = Arc::new(McpServerHandle::new(stdio_config(
+        allowed_id,
+        PermissionMode::Allow,
+    )));
+    let disabled = Arc::new(McpServerHandle::new(stdio_config(
+        disabled_id,
+        PermissionMode::Allow,
+    )));
+    allowed.connect().await.expect("connect allowed server");
+    disabled.connect().await.expect("connect disabled server");
+
+    // Persona allows only `allowed_id`; the conversation enables BOTH servers,
+    // so the persona is what narrows the set (intersection).
+    let now = chrono::Utc::now();
+    let persona = AgentPersona {
+        id: Uuid::new_v4(),
+        name: "gated".to_string(),
+        system_prompt: String::new(),
+        default_route: None,
+        routing_hint: None,
+        allowed_tool_servers: vec![allowed_id],
+        parameters: ModelParameters::default(),
+    };
+    let conversation = Conversation {
+        id: Uuid::new_v4(),
+        title: "gated".to_string(),
+        created_at: now,
+        updated_at: now,
+        persona_id: Some(persona.id),
+        conversation_pref: None::<ManualRoute>,
+        privacy_tags: Vec::<PrivacyTag>::new(),
+        enabled_tool_servers: vec![allowed_id, disabled_id],
+    };
+
+    // The gate resolves to only the allowed server.
+    let connected = vec![allowed_id, disabled_id];
+    let gated = effective_tool_servers(&connected, &conversation, Some(&persona));
+    assert_eq!(gated, vec![allowed_id]);
+
+    // Build a bridge over ONLY the gated servers (as the pipeline does) and
+    // attach tools. The disabled server's tool must NOT be exposed.
+    let gated_handles: Vec<Arc<McpServerHandle>> = [allowed.clone(), disabled.clone()]
+        .into_iter()
+        .filter(|h| gated.contains(&h.config().id))
+        .collect();
+    let (tx, _rx) = unbounded_channel();
+    let bridge_gate = PermissionGate::new(tx.clone(), PermissionRegistry::new());
+    let bridge = ToolBridge::new(gated_handles, bridge_gate, tx);
+
+    let mut request = ChatRequest::new(
+        "mock-model",
+        vec![ChatMessage::text(MessageRole::User, "hi")],
+    );
+    bridge.attach_tools(&mut request).await;
+
+    let allowed_tool = format!("{allowed_id}__echo");
+    let disabled_tool = format!("{disabled_id}__echo");
+    assert!(
+        request
+            .tools
+            .iter()
+            .any(|t| t.function.name == allowed_tool),
+        "allowed server's tool is exposed"
+    );
+    assert!(
+        !request
+            .tools
+            .iter()
+            .any(|t| t.function.name == disabled_tool),
+        "a tool from a not-allowed server must NOT be exposed"
+    );
+
+    allowed.teardown().await;
+    disabled.teardown().await;
+}
+
+#[tokio::test]
+async fn empty_conversation_list_still_enforces_persona_gate() {
+    // Regression for the Section 9.4 gap: a conversation with an EMPTY
+    // `enabled_tool_servers` (the current default, since the creation flow never
+    // populates it) but a restrictive persona must still expose ONLY the
+    // persona-allowed server's tools. Before the fix, the empty-conversation
+    // branch was a pass-through that skipped the persona intersection entirely,
+    // so this would have exposed the not-allowed server's tool.
+    let allowed_id = Uuid::new_v4();
+    let disabled_id = Uuid::new_v4();
+    let allowed = Arc::new(McpServerHandle::new(stdio_config(
+        allowed_id,
+        PermissionMode::Allow,
+    )));
+    let disabled = Arc::new(McpServerHandle::new(stdio_config(
+        disabled_id,
+        PermissionMode::Allow,
+    )));
+    allowed.connect().await.expect("connect allowed server");
+    disabled.connect().await.expect("connect disabled server");
+
+    let now = chrono::Utc::now();
+    let persona = AgentPersona {
+        id: Uuid::new_v4(),
+        name: "gated".to_string(),
+        system_prompt: String::new(),
+        default_route: None,
+        routing_hint: None,
+        // Persona restricts to the allowed server only.
+        allowed_tool_servers: vec![allowed_id],
+        parameters: ModelParameters::default(),
+    };
+    let conversation = Conversation {
+        id: Uuid::new_v4(),
+        title: "ungated-conversation".to_string(),
+        created_at: now,
+        updated_at: now,
+        persona_id: Some(persona.id),
+        conversation_pref: None::<ManualRoute>,
+        privacy_tags: Vec::<PrivacyTag>::new(),
+        // The conversation never opted into per-conversation gating.
+        enabled_tool_servers: Vec::new(),
+    };
+
+    // Both servers are connected; the persona gate alone must narrow the set.
+    let connected = vec![allowed_id, disabled_id];
+    let gated = effective_tool_servers(&connected, &conversation, Some(&persona));
+    assert_eq!(
+        gated,
+        vec![allowed_id],
+        "an empty conversation list must NOT bypass the persona allow-list"
+    );
+
+    // Prove it end-to-end at the exposed-tools level too.
+    let gated_handles: Vec<Arc<McpServerHandle>> = [allowed.clone(), disabled.clone()]
+        .into_iter()
+        .filter(|h| gated.contains(&h.config().id))
+        .collect();
+    let (tx, _rx) = unbounded_channel();
+    let bridge_gate = PermissionGate::new(tx.clone(), PermissionRegistry::new());
+    let bridge = ToolBridge::new(gated_handles, bridge_gate, tx);
+
+    let mut request = ChatRequest::new(
+        "mock-model",
+        vec![ChatMessage::text(MessageRole::User, "hi")],
+    );
+    bridge.attach_tools(&mut request).await;
+
+    let allowed_tool = format!("{allowed_id}__echo");
+    let disabled_tool = format!("{disabled_id}__echo");
+    assert!(
+        request
+            .tools
+            .iter()
+            .any(|t| t.function.name == allowed_tool),
+        "the persona-allowed server's tool is exposed"
+    );
+    assert!(
+        !request
+            .tools
+            .iter()
+            .any(|t| t.function.name == disabled_tool),
+        "a not-allowed server's tool must NOT be exposed even with an empty conversation list"
+    );
+
+    allowed.teardown().await;
+    disabled.teardown().await;
 }

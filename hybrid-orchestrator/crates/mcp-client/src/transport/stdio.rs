@@ -12,6 +12,13 @@
 //! `tokio::process::Command` resolves the program name using the OS's normal
 //! rules, honoring `.exe` on Windows. Child exit / broken pipe surface as a
 //! [`TransportError::Closed`] on the affected request.
+//!
+//! CONTROLLED ENVIRONMENT (architecture.md Section 9.4): the child is spawned
+//! from a CLEARED environment (`env_clear`), not the parent's full environment,
+//! so no inherited secrets leak into an untrusted server. Only a minimal,
+//! documented allowlist ([`MINIMAL_ENV_ALLOWLIST`]) needed for a child to launch
+//! is re-introduced from the parent, and the caller-configured env is layered on
+//! top.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -31,6 +38,30 @@ use crate::error::{JsonRpcErrorPayload, TransportError};
 /// The table of in-flight requests awaiting a correlated response, keyed by
 /// JSON-RPC `id`.
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, TransportError>>>>>;
+
+/// Minimal allowlist of PARENT environment variables re-introduced into the
+/// otherwise-cleared child environment (architecture.md Section 9.4). These are
+/// the variables a child process commonly needs merely to LAUNCH; they are NOT
+/// secrets. Everything else (provider API keys, tokens, etc.) is deliberately
+/// withheld. Each entry is documented with WHY it is required:
+///
+/// - `PATH`: without it, a server whose `command` relies on `PATH` resolution
+///   (or a helper it shells out to, e.g. `node`/`python`) cannot be found and
+///   the spawn fails. Cross-platform (both Unix and Windows use `PATH`).
+/// - `SYSTEMROOT` (Windows): many Windows binaries and the CRT/winsock startup
+///   fail to initialize without `SystemRoot`; omitting it can break the child
+///   before it runs a line of user code.
+/// - `SYSTEMDRIVE` (Windows): some Windows tooling resolves paths relative to
+///   `SystemDrive`; included alongside `SYSTEMROOT` for robust child startup.
+///
+/// The Windows-only names are harmless on Unix (they are simply absent from the
+/// parent, so `var_os` returns `None` and nothing is added).
+const MINIMAL_ENV_ALLOWLIST: &[&str] = &[
+    "PATH",
+    // Windows child-startup essentials (absent on Unix -> skipped).
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+];
 
 /// A JSON-RPC transport over a spawned child process's stdin/stdout.
 pub struct StdioTransport {
@@ -65,11 +96,27 @@ impl StdioTransport {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+
+        // CONTROLLED ENVIRONMENT (architecture.md Section 9.4): stdio MCP servers
+        // must run with "a controlled environment (explicit env, no inherited
+        // secrets)". We therefore START FROM A CLEARED ENVIRONMENT rather than
+        // inheriting the parent process's full environment, so provider API keys
+        // and other secrets present in this process cannot leak into an untrusted
+        // child. The ONLY parent values re-introduced are a minimal, explicitly
+        // documented allowlist required for a child to launch at all on each
+        // platform; the caller-configured `env` is then layered on top.
+        cmd.env_clear();
+        for key in MINIMAL_ENV_ALLOWLIST {
+            if let Some(value) = std::env::var_os(key) {
+                cmd.env(key, value);
+            }
+        }
+        // Layer the caller-configured env on top of the controlled base. These
+        // are explicit and intentional (they come from the MCP server config),
+        // and they override an allowlisted value if the names collide.
         for (key, value) in env {
             cmd.env(key, value);
         }
-        // Do not leak the parent's own env selectively; we keep the inherited
-        // env and layer the configured vars on top, matching typical MCP hosts.
 
         let mut child = cmd
             .spawn()
