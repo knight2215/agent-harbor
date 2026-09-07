@@ -11,7 +11,7 @@
 //! secret material, `SecretRef` handles, raw provider responses, or credentials.
 //!
 //! The variants map to the surfaces in Section 8:
-//!   - chat:        messageDelta, messageComplete, messageError, permissionRequested
+//!   - chat:        messageStarted, messageDelta, messageComplete, messageError, permissionRequested
 //!   - history:     conversationUpdated, conversationCreated, conversationDeleted
 //!   - MCP manager: mcpStateChanged, mcpError
 //!   - selectors:   providersChanged, personasChanged
@@ -25,7 +25,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::models::{MessageStatus, PermissionMode, RouteMetadata, TokenUsage};
+use crate::models::{MessageStatus, PermissionMode, Role, RouteMetadata, TokenUsage};
 
 /// Connection state of an MCP server, reported to the Tool/MCP manager surface
 /// (Section 8.3). Display-safe; carries no secrets.
@@ -39,11 +39,23 @@ pub enum McpConnectionState {
 
 /// Events emitted by the core to the frontend (architecture.md Section 8).
 ///
-/// Exactly eleven variants, serialized as a `type`-tagged camelCase union.
+/// Exactly twelve variants, serialized as a `type`-tagged camelCase union.
 #[allow(dead_code)] // constructed by the pipeline / tauri-app bridge in later Phase 1/2 work (FEAT-003)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CoreEvent {
+    /// A message was created and is about to stream (Section 7.4). Emitted BEFORE
+    /// the first [`CoreEvent::MessageDelta`] for both the persisted user message
+    /// (`role: User`, already `Complete`) and the assistant reply (`role:
+    /// Assistant`, `streaming`), so the frontend can seed a placeholder keyed on
+    /// `messageId` before any delta arrives. Without it the deltas reference an
+    /// id the store has never seen and are dropped.
+    #[serde(rename_all = "camelCase")]
+    MessageStarted {
+        conversation_id: Uuid,
+        message_id: Uuid,
+        role: Role,
+    },
     /// A chunk of streamed assistant output (Section 7.4). `delta` is the new
     /// text appended to the message identified by `messageId`.
     #[serde(rename_all = "camelCase")]
@@ -125,6 +137,22 @@ mod tests {
         // Unit-like variant still tags on `type`.
         let json = serde_json::to_string(&CoreEvent::ProvidersChanged).unwrap();
         assert_eq!(json, "{\"type\":\"providersChanged\"}");
+    }
+
+    #[test]
+    fn message_started_round_trips_camel_case() {
+        let ev = CoreEvent::MessageStarted {
+            conversation_id: Uuid::nil(),
+            message_id: Uuid::nil(),
+            role: Role::Assistant,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\":\"messageStarted\""));
+        assert!(json.contains("\"conversationId\""));
+        assert!(json.contains("\"messageId\""));
+        assert!(json.contains("\"role\":\"assistant\""));
+        let back: CoreEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(back, CoreEvent::MessageStarted { .. }));
     }
 
     #[test]

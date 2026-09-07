@@ -40,6 +40,7 @@ import type {
   PermissionDecision,
   PermissionMode,
   PrivacyTag,
+  Role,
 } from "../types";
 
 /** A pending Ask-mode tool-permission request awaiting the user's decision. */
@@ -124,7 +125,7 @@ export interface ConversationsState {
   applyCoreEvent: (event: CoreEvent) => void;
 }
 
-/** Append a text delta to a streaming message, creating it if it is not present. */
+/** Append a text delta to the streaming message identified by `messageId`. */
 function appendDelta(messages: Message[], messageId: string, delta: string): Message[] {
   const index = messages.findIndex((m) => m.id === messageId);
   if (index === -1) {
@@ -136,6 +137,25 @@ function appendDelta(messages: Message[], messageId: string, delta: string): Mes
   const next = messages.slice();
   next[index] = { ...message, content, status: "streaming" };
   return next;
+}
+
+/**
+ * Build a placeholder [`Message`] for a `messageStarted` event so the chat
+ * surface shows the message before any delta arrives (architecture.md Section
+ * 7.4). The user message lands `complete`; the assistant reply lands
+ * `streaming` and accumulates deltas.
+ */
+function placeholderMessage(conversationId: string, messageId: string, role: Role): Message {
+  return {
+    id: messageId,
+    conversationId,
+    role,
+    content: { type: "text", text: "" },
+    createdAt: new Date().toISOString(),
+    route: null,
+    usage: null,
+    status: role === "assistant" ? "streaming" : "complete",
+  };
 }
 
 export const useConversationsStore = create<ConversationsState>((set, get) => ({
@@ -274,6 +294,25 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
 
   applyCoreEvent: (event) => {
     switch (event.type) {
+      case "messageStarted": {
+        const { activeConversationId } = get();
+        if (event.conversationId !== activeConversationId) return;
+        // Seed a placeholder keyed on the event's messageId so the following
+        // messageDelta/messageComplete events (which reference an id the store
+        // has never seen) land on a real message instead of being dropped.
+        set((state) => {
+          if (state.messages.some((m) => m.id === event.messageId)) {
+            return {};
+          }
+          return {
+            messages: [
+              ...state.messages,
+              placeholderMessage(event.conversationId, event.messageId, event.role),
+            ],
+          };
+        });
+        return;
+      }
       case "messageDelta": {
         const { activeConversationId } = get();
         if (event.conversationId !== activeConversationId) return;

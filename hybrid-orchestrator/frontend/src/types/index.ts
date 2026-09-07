@@ -307,6 +307,7 @@ export interface OpenedConversation {
  * (ids, deltas, statuses, rationales), never secrets or credentials.
  */
 export type CoreEvent =
+  | { type: "messageStarted"; conversationId: string; messageId: string; role: Role }
   | { type: "messageDelta"; conversationId: string; messageId: string; delta: string }
   | {
       type: "messageComplete";

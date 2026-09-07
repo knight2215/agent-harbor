@@ -215,6 +215,90 @@ describe("conversations store", () => {
     expect(invoke).toHaveBeenCalledWith("stop_generation", { conversationId: "c-1" });
   });
 
+  it("drives the real send -> messageStarted -> delta -> complete path with no pre-seeding", async () => {
+    // Exercise the PRODUCTION path where the assistant id first arrives via the
+    // messageStarted event and NO message is pre-seeded (review issue #5): the
+    // send path adds nothing to `messages`, the store learns the ids only from
+    // the events, and the reply must still appear and accumulate.
+    useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });
+    await useConversationsStore.getState().sendMessage("hello");
+    expect(invoke).toHaveBeenCalledWith("send_message", {
+      conversationId: "c-1",
+      content: "hello",
+      overrideRoute: null,
+    });
+
+    const apply = useConversationsStore.getState().applyCoreEvent;
+
+    // The persisted user message is announced first (complete placeholder).
+    apply({ type: "messageStarted", conversationId: "c-1", messageId: "u-1", role: "user" });
+    expect(useConversationsStore.getState().messages).toHaveLength(1);
+    expect(useConversationsStore.getState().messages[0]).toMatchObject({
+      id: "u-1",
+      role: "user",
+      status: "complete",
+    });
+
+    // Then the streaming assistant placeholder, before any delta.
+    apply({ type: "messageStarted", conversationId: "c-1", messageId: "a-1", role: "assistant" });
+    const seeded = useConversationsStore.getState().messages;
+    expect(seeded).toHaveLength(2);
+    expect(seeded[1]).toMatchObject({ id: "a-1", role: "assistant", status: "streaming" });
+
+    // Deltas now land on the seeded assistant message and accumulate.
+    apply({ type: "messageDelta", conversationId: "c-1", messageId: "a-1", delta: "Hel" });
+    apply({ type: "messageDelta", conversationId: "c-1", messageId: "a-1", delta: "lo" });
+    apply({
+      type: "messageComplete",
+      conversationId: "c-1",
+      messageId: "a-1",
+      status: "complete",
+      route: { providerId: "openai", model: "gpt-4o", rationale: "why", source: "automatic" },
+      usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 },
+    });
+
+    const assistant = useConversationsStore.getState().messages[1];
+    expect(assistant.content).toEqual({ type: "text", text: "Hello" });
+    expect(assistant.status).toBe("complete");
+    expect(assistant.route?.model).toBe("gpt-4o");
+  });
+
+  it("messageStarted for a non-active conversation is ignored", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });
+    useConversationsStore.getState().applyCoreEvent({
+      type: "messageStarted",
+      conversationId: "other",
+      messageId: "a-1",
+      role: "assistant",
+    });
+    expect(useConversationsStore.getState().messages).toHaveLength(0);
+  });
+
+  it("a completed turn's conversationUpdated refreshes history recency + active messages", async () => {
+    // The pipeline emits conversationUpdated after persisting the user and the
+    // assistant message (review issue #2). Assert the store reacts by refetching
+    // the index (history recency) and, for the active conversation, its messages.
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_conversations") {
+        return Promise.resolve([conversation("c-1"), conversation("c-2")]);
+      }
+      if (command === "get_messages") {
+        return Promise.resolve([streamingMessage("a-1", "c-1")]);
+      }
+      return Promise.resolve(undefined);
+    });
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    useConversationsStore.getState().applyCoreEvent({
+      type: "conversationUpdated",
+      conversationId: "c-1",
+    });
+    // Wait for the fire-and-forget refetches kicked off by the reducer.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(invoke).toHaveBeenCalledWith("list_conversations");
+    expect(invoke).toHaveBeenCalledWith("get_messages", { conversationId: "c-1" });
+  });
+
   it("resumeConversation loads via open_conversation and restores the full record", async () => {
     const resumed: Conversation = {
       ...conversation("c-1"),

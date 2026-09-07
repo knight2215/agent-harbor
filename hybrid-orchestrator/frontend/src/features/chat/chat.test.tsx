@@ -180,8 +180,25 @@ describe("chat surface", () => {
     expect(useConversationsStore.getState().pendingOverride).toBeNull();
   });
 
-  it("Composer stop button calls stop_generation", async () => {
-    useConversationsStore.setState({ activeConversationId: "c-1" });
+  it("Composer stop button is disabled unless a turn is streaming", () => {
+    // Review issue #3: the stop control is only live while a message streams,
+    // so a dead no-op control is never presented as working.
+    useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });
+    const { rerender } = render(<Composer />);
+    expect(screen.getByRole("button", { name: "Stop" })).toBeDisabled();
+
+    useConversationsStore.setState({
+      messages: [{ ...textMessage("m-1", ""), status: "streaming" }],
+    });
+    rerender(<Composer />);
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+  });
+
+  it("Composer stop button calls stop_generation while streaming", async () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      messages: [{ ...textMessage("m-1", ""), status: "streaming" }],
+    });
     render(<Composer />);
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() => {

@@ -1007,7 +1007,10 @@ pub async fn set_mcp_enabled(
             previous.teardown().await;
         }
         spawn_connect(handle, server_id, state.core_events.clone());
-    } else if let Some(handle) = state.mcp_servers.get(server_id).await {
+    } else if let Some(handle) = state.mcp_servers.remove(server_id).await {
+        // Remove (not just tear down) the handle so the disabled server no longer
+        // appears in send_message's live snapshot (review issue #4, mirroring
+        // remove_mcp_server). On re-enable the branch above re-inserts + connects.
         handle.teardown().await;
         let _ = state.core_events.send(orchestrator_core::CoreEvent::McpStateChanged {
             server_id,

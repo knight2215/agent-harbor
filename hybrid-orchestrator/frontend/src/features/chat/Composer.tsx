@@ -14,6 +14,12 @@ export function Composer() {
   const activeConversationId = useConversationsStore((s) => s.activeConversationId);
   const sendMessage = useConversationsStore((s) => s.sendMessage);
   const stopGeneration = useConversationsStore((s) => s.stopGeneration);
+  // A turn is in progress while any message is still streaming. The stop control
+  // is only presented as live in that window; the underlying `stop_generation`
+  // command is a validated no-op today (the Phase 4 pipeline has no cancel seam),
+  // so the button stays disabled and is labelled unavailable rather than posing
+  // as a working control (review issue #3).
+  const streaming = useConversationsStore((s) => s.messages.some((m) => m.status === "streaming"));
   const [draft, setDraft] = useState("");
 
   const disabled = activeConversationId === null;
@@ -42,7 +48,13 @@ export function Composer() {
         onChange={(event) => setDraft(event.target.value)}
       />
       <div className="composer__actions">
-        <button type="button" className="composer__stop" onClick={() => void stopGeneration()}>
+        <button
+          type="button"
+          className="composer__stop"
+          onClick={() => void stopGeneration()}
+          disabled={!streaming}
+          title={streaming ? "Stop (cancellation is not yet available)" : "Nothing to stop"}
+        >
           Stop
         </button>
         <button type="submit" className="composer__send" disabled={disabled}>

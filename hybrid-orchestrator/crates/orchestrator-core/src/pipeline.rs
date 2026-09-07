@@ -198,8 +198,30 @@ async fn run_turn_inner(
     assistant_id: Uuid,
 ) -> Result<Message, PipelineError> {
     // 1. Persist the user message, then load the conversation + persona.
+    //    Announce the user message (MessageStarted) so the active chat surface
+    //    seeds a placeholder before any streaming begins, and emit
+    //    ConversationUpdated so the history surface's recency/ordering refreshes
+    //    once the message is persisted (Section 8.5).
     let user_message = user_message(conversation_id, &content);
+    let user_message_id = user_message.id;
+    let _ = ctx.events.send(CoreEvent::MessageStarted {
+        conversation_id,
+        message_id: user_message_id,
+        role: Role::User,
+    });
     ctx.session_manager.append_message(user_message).await?;
+    let _ = ctx
+        .events
+        .send(CoreEvent::ConversationUpdated { conversation_id });
+
+    // Announce the assistant reply as a streaming placeholder so the deltas
+    // below (which reference `assistant_id`) land on a message the frontend has
+    // already seeded.
+    let _ = ctx.events.send(CoreEvent::MessageStarted {
+        conversation_id,
+        message_id: assistant_id,
+        role: Role::Assistant,
+    });
 
     let conversation = ctx
         .session_manager
@@ -357,6 +379,11 @@ async fn run_turn_inner(
         route: Some(route),
         usage,
     });
+    // The assistant message is persisted: refresh the history surface's recency
+    // and any non-active conversation view (Section 8.5).
+    let _ = ctx
+        .events
+        .send(CoreEvent::ConversationUpdated { conversation_id });
 
     Ok(persisted_message)
 }
