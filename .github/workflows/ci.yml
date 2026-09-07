@@ -382,9 +382,20 @@ jobs:
   # validated at release / manual time. The job is independent of `build`: it
   # re-does its own checkout / toolchain / Linux system deps / node / cargo
   # cache.
+  #
+  # After bundling, every run (incl. `workflow_dispatch`) uploads the produced
+  # installers as downloadable workflow artifacts (per-OS keyed). On `v*` tag
+  # pushes it additionally attaches those installers to a GitHub Release for the
+  # tag (creating the release if absent). Publishing a release needs
+  # `contents: write`, granted via the job-scoped `permissions` block below so
+  # the routine `build` job stays implicitly read-only.
   tauri-bundle:
     name: tauri-bundle (${{ matrix.os }})
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    # Job-scoped so only this job can create/update a Release; `build` remains
+    # implicitly read-only.
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -454,3 +465,38 @@ jobs:
       # miss (tasks.md P0.6).
       - name: tauri build
         run: cargo tauri build --config crates/tauri-app/tauri.conf.json
+
+      # Upload the installers produced above as downloadable workflow artifacts
+      # on EVERY tauri-bundle run (incl. workflow_dispatch). The OS-keyed name
+      # prevents the two matrix legs from colliding. `path` is repo-root-relative
+      # for upload-artifact regardless of the job's `working-directory` default,
+      # so the bundle globs carry the `hybrid-orchestrator/target/...` prefix.
+      # Each OS only produces its own formats; `if-no-files-found: warn` lets the
+      # non-matching globs match nothing without failing the step.
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-harbor-installers-${{ matrix.os }}
+          path: |
+            hybrid-orchestrator/target/release/bundle/deb/*.deb
+            hybrid-orchestrator/target/release/bundle/appimage/*.AppImage
+            hybrid-orchestrator/target/release/bundle/msi/*.msi
+            hybrid-orchestrator/target/release/bundle/nsis/*.exe
+          if-no-files-found: warn
+          retention-days: 14
+
+      # On `v*` tag pushes only, attach the same installers to the tag's GitHub
+      # Release (created if absent). Both matrix legs append their assets to the
+      # same release, which is intended. `fail_on_unmatched_files: false` so an
+      # OS's non-matching globs don't fail the step.
+      - name: Publish installers to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            hybrid-orchestrator/target/release/bundle/deb/*.deb
+            hybrid-orchestrator/target/release/bundle/appimage/*.AppImage
+            hybrid-orchestrator/target/release/bundle/msi/*.msi
+            hybrid-orchestrator/target/release/bundle/nsis/*.exe
+          fail_on_unmatched_files: false
+          generate_release_notes: true
