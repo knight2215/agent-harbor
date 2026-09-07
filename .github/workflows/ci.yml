@@ -572,6 +572,21 @@ jobs:
   # updater plugin polls, and uploads it as an asset on the tag's GitHub
   # Release.
   #
+  # PER-PLATFORM AVAILABILITY (important): latest.json is composed to include
+  # ONLY the platforms that actually emitted a signed updater payload for this
+  # tag. The manifest fails-closed ONLY when NO platform produced a signed
+  # artifact; if at least one did, latest.json is published with just those
+  # entries and a `::warning::` is logged for any expected-but-missing platform.
+  #   * Windows: the pinned Tauri v2 DOES emit signed updater artifacts
+  #     (`*-setup.exe` + `*-setup.exe.sig`, plus `*.msi` + `*.msi.sig`), so
+  #     windows-x86_64 is present today.
+  #   * Linux: the pinned Tauri v2 does NOT currently emit the
+  #     `*.AppImage.tar.gz` / `*.AppImage.tar.gz.sig` updater payload (only the
+  #     bare `*.AppImage` + deb/rpm), so linux-x86_64 is omitted for now. This
+  #     is a documented follow-up; the Linux globs below stay in place and will
+  #     start populating latest.json automatically if a future Tauri version
+  #     emits them. As a result, TODAY'S latest.json is Windows-only.
+  #
   # RELEASE-ASSET URL NAMING ASSUMPTIONS (documented so future maintainers can
   # reason about the update flow):
   #   * tauri.conf.json's updater `endpoints` points at
@@ -584,7 +599,13 @@ jobs:
   #     (linux-x86_64) and the Windows NSIS `*-setup.exe` (windows-x86_64) -
   #     these are what Tauri v2 emits as updater artifacts when
   #     `bundle.createUpdaterArtifacts` is true, and what the updater client
-  #     downloads + verifies against the inlined `.sig`. Their filenames EMBED
+  #     downloads + verifies against the inlined `.sig`. Each platform is added
+  #     to latest.json INDEPENDENTLY and only when BOTH its payload and its
+  #     `.sig` were found among the downloaded artifacts; the manifest is
+  #     included per-availability rather than requiring both platforms. NOTE:
+  #     the pinned Tauri v2 currently emits the Windows updater artifacts but
+  #     NOT the Linux `*.AppImage.tar.gz` updater payload (documented
+  #     follow-up), so today's latest.json is Windows-only. Their filenames EMBED
   #     the productName ("Agent Harbor", which contains a space) and app version
   #     (0.4.0 for this phase, e.g. `Agent Harbor_0.4.0_amd64.AppImage.tar.gz`),
   #     so the exact names are resolved at runtime from the downloaded artifacts
@@ -630,8 +651,8 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-          # Resolve the actual per-platform UPDATE-PAYLOAD artifact + signature
-          # file paths from the downloaded artifacts. With
+          # Resolve each platform's UPDATE-PAYLOAD artifact + signature file
+          # paths from the downloaded artifacts, INDEPENDENTLY. With
           # `bundle.createUpdaterArtifacts: true`, Tauri v2 emits:
           #   * Linux  : `*.AppImage.tar.gz`     (payload) + `*.AppImage.tar.gz.sig`
           #   * Windows: `*-setup.exe` (NSIS)    (payload) + `*-setup.exe.sig`
@@ -639,6 +660,10 @@ jobs:
           # so latest.json's linux-x86_64 url MUST point at the `.tar.gz`. The
           # filenames embed the version, so glob for them rather than hardcoding.
           # `find` handles the nested per-artifact + bundle-path directory layout.
+          # NOTE: a glob may resolve to empty (e.g. the pinned Tauri v2 does not
+          # currently emit the Linux `*.AppImage.tar.gz` updater payload); that
+          # is handled per-platform below and is non-fatal as long as at least
+          # one platform is available.
           LINUX_UPDATER="$(find artifacts -type f -name '*.AppImage.tar.gz' | head -n1)"
           LINUX_SIG="$(find artifacts -type f -name '*.AppImage.tar.gz.sig' | head -n1)"
           # Restrict to the NSIS bundle subpath so a stray non-installer `.exe`
@@ -646,46 +671,68 @@ jobs:
           WINDOWS_EXE="$(find artifacts -type f -path '*/nsis/*.exe' | head -n1)"
           WINDOWS_SIG="$(find artifacts -type f -path '*/nsis/*.exe.sig' | head -n1)"
 
-          # Fail loudly if any expected update artifact / signature is missing:
-          # latest.json MUST cover both platforms for the updater to work.
-          for f in "$LINUX_UPDATER" "$LINUX_SIG" "$WINDOWS_EXE" "$WINDOWS_SIG"; do
-            if [ -z "$f" ] || [ ! -f "$f" ]; then
-              echo "::error::Missing an expected updater artifact or signature (linux *.AppImage.tar.gz/.sig or windows nsis *-setup.exe/.sig)." >&2
-              echo "Resolved: LINUX_UPDATER='$LINUX_UPDATER' LINUX_SIG='$LINUX_SIG' WINDOWS_EXE='$WINDOWS_EXE' WINDOWS_SIG='$WINDOWS_SIG'" >&2
-              exit 1
-            fi
-          done
-
-          # Basenames feed the release download URLs (assets are attached to the
-          # tag's release under their bare filenames by the publish step above).
-          # productName is "Agent Harbor", so the emitted filenames contain a
-          # SPACE (e.g. `Agent Harbor_0.4.0_amd64.AppImage.tar.gz`). GitHub's
+          # Base URL for release-download assets. productName is "Agent Harbor",
+          # so the emitted filenames contain a SPACE (e.g.
+          # `Agent Harbor_0.4.0_amd64.AppImage.tar.gz`). GitHub's
           # release-download URLs must percent-encode that space as %20 or the
           # updater 404s, so encode spaces in the URL path segment.
-          LINUX_FILE="$(basename "$LINUX_UPDATER")"
-          WINDOWS_FILE="$(basename "$WINDOWS_EXE")"
-          LINUX_FILE_ENC="${LINUX_FILE// /%20}"
-          WINDOWS_FILE_ENC="${WINDOWS_FILE// /%20}"
           RELEASE_BASE="https://github.com/knight2215/agent-harbor/releases/download/${GITHUB_REF_NAME}"
 
-          # Signature contents are read verbatim and passed to jq as raw strings
-          # (`--rawfile`) so jq escapes them into valid JSON string values.
+          # Build the `platforms` object INCREMENTALLY, adding a platform only
+          # when BOTH its payload and its `.sig` were found. Signature contents
+          # are read verbatim via `--rawfile` so jq escapes them into valid JSON
+          # string values. Basenames (percent-encoded) feed the download URLs.
+          # We fail ONLY IF NO platform is available (COUNT == 0); a missing but
+          # expected platform is a non-fatal `::warning::`.
+          PLATFORMS='{}'
+          COUNT=0
+
+          if [ -n "$WINDOWS_EXE" ] && [ -f "$WINDOWS_EXE" ] && [ -n "$WINDOWS_SIG" ] && [ -f "$WINDOWS_SIG" ]; then
+            WINDOWS_FILE="$(basename "$WINDOWS_EXE")"
+            WINDOWS_FILE_ENC="${WINDOWS_FILE// /%20}"
+            PLATFORMS="$(jq -n \
+              --argjson p "$PLATFORMS" \
+              --rawfile sig "$WINDOWS_SIG" \
+              --arg url "${RELEASE_BASE}/${WINDOWS_FILE_ENC}" \
+              '$p + {"windows-x86_64": { signature: $sig, url: $url }}')"
+            COUNT=$((COUNT + 1))
+            echo "Added windows-x86_64 (payload: $WINDOWS_FILE)." >&2
+          else
+            echo "::warning::No Windows updater artifact/signature found; latest.json will omit windows-x86_64." >&2
+          fi
+
+          if [ -n "$LINUX_UPDATER" ] && [ -f "$LINUX_UPDATER" ] && [ -n "$LINUX_SIG" ] && [ -f "$LINUX_SIG" ]; then
+            LINUX_FILE="$(basename "$LINUX_UPDATER")"
+            LINUX_FILE_ENC="${LINUX_FILE// /%20}"
+            PLATFORMS="$(jq -n \
+              --argjson p "$PLATFORMS" \
+              --rawfile sig "$LINUX_SIG" \
+              --arg url "${RELEASE_BASE}/${LINUX_FILE_ENC}" \
+              '$p + {"linux-x86_64": { signature: $sig, url: $url }}')"
+            COUNT=$((COUNT + 1))
+            echo "Added linux-x86_64 (payload: $LINUX_FILE)." >&2
+          else
+            echo "::warning::No Linux updater artifact/signature found; latest.json will omit linux-x86_64. (The pinned Tauri v2 does not emit *.AppImage.tar.gz updater payloads yet - documented follow-up.)" >&2
+          fi
+
+          # A release with NO signed updater artifact for ANY platform is a real
+          # error worth failing on. Otherwise publish with whatever we have.
+          if [ "$COUNT" -eq 0 ]; then
+            echo "::error::No signed updater artifacts for ANY platform; cannot publish latest.json." >&2
+            echo "Resolved: LINUX_UPDATER='$LINUX_UPDATER' LINUX_SIG='$LINUX_SIG' WINDOWS_EXE='$WINDOWS_EXE' WINDOWS_SIG='$WINDOWS_SIG'" >&2
+            exit 1
+          fi
+
           jq -n \
             --arg version "$VERSION" \
             --arg notes "Automated release ${GITHUB_REF_NAME} of agent-harbor." \
             --arg pub_date "$PUB_DATE" \
-            --rawfile linux_sig "$LINUX_SIG" \
-            --arg linux_url "${RELEASE_BASE}/${LINUX_FILE_ENC}" \
-            --rawfile windows_sig "$WINDOWS_SIG" \
-            --arg windows_url "${RELEASE_BASE}/${WINDOWS_FILE_ENC}" \
+            --argjson platforms "$PLATFORMS" \
             '{
               version: $version,
               notes: $notes,
               pub_date: $pub_date,
-              platforms: {
-                "linux-x86_64": { signature: $linux_sig, url: $linux_url },
-                "windows-x86_64": { signature: $windows_sig, url: $windows_url }
-              }
+              platforms: $platforms
             }' > latest.json
 
           echo "Composed latest.json:" >&2
