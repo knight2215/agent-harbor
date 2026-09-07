@@ -460,6 +460,15 @@ jobs:
         with:
           tool: tauri-cli@2.1.0
 
+      # Install the frontend deps BEFORE `tauri build`. Tauri's
+      # `beforeBuildCommand` runs `npm run build` (`tsc && vite build`), which
+      # needs `node_modules/.bin/{tsc,vite}` present. Mirrors the routine
+      # `build` job's install step. (`npm ci` falls back to `npm install` while
+      # there is no committed package-lock.json.)
+      - name: npm install (frontend)
+        working-directory: hybrid-orchestrator/frontend
+        run: npm ci || npm install
+
       # Bundles the app. This compiles tauri-app and the frontend production
       # build, catching bundling / capability / COPY-path issues that unit tests
       # miss (tasks.md P0.6).
