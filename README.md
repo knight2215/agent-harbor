@@ -283,6 +283,14 @@ rejected.
   installer, and the `publish-updater-manifest` job composes `latest.json` (with
   each platform's signature + release download URL) and attaches it to the
   release. The private signing key is never stored in the repository.
+- `latest.json` is composed **per platform**: it includes only the platforms
+  that actually produced a signed updater payload for a given release, and the
+  job fails only when *no* platform did. Today that means **Windows self-update
+  is live** (`windows-x86_64`), while **Linux self-update is still pending**: the
+  pinned Tauri v2 does not currently emit the Linux `*.AppImage.tar.gz` updater
+  payload, so `linux-x86_64` is omitted from the manifest until that lands
+  (tracked as a follow-up). Linux users should update by re-downloading the
+  release installer for now.
 - There is an in-app **Check for updates** control in **Settings > About /
   Updates** that shows the current version, checks for a newer release, and
   offers **Install and restart** when one is available.
