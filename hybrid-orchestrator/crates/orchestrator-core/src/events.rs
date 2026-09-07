@@ -16,11 +16,13 @@
 //!   - MCP manager: mcpStateChanged, mcpError
 //!   - selectors:   providersChanged, personasChanged
 //!
-//! `#[allow(dead_code)]`: these variants and their fields are constructed by the
-//! pipeline and the tauri-app event bridge in later Phase 1/2 work (FEAT-003
-//! wires the bridge; the streaming pipeline emits the message events). The
-//! allow keeps clippy `-D warnings` clean until then; remove it once every
-//! variant is constructed.
+//! Most variants are now constructed by the pipeline and the tauri-app event
+//! bridge (message/conversation-update events by the streaming pipeline, MCP
+//! and permission events by the tauri-app commands). The four still-unemitted
+//! lifecycle/selector variants (`ConversationCreated`, `ConversationDeleted`,
+//! `ProvidersChanged`, `PersonasChanged`) carry a per-variant
+//! `#[allow(dead_code)]` to keep clippy `-D warnings` clean until the surfaces
+//! that emit them land; drop each one as its emitter is wired.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -40,7 +42,6 @@ pub enum McpConnectionState {
 /// Events emitted by the core to the frontend (architecture.md Section 8).
 ///
 /// Exactly twelve variants, serialized as a `type`-tagged camelCase union.
-#[allow(dead_code)] // constructed by the pipeline / tauri-app bridge in later Phase 1/2 work (FEAT-003)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CoreEvent {
@@ -86,9 +87,11 @@ pub enum CoreEvent {
     #[serde(rename_all = "camelCase")]
     ConversationUpdated { conversation_id: Uuid },
     /// A new conversation was created.
+    #[allow(dead_code)] // no emitter wired yet (conversation lifecycle surface)
     #[serde(rename_all = "camelCase")]
     ConversationCreated { conversation_id: Uuid },
     /// A conversation was deleted.
+    #[allow(dead_code)] // no emitter wired yet (conversation lifecycle surface)
     #[serde(rename_all = "camelCase")]
     ConversationDeleted { conversation_id: Uuid },
     /// An MCP server's connection state or tool list changed (Section 8.3).
@@ -113,8 +116,10 @@ pub enum CoreEvent {
         rationale: String,
     },
     /// The set or availability of providers/models changed (Section 8.2).
+    #[allow(dead_code)] // no emitter wired yet (provider/model selector surface)
     ProvidersChanged,
     /// The set of personas changed (Section 8.4).
+    #[allow(dead_code)] // no emitter wired yet (persona selector surface)
     PersonasChanged,
 }
 

@@ -274,10 +274,12 @@ describe("conversations store", () => {
     expect(useConversationsStore.getState().messages).toHaveLength(0);
   });
 
-  it("a completed turn's conversationUpdated refreshes history recency + active messages", async () => {
-    // The pipeline emits conversationUpdated after persisting the user and the
-    // assistant message (review issue #2). Assert the store reacts by refetching
-    // the index (history recency) and, for the active conversation, its messages.
+  it("conversationUpdated refreshes the history index only, never the active messages", async () => {
+    // The pipeline emits conversationUpdated after EACH message persist, so the
+    // reducer must refresh the index (history recency) but must NOT refetch the
+    // active conversation's messages: a mid-stream get_messages refetch would
+    // resolve before the assistant row is persisted and clobber the live stream
+    // (review issue #1). Assert list_conversations runs and get_messages does not.
     invoke.mockImplementation((command: string) => {
       if (command === "list_conversations") {
         return Promise.resolve([conversation("c-1"), conversation("c-2")]);
@@ -292,11 +294,62 @@ describe("conversations store", () => {
       type: "conversationUpdated",
       conversationId: "c-1",
     });
-    // Wait for the fire-and-forget refetches kicked off by the reducer.
+    // Let any fire-and-forget work the reducer might have kicked off settle.
     await Promise.resolve();
     await Promise.resolve();
     expect(invoke).toHaveBeenCalledWith("list_conversations");
-    expect(invoke).toHaveBeenCalledWith("get_messages", { conversationId: "c-1" });
+    expect(invoke).not.toHaveBeenCalledWith("get_messages", { conversationId: "c-1" });
+  });
+
+  it("a conversationUpdated mid-stream does not clobber the streaming placeholder or deltas", async () => {
+    // Reproduce the exact pipeline ordering (review issue #1): the user message
+    // is persisted and announced, conversationUpdated fires while only the user
+    // row exists, then the assistant streams. If the event handler refetched the
+    // active messages, get_messages (returning ONLY the user row) would resolve
+    // mid-stream and wipe the assistant placeholder + accumulated deltas. Assert
+    // the live stream survives.
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_conversations") {
+        return Promise.resolve([conversation("c-1")]);
+      }
+      if (command === "get_messages") {
+        // The DB state at the moment the refetch would resolve: user row only.
+        return Promise.resolve([
+          {
+            id: "u-1",
+            conversationId: "c-1",
+            role: "user",
+            content: { type: "text", text: "hello" },
+            createdAt: "2024-01-01T00:00:00Z",
+            route: null,
+            usage: null,
+            status: "complete",
+          } satisfies Message,
+        ]);
+      }
+      return Promise.resolve(undefined);
+    });
+    useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });
+    const apply = useConversationsStore.getState().applyCoreEvent;
+
+    apply({ type: "messageStarted", conversationId: "c-1", messageId: "u-1", role: "user" });
+    // conversationUpdated after the user persist — must not schedule a refetch.
+    apply({ type: "conversationUpdated", conversationId: "c-1" });
+    apply({ type: "messageStarted", conversationId: "c-1", messageId: "a-1", role: "assistant" });
+    apply({ type: "messageDelta", conversationId: "c-1", messageId: "a-1", delta: "Hel" });
+    apply({ type: "messageDelta", conversationId: "c-1", messageId: "a-1", delta: "lo" });
+
+    // Flush any pending microtasks so a stray refetch (if one existed) would
+    // have resolved and clobbered the stream by now.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const messages = useConversationsStore.getState().messages;
+    expect(messages).toHaveLength(2);
+    expect(messages[1]).toMatchObject({ id: "a-1", role: "assistant", status: "streaming" });
+    expect(messages[1].content).toEqual({ type: "text", text: "Hello" });
+    // The event handler never refetched the active conversation's messages.
+    expect(invoke).not.toHaveBeenCalledWith("get_messages", { conversationId: "c-1" });
   });
 
   it("resumeConversation loads via open_conversation and restores the full record", async () => {

@@ -345,12 +345,19 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
       }
       case "conversationCreated":
       case "conversationUpdated": {
-        // Core is authoritative: invalidate + refetch the index.
+        // Core is authoritative: invalidate + refetch the index (recency,
+        // titles, persona / route / tag changes surface here).
         void get().loadConversations();
-        // If the active conversation changed, refetch its messages too.
-        if (get().activeConversationId === event.conversationId) {
-          void get().openConversation(event.conversationId);
-        }
+        // Deliberately do NOT refetch the active conversation's messages here.
+        // `run_turn` emits `conversationUpdated` after EACH message persist, so
+        // a message refetch would resolve mid-stream — while only the user row
+        // is persisted and the assistant row is not yet written — and its
+        // `set({ messages })` would overwrite the seeded streaming placeholder
+        // and every accumulated delta, blanking the assistant bubble. The live
+        // streaming events (messageStarted/messageDelta/messageComplete) keep
+        // the active message list current, so an event-driven refetch is both
+        // unnecessary and harmful. User-initiated opens (openConversation /
+        // resumeConversation from the history surface) still refetch on demand.
         return;
       }
       case "conversationDeleted": {
