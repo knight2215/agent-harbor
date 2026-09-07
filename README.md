@@ -69,6 +69,47 @@ per the specification.
   documented provider/policy/MCP extension seams (zero-core-edit demos plus
   [docs/EXTENDING.md](docs/EXTENDING.md)).
 
+## User interface
+
+The desktop shell is a navigable layout with a collapsible **left sidebar** that
+hosts the brand/logo and the primary destinations **Chat**, **History**, and
+**Settings**:
+
+- **Chat** is the default surface (streaming message list, composer, and
+  permission prompt) with a **routing-mode segmented control** placed near the
+  Chat composer to pick the per-conversation routing behavior (Auto / Prefer
+  Local / Prefer Quality / Manual).
+- **History** is the conversation history and session-management surface.
+- **Settings** groups the heavy configuration behind its own **sub-navigation**
+  (providers & keys, local runtimes, MCP / tools, agents, routing, and
+  appearance). The **Appearance** section holds a **dark/light theme toggle**;
+  the theme follows the OS by default until an explicit choice is stored.
+
+The brand mark is a **hand-crafted SVG logo** (a harbor anchor fused with an
+agent-node/network glyph in the teal/blue accent, legible on both light and dark
+backgrounds). It lives in two places:
+
+- `hybrid-orchestrator/frontend/src/assets/logo.svg` - the in-app logo rendered
+  in the sidebar brand area.
+- `hybrid-orchestrator/crates/tauri-app/icons/agent-harbor.svg` - the canonical,
+  square, app-icon source that shares the motif.
+
+### Regenerating the app icons
+
+The raster app-icon set referenced by `bundle.icon` in `tauri.conf.json`
+(`32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.ico`, `icon.icns`) is
+regenerated from a high-resolution raster export of `agent-harbor.svg` via the
+Tauri CLI:
+
+```sh
+cargo tauri icon path/to/agent-harbor.png
+```
+
+The current rasters are still the earlier Phase 0 placeholders because the Tauri
+CLI is unavailable in the offline sandbox; regenerating them from the SVG source
+is a documented follow-up (see
+[`hybrid-orchestrator/crates/tauri-app/icons/README.md`](hybrid-orchestrator/crates/tauri-app/icons/README.md)).
+
 ## Repository layout
 
 ```
