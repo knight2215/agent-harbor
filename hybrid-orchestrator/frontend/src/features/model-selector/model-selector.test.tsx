@@ -207,6 +207,28 @@ describe("model selector", () => {
     expect(useConversationsStore.getState().pendingOverride).toBeNull();
   });
 
+  it("PerMessageOverrideControl shows guidance (not a bare picker) when no models exist", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    useProvidersStore.setState({ models: [] });
+
+    render(<PerMessageOverrideControl />);
+
+    // The 'Override next message' label renders exactly once.
+    expect(screen.getAllByText("Override next message")).toHaveLength(1);
+    // Empty state guides the user to Settings -> Providers & Keys and mentions
+    // a local runtime, and there is exactly ONE such guidance node (no stacked
+    // empty pickers).
+    const empties = screen.getAllByText(/Providers & Keys/);
+    expect(empties).toHaveLength(1);
+    expect(screen.getByText(/local runtime/)).toBeInTheDocument();
+  });
+
+  it("ProviderModelPicker empty state guides the user to configure a provider", () => {
+    render(<ProviderModelPicker models={[]} value={null} onChange={vi.fn()} />);
+    expect(screen.getByText(/Providers & Keys/)).toBeInTheDocument();
+    expect(screen.getByText(/local runtime/)).toBeInTheDocument();
+  });
+
   it("providers_changed refreshes the model list", async () => {
     invoke.mockResolvedValue([model("openai", "gpt-4o", false)]);
     useProvidersStore.getState().applyCoreEvent({ type: "providersChanged" });

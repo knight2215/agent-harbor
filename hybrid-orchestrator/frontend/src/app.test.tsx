@@ -16,11 +16,17 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: (...args: unknown[]) => listen(...args),
 }));
 
+// The status footer reads the real app version via `@tauri-apps/api/app`
+// getVersion(); mock it so the async render resolves deterministically and the
+// test never hangs waiting on a live Tauri runtime.
+const getVersion = vi.fn().mockResolvedValue("9.9.9-test");
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: () => getVersion(),
+}));
+
 /** Route each mocked command to a shape its caller can consume. */
 function routeInvoke(command: string): unknown {
   switch (command) {
-    case "app_version":
-      return "9.9.9-test";
     case "list_conversations":
     case "list_personas":
     case "list_mcp_servers":
@@ -36,18 +42,25 @@ describe("<App />", () => {
     invoke.mockReset();
     listen.mockReset();
     unlisten.mockReset();
+    getVersion.mockClear();
+    getVersion.mockResolvedValue("9.9.9-test");
     invoke.mockImplementation((command: string) => Promise.resolve(routeInvoke(command)));
     listen.mockResolvedValue(unlisten);
+    try {
+      window.localStorage.clear();
+    } catch {
+      // Ignore storage errors in constrained envs.
+    }
   });
 
-  it("renders the app version returned by the app_version command", async () => {
+  it("renders the app version read at runtime via getVersion()", async () => {
     render(<App />);
 
     await waitFor(() => {
       expect(screen.getByTestId("app-version")).toHaveTextContent("9.9.9-test");
     });
 
-    expect(invoke).toHaveBeenCalledWith("app_version");
+    expect(getVersion).toHaveBeenCalled();
   });
 
   it("renders the sidebar with Chat / History / Settings destinations", () => {
@@ -61,6 +74,46 @@ describe("<App />", () => {
 
     // Chat is the default destination.
     expect(screen.getByRole("region", { name: "Chat" })).toBeInTheDocument();
+  });
+
+  it("renders expanded by default with visible nav labels", () => {
+    render(<App />);
+    // Expanded: the shell is not collapsed and the brand text label is present.
+    expect(document.querySelector(".app")).toHaveAttribute("data-collapsed", "false");
+    expect(screen.getByText("Agent Harbor")).toBeInTheDocument();
+    // Each nav item carries a title tooltip mirroring its label.
+    expect(screen.getByRole("button", { name: /Chat/ })).toHaveAttribute("title", "Chat");
+  });
+
+  it("collapses to an icon-only rail and persists the choice to localStorage", () => {
+    render(<App />);
+
+    const shell = document.querySelector(".app");
+    expect(shell).toHaveAttribute("data-collapsed", "false");
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse sidebar" }));
+
+    expect(shell).toHaveAttribute("data-collapsed", "true");
+    expect(window.localStorage.getItem("ah-sidebar-collapsed")).toBe("true");
+    // The nav items and their tooltips remain (icon-only rail); labels are
+    // hidden purely via CSS driven by data-collapsed.
+    expect(screen.getByRole("button", { name: /Chat/ })).toHaveAttribute("title", "Chat");
+
+    // Toggling back expands and updates the persisted value.
+    fireEvent.click(screen.getByRole("button", { name: "Expand sidebar" }));
+    expect(shell).toHaveAttribute("data-collapsed", "false");
+    expect(window.localStorage.getItem("ah-sidebar-collapsed")).toBe("false");
+  });
+
+  it("restores the collapsed state from localStorage on mount", () => {
+    window.localStorage.setItem("ah-sidebar-collapsed", "true");
+    render(<App />);
+    expect(document.querySelector(".app")).toHaveAttribute("data-collapsed", "true");
+  });
+
+  it("renders the 'Override next message' control exactly once in the chat pane", () => {
+    render(<App />);
+    expect(screen.getAllByText("Override next message")).toHaveLength(1);
   });
 
   it("switches to the History and Settings destinations", async () => {

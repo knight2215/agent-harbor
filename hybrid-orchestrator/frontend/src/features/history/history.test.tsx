@@ -66,8 +66,11 @@ describe("history surface", () => {
     });
 
     const { rerender } = render(<ConversationList query="" />);
-    // Both rows present; most-recent (Beta) sorts first.
-    const openButtons = screen.getAllByRole("button", { name: /Alpha|Beta/ });
+    // Both rows present; most-recent (Beta) sorts first. Select the row-open
+    // buttons specifically (each row also hosts a kebab "Actions for …" button).
+    const openButtons = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(".conversation-list__open"),
+    );
     expect(openButtons[0]).toHaveTextContent("Beta");
     expect(openButtons[1]).toHaveTextContent("Alpha");
 
@@ -134,7 +137,11 @@ describe("history surface", () => {
     const promptSpy = vi.spyOn(window, "prompt");
     render(<ConversationContextMenu conversation={target} />);
 
-    // Rename.
+    const openMenu = () =>
+      fireEvent.click(screen.getByRole("button", { name: "Actions for Alpha" }));
+
+    // Rename (open the kebab first; menuitems are absent until opened).
+    openMenu();
     promptSpy.mockReturnValueOnce("Renamed");
     fireEvent.click(screen.getByRole("menuitem", { name: "Rename" }));
     await waitFor(() => {
@@ -144,7 +151,8 @@ describe("history surface", () => {
       });
     });
 
-    // Tag.
+    // Tag (reopen the kebab; it closes after each action).
+    openMenu();
     promptSpy.mockReturnValueOnce("confidential, custom:legal");
     fireEvent.click(screen.getByRole("menuitem", { name: "Tag" }));
     await waitFor(() => {
@@ -154,13 +162,32 @@ describe("history surface", () => {
       });
     });
 
-    // Delete.
+    // Delete (reopen the kebab).
+    openMenu();
     fireEvent.click(screen.getByRole("menuitem", { name: "Delete" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("delete_conversation", { conversationId: "c-1" });
     });
 
     promptSpy.mockRestore();
+  });
+
+  it("context menu is a kebab: menuitems are hidden until opened, present after", () => {
+    const target = conversation("c-1", "Alpha");
+    render(<ConversationContextMenu conversation={target} />);
+
+    // Closed by default: no menuitems in the DOM.
+    expect(screen.queryByRole("menuitem", { name: "Rename" })).toBeNull();
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    // Opening the kebab reveals all six actions.
+    fireEvent.click(screen.getByRole("button", { name: "Actions for Alpha" }));
+    expect(screen.getByRole("menuitem", { name: "Rename" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Tag" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Duplicate" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Export Markdown" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Export JSON" })).toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "Delete" })).toBeInTheDocument();
   });
 
   it("context menu duplicate seeds a new conversation from the source", async () => {
@@ -183,6 +210,7 @@ describe("history surface", () => {
     });
 
     render(<ConversationContextMenu conversation={source} />);
+    fireEvent.click(screen.getByRole("button", { name: "Actions for Alpha" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Duplicate" }));
 
     await waitFor(() => {
@@ -220,6 +248,7 @@ describe("history surface", () => {
       .mockImplementation(() => undefined);
 
     render(<ConversationContextMenu conversation={target} />);
+    fireEvent.click(screen.getByRole("button", { name: "Actions for Alpha" }));
     fireEvent.click(screen.getByRole("menuitem", { name: "Export Markdown" }));
 
     await waitFor(() => {
@@ -282,7 +311,10 @@ describe("history surface", () => {
     });
 
     render(<ConversationList query="" />);
-    fireEvent.click(screen.getByRole("button", { name: /Alpha/ }));
+    // Click the row-open button (the row also hosts a kebab "Actions for …").
+    const openButton = document.querySelector<HTMLButtonElement>(".conversation-list__open");
+    expect(openButton).not.toBeNull();
+    fireEvent.click(openButton as HTMLButtonElement);
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("open_conversation", { conversationId: "c-1" });

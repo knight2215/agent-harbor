@@ -17,8 +17,11 @@
 // via `getState()`, so switching destinations NEVER tears it down or opens a
 // second subscription. The effect returns a stable cleanup that awaits and
 // calls the `UnlistenFn`, so the subscription is torn down exactly once on
-// unmount. The Phase 0 `app_version` display is folded into the status footer.
+// unmount. The status footer surfaces the real app version, read at runtime via
+// `@tauri-apps/api/app` getVersion() (which reads tauri.conf.json), so it stays
+// in sync with the shipped build without any hardcoding.
 
+import { getVersion } from "@tauri-apps/api/app";
 import { useEffect, useState } from "react";
 import logoUrl from "./assets/logo.svg";
 import { Composer } from "./features/chat/Composer";
@@ -28,7 +31,6 @@ import { PerMessageOverrideControl } from "./features/model-selector/PerMessageO
 import { RoutingModeToggle } from "./features/model-selector/RoutingModeToggle";
 import { History } from "./features/history/History";
 import { Settings } from "./features/settings/Settings";
-import { appVersion } from "./ipc/commands";
 import { onCoreEvent } from "./ipc/events";
 import { useConversationsStore } from "./state/conversations";
 import { usePersonasStore } from "./state/personas";
@@ -56,13 +58,18 @@ const NAV_ITEMS: ReadonlyArray<{ id: Destination; label: string; icon: string }>
   { id: "settings", label: "Settings", icon: "⚙" },
 ];
 
-/** Fold the app version into a small status/about footer (Phase 0 wiring). */
+/**
+ * Fold the real app version into a small status/about footer. The version is
+ * read at runtime from `@tauri-apps/api/app` getVersion() (backed by
+ * tauri.conf.json), so it tracks the shipped build automatically on every
+ * version bump. Renders "loading…" until the async read resolves.
+ */
 function StatusBar() {
   const [version, setVersion] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
-    appVersion()
+    getVersion()
       .then((v) => {
         if (active) setVersion(v);
       })
@@ -146,6 +153,7 @@ export function App() {
               className="app__nav-item"
               data-active={destination === id}
               aria-current={destination === id ? "page" : undefined}
+              title={label}
               onClick={() => setDestination(id)}
             >
               <span className="app__nav-icon" aria-hidden="true">

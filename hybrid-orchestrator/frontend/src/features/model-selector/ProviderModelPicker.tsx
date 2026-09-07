@@ -13,6 +13,7 @@
 // hints (from `Capabilities`) and a rough cost signal (from `TokenPrice`).
 
 import type { AvailableModel, ManualRoute } from "../../types";
+import { NoModelsEmptyState } from "./NoModelsEmptyState";
 
 /** True when both token rates are zero, the default "this is a local model" signal. */
 function isFreeModel(model: AvailableModel): boolean {
@@ -106,7 +107,7 @@ export function ProviderModelPicker({
   const cloud = models.filter((m) => !isLocal(m));
 
   if (models.length === 0) {
-    return <p className="model-picker__empty">No models available.</p>;
+    return <NoModelsEmptyState />;
   }
 
   return (

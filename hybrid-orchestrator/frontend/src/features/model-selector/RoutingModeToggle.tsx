@@ -54,7 +54,14 @@ export function RoutingModeToggle() {
   const [showPicker, setShowPicker] = useState(false);
 
   if (activeConversationId === null) {
-    return <div className="routing-mode" aria-label="Routing mode" />;
+    return (
+      <div className="routing-mode routing-mode--empty" aria-label="Routing mode">
+        <p className="settings__empty-state">
+          No conversation selected. Start a <strong>New conversation</strong> or pick one from
+          History to choose how it routes.
+        </p>
+      </div>
+    );
   }
 
   const selectMode = (mode: Exclude<RoutingMode, "manual">) => {

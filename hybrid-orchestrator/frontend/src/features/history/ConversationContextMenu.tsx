@@ -12,7 +12,13 @@
 //
 // The rename/tag prompts use the platform prompt for a minimal Phase 5 surface;
 // richer inline editors are a later-phase concern.
+//
+// The actions live behind an on-demand kebab ("⋯") toggle: the menuitems are
+// NOT in the DOM until the kebab is opened, and the popover closes on outside
+// click, Escape, or when an action is activated. This keeps each conversation
+// row uncluttered instead of rendering six always-expanded buttons.
 
+import { useEffect, useRef, useState } from "react";
 import { useConversationsStore } from "../../state/conversations";
 import type { Conversation, ExportFormat, PrivacyTag } from "../../types";
 
@@ -59,7 +65,32 @@ export function ConversationContextMenu({ conversation }: ConversationContextMen
   const exportConversation = useConversationsStore((s) => s.exportConversation);
   const deleteConversation = useConversationsStore((s) => s.deleteConversation);
 
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Close the popover on an outside click or the Escape key while it is open.
+  useEffect(() => {
+    if (!open) return;
+
+    const onPointerDown = (event: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [open]);
+
   const rename = () => {
+    setOpen(false);
     const title = window.prompt("Rename conversation", conversation.title);
     if (title === null) return;
     const trimmed = title.trim();
@@ -68,6 +99,7 @@ export function ConversationContextMenu({ conversation }: ConversationContextMen
   };
 
   const tag = () => {
+    setOpen(false);
     const current = conversation.privacyTags.map(tagToText).join(", ");
     const input = window.prompt("Tags (comma-separated)", current);
     if (input === null) return;
@@ -75,39 +107,60 @@ export function ConversationContextMenu({ conversation }: ConversationContextMen
   };
 
   const duplicate = () => {
+    setOpen(false);
     void duplicateConversation(conversation.id);
   };
 
   const exportAs = async (format: ExportFormat) => {
+    setOpen(false);
     const content = await exportConversation(conversation.id, format);
     const extension = format === "json" ? "json" : "md";
     downloadText(`${conversation.title}.${extension}`, content);
   };
 
   const remove = () => {
+    setOpen(false);
     void deleteConversation(conversation.id);
   };
 
   return (
-    <div className="conversation-menu" role="menu" aria-label={`Actions for ${conversation.title}`}>
-      <button type="button" role="menuitem" onClick={rename}>
-        Rename
+    <div className="conversation-menu" ref={containerRef}>
+      <button
+        type="button"
+        className="conversation-menu__toggle"
+        aria-label={`Actions for ${conversation.title}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((prev) => !prev)}
+      >
+        <span aria-hidden="true">⋯</span>
       </button>
-      <button type="button" role="menuitem" onClick={tag}>
-        Tag
-      </button>
-      <button type="button" role="menuitem" onClick={duplicate}>
-        Duplicate
-      </button>
-      <button type="button" role="menuitem" onClick={() => void exportAs("markdown")}>
-        Export Markdown
-      </button>
-      <button type="button" role="menuitem" onClick={() => void exportAs("json")}>
-        Export JSON
-      </button>
-      <button type="button" role="menuitem" onClick={remove}>
-        Delete
-      </button>
+      {open && (
+        <div
+          className="conversation-menu__popover"
+          role="menu"
+          aria-label={`Actions for ${conversation.title}`}
+        >
+          <button type="button" role="menuitem" onClick={rename}>
+            Rename
+          </button>
+          <button type="button" role="menuitem" onClick={tag}>
+            Tag
+          </button>
+          <button type="button" role="menuitem" onClick={duplicate}>
+            Duplicate
+          </button>
+          <button type="button" role="menuitem" onClick={() => void exportAs("markdown")}>
+            Export Markdown
+          </button>
+          <button type="button" role="menuitem" onClick={() => void exportAs("json")}>
+            Export JSON
+          </button>
+          <button type="button" role="menuitem" onClick={remove}>
+            Delete
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -116,6 +116,7 @@ body {
   display: flex;
   align-items: center;
   gap: var(--ah-space-3);
+  min-height: 40px;
   padding: var(--ah-space-2) var(--ah-space-3);
   border: none;
   border-radius: var(--ah-radius-md);
@@ -141,9 +142,33 @@ body {
 }
 
 .app__nav-icon {
-  width: 18px;
-  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  font-size: 18px;
+  line-height: 1;
   flex: 0 0 auto;
+}
+
+/*
+ * Collapsed = VS Code activity-bar style icon-only rail. The label is already
+ * hidden by the data-collapsed rule above; here we center each icon box so the
+ * glyphs align vertically and the collapse toggle stays centered too.
+ */
+.app[data-collapsed="true"] .app__nav-item {
+  justify-content: center;
+  gap: 0;
+  padding: var(--ah-space-2);
+}
+
+.app[data-collapsed="true"] .app__brand {
+  justify-content: center;
+}
+
+.app[data-collapsed="true"] .app__collapse {
+  align-self: center;
 }
 
 .app__sidebar-history {
@@ -386,6 +411,318 @@ body {
   background: var(--ah-accent);
   color: var(--ah-accent-contrast);
   font-weight: 600;
+}
+
+/* --- History surface ------------------------------------------------------ */
+
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-3);
+}
+
+.history__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ah-space-3);
+}
+
+.history__header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.history__new {
+  padding: var(--ah-space-1) var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-accent);
+  color: var(--ah-accent-contrast);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.history__new:hover {
+  background: var(--ah-accent-strong);
+}
+
+/* --- Search bar ----------------------------------------------------------- */
+
+.search-bar__input {
+  width: 100%;
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text);
+  font: inherit;
+}
+
+.search-bar__input::placeholder {
+  color: var(--ah-text-faint);
+}
+
+/* --- Conversation list ---------------------------------------------------- */
+
+.conversation-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conversation-list--empty {
+  padding: var(--ah-space-3);
+  color: var(--ah-text-faint);
+  font-size: 13px;
+}
+
+.conversation-list__item {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--ah-space-1);
+}
+
+.conversation-list__open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--ah-space-2) var(--ah-space-3);
+  padding-right: var(--ah-space-5);
+  border: 1px solid transparent;
+  border-radius: var(--ah-radius-md);
+  background: transparent;
+  color: var(--ah-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.conversation-list__open:hover {
+  background: var(--ah-surface-hover);
+}
+
+.conversation-list__open[data-selected="true"] {
+  background: var(--ah-accent-soft);
+  border-color: var(--ah-accent);
+}
+
+.conversation-list__title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-list__timestamp {
+  font-size: 12px;
+  color: var(--ah-text-faint);
+}
+
+.conversation-list__tags {
+  font-size: 12px;
+  color: var(--ah-text-muted);
+}
+
+.conversation-list__route {
+  font-family: var(--ah-font-mono);
+  font-size: 12px;
+  color: var(--ah-text-muted);
+}
+
+/* --- Conversation kebab menu ---------------------------------------------- */
+
+.conversation-menu {
+  position: absolute;
+  top: var(--ah-space-1);
+  right: var(--ah-space-1);
+}
+
+.conversation-menu__toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--ah-radius-sm);
+  background: transparent;
+  color: var(--ah-text-muted);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.conversation-menu__toggle:hover,
+.conversation-menu__toggle[aria-expanded="true"] {
+  background: var(--ah-surface-hover);
+  color: var(--ah-text);
+}
+
+.conversation-menu__popover {
+  position: absolute;
+  top: calc(100% + var(--ah-space-1));
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  min-width: 160px;
+  padding: var(--ah-space-1);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface);
+  box-shadow: var(--ah-shadow);
+}
+
+.conversation-menu__popover button {
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: none;
+  border-radius: var(--ah-radius-sm);
+  background: transparent;
+  color: var(--ah-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-menu__popover button:hover {
+  background: var(--ah-surface-hover);
+}
+
+/* --- Model picker --------------------------------------------------------- */
+
+.model-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-3);
+}
+
+.model-picker__empty {
+  margin: 0;
+  padding: var(--ah-space-3) var(--ah-space-4);
+  border: 1px dashed var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface-2);
+  color: var(--ah-text-muted);
+  font-size: 13px;
+}
+
+.model-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+}
+
+.model-group__label {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ah-text-faint);
+}
+
+.model-group__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.model-option {
+  display: flex;
+  align-items: baseline;
+  gap: var(--ah-space-3);
+  width: 100%;
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.model-option:hover {
+  background: var(--ah-surface-hover);
+}
+
+.model-option[data-selected="true"] {
+  border-color: var(--ah-accent);
+  background: var(--ah-accent-soft);
+}
+
+.model-option__name {
+  flex: 1 1 auto;
+  font-family: var(--ah-font-mono);
+}
+
+.model-option__caps {
+  color: var(--ah-text-muted);
+  font-size: 12px;
+}
+
+.model-option__price {
+  color: var(--ah-text-faint);
+  font-size: 12px;
+}
+
+/* --- Per-message override ------------------------------------------------- */
+
+.per-message-override {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+}
+
+.per-message-override__header {
+  display: flex;
+  align-items: center;
+  gap: var(--ah-space-3);
+}
+
+.per-message-override__label {
+  font-weight: 600;
+  color: var(--ah-text-muted);
+}
+
+.per-message-override__current {
+  font-family: var(--ah-font-mono);
+  font-size: 12px;
+  color: var(--ah-text);
+}
+
+.per-message-override__header button {
+  padding: var(--ah-space-1) var(--ah-space-2);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface-2);
+  color: var(--ah-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.per-message-override__header button:hover {
+  background: var(--ah-surface-hover);
+  color: var(--ah-text);
 }
 
 /* --- Responsive sidebar --------------------------------------------------- */
