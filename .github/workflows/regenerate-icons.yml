@@ -1,0 +1,35 @@
+name: Regenerate Icons
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regen:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: hybrid-orchestrator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # rsvg-convert rasterizes the SVG -> a high-res PNG source for `cargo tauri icon`.
+      - name: Install rsvg-convert
+        run: sudo apt-get update && sudo apt-get install -y librsvg2-bin
+        working-directory: .
+      - name: Install Tauri CLI (v2, prebuilt)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli@2.1.0
+      # Rasterize the anchor SVG to a 1024x1024 PNG (cargo tauri icon wants a square, >=1024 ideally, PNG source).
+      - name: Rasterize SVG -> PNG source
+        run: rsvg-convert -w 1024 -h 1024 crates/tauri-app/icons/agent-harbor.svg -o /tmp/agent-harbor-1024.png
+      # Generate the full icon set INTO the tauri-app icons dir (overwrites the placeholders + emits all sizes/formats).
+      - name: Generate icon set
+        run: cargo tauri icon /tmp/agent-harbor-1024.png --output crates/tauri-app/icons
+      # Upload the regenerated icons so they can be committed to the repo.
+      - name: Upload regenerated icons
+        uses: actions/upload-artifact@v4
+        with:
+          name: regenerated-icons
+          path: hybrid-orchestrator/crates/tauri-app/icons/*
+          if-no-files-found: error
