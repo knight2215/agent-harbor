@@ -10,11 +10,11 @@
 //!      [`PolicyRegistry::register`] seam,
 //!   2. selected active via [`PolicyRegistry::set_active`], and
 //!   3. driven by [`PolicyRegistry::resolve`] so that
-//!        (a) with NO manual override, `resolve` delegates to the demo policy's
-//!            decision, and
-//!        (b) WITH a manual override, the Section 6.3 manual-override precedence
-//!            wrapper ([`ManualOverrideResolver`]) STILL short-circuits to the
-//!            manual route.
+//!     (a) with NO manual override, `resolve` delegates to the demo policy's
+//!     decision, and
+//!     (b) WITH a manual override, the Section 6.3 manual-override precedence
+//!     wrapper ([`ManualOverrideResolver`]) STILL short-circuits to the
+//!     manual route.
 //!
 //! (b) is the load-bearing assertion: it proves the registry keeps wrapping the
 //! active automatic policy in the manual-override precedence unchanged, i.e. the
