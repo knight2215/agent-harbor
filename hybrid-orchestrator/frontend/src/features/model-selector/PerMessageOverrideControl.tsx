@@ -10,6 +10,7 @@
 import { useConversationsStore } from "../../state/conversations";
 import { useProvidersStore } from "../../state/providers";
 import type { ManualRoute } from "../../types";
+import { NoModelsEmptyState } from "./NoModelsEmptyState";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 
 export function PerMessageOverrideControl() {
@@ -40,7 +41,11 @@ export function PerMessageOverrideControl() {
           </>
         )}
       </div>
-      <ProviderModelPicker models={models} value={pendingOverride} onChange={choose} />
+      {models.length === 0 ? (
+        <NoModelsEmptyState />
+      ) : (
+        <ProviderModelPicker models={models} value={pendingOverride} onChange={choose} />
+      )}
     </div>
   );
 }

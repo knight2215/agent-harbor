@@ -19,7 +19,9 @@ export function Composer() {
   // command is a validated no-op today (the Phase 4 pipeline has no cancel seam),
   // so the button stays disabled and is labelled unavailable rather than posing
   // as a working control (review issue #3).
-  const streaming = useConversationsStore((s) => s.messages.some((m) => m.status === "streaming"));
+  const streaming = useConversationsStore((s) =>
+    (s.messages ?? []).some((m) => m.status === "streaming"),
+  );
   const [draft, setDraft] = useState("");
 
   const disabled = activeConversationId === null;

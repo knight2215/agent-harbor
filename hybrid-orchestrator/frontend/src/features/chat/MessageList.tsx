@@ -23,9 +23,20 @@ export function MessageList() {
     return <div className="message-list message-list--empty">No conversation selected.</div>;
   }
 
+  // Tolerate a not-yet-populated history: there is a real window between
+  // selecting a conversation and `openConversation` resolving with its
+  // messages, during which the store's `messages` may be empty (or, in
+  // partially-seeded states, undefined). Guard so this surface never throws
+  // and shows a sensible empty state instead.
+  const items = messages ?? [];
+
+  if (items.length === 0) {
+    return <div className="message-list message-list--empty">No messages yet.</div>;
+  }
+
   return (
     <div className="message-list" role="log" aria-label="Conversation messages">
-      {messages.map((message) => (
+      {items.map((message) => (
         <MessageBubble key={message.id} message={message} />
       ))}
     </div>

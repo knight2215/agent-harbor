@@ -31,10 +31,22 @@ and overwrites the files above.
 
 ### Status (offline sandbox)
 
-Regeneration was **not** run in the offline sandbox because the Tauri CLI is
-unavailable there. The current PNG/ICO/ICNS files are the earlier Phase 0
-**placeholder** rasters (solid-color squares, not final branding); they remain
-in place and are still referenced by `../tauri.conf.json` so `cargo tauri build`
-has valid image files to bundle and the build stays green. Regenerating the
-raster set from `agent-harbor.svg` via the command above is a documented
-follow-up.
+Regeneration is **deferred** — it was **not** run in the offline sandbox because
+no SVG rasterizer and no Tauri CLI are available there, and the network is
+blocked (npm and crates.io return 403), so none can be installed. Probed and
+confirmed absent: `cargo tauri` (no such command), `rsvg-convert`, `inkscape`,
+ImageMagick `convert`/`magick`, Python `cairosvg` and `PIL`/Pillow, and Node
+`sharp` / `@resvg/resvg-js`. A hand-rolled/approximate rasterizer that cannot
+faithfully reproduce the SVG's gradients, stroked anchor/network marks, and arc
+paths was intentionally **not** used, so no degraded icon was committed.
+
+The current PNG/ICO/ICNS files are therefore still the earlier Phase 0
+**placeholder** rasters (solid-color squares, not final branding). They are left
+**untouched** and remain referenced by `../tauri.conf.json`, so `cargo tauri
+build` has valid, non-empty image files to bundle and CI stays green.
+
+**Action required:** the anchor artwork in `agent-harbor.svg` must be rasterized
+into the bundled icon set by the gated `tauri-bundle` CI job (which has the Tauri
+CLI) or by a local `cargo tauri icon <png-export-of-agent-harbor.svg>` run, using
+the regeneration steps above. Until then the desktop window/taskbar icon shows
+the placeholder rather than the anchor logo.
