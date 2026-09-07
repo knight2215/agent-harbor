@@ -1,0 +1,7 @@
+{
+  "task_id": "task-phase-7-ux-refactor",
+  "task_description": "Phase 7: UX refactor + routing-mode control + branding for agent-harbor. Refactor the flat frontend app.tsx into a navigable shell (collapsible left sidebar: Chat/History/Settings, with Settings sub-navigation hosting Providers & Keys, Local Runtimes (empty-state placeholder for future Ollama/HF), MCP/Tools, Agents, Routing, Appearance) while keeping the single top-level onCoreEvent subscription intact. Extend the routing-mode control to a 4-position segmented toggle (Auto / Prefer Local / Prefer Quality / Manual) wired to the EXISTING domain::RoutingHint bias via a new per-conversation RoutingMode persisted in SQLite and threaded into the pipeline's RoutingRequest, preserving the privacy fail-closed guarantee. Add a clean modern dark+light theme via a design-token/CSS-variable system with system-preference default + manual toggle persisted to localStorage. Author a hand-crafted SVG logo (harbor/anchor + agent-node motif, teal/blue), wire it into the UI, place a canonical SVG icon source, and document app-icon regeneration via `cargo tauri icon` (raster regen deferred: Tauri CLI unavailable offline, placeholder rasters left in place). Reuse existing surfaces; do not regress command/event wiring; do not bump version.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null
+}
