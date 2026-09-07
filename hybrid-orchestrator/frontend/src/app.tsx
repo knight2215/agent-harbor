@@ -27,7 +27,6 @@ import logoUrl from "./assets/logo.svg";
 import { Composer } from "./features/chat/Composer";
 import { MessageList } from "./features/chat/MessageList";
 import { PermissionPrompt } from "./features/chat/PermissionPrompt";
-import { PerMessageOverrideControl } from "./features/model-selector/PerMessageOverrideControl";
 import { RoutingModeToggle } from "./features/model-selector/RoutingModeToggle";
 import { History } from "./features/history/History";
 import { Settings } from "./features/settings/Settings";
@@ -180,7 +179,6 @@ export function App() {
           <section className="app__chat" aria-label="Chat">
             <MessageList />
             <RoutingModeToggle />
-            <PerMessageOverrideControl />
             <Composer />
             <PermissionPrompt />
           </section>
