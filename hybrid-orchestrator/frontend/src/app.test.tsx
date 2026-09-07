@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { App } from "./app";
 import { useConversationsStore } from "./state/conversations";
+import { useProvidersStore } from "./state/providers";
 
 // Mock the Tauri IPC bridge so the test runs without a live backend. The shell
 // mounts every surface, so `invoke` is routed per-command and `listen` (used by
@@ -64,6 +65,10 @@ describe("<App />", () => {
       pendingOverride: null,
       pendingPermissions: [],
     });
+    // The providers store is also a module-level singleton. Tests below seed
+    // its `models` (and one swaps in a spy `load`), so reset it to the real
+    // default shape here so no partial providers state bleeds between tests.
+    useProvidersStore.setState({ models: [] });
   });
 
   it("renders the app version read at runtime via getVersion()", async () => {
