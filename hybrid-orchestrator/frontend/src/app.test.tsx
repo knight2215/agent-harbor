@@ -140,8 +140,6 @@ describe("<App />", () => {
     // picker) and PerMessageOverrideControl could each render a
     // NoModelsEmptyState. Seed that exact state, then assert only one guidance
     // block surfaces in the chat pane.
-    const { useConversationsStore } = await import("./state/conversations");
-    const { useProvidersStore } = await import("./state/providers");
     useConversationsStore.setState({
       conversations: [
         {
@@ -203,7 +201,6 @@ describe("<App />", () => {
   });
 
   it("opens a SINGLE core-event subscription that survives navigation between views", async () => {
-    const { useProvidersStore } = await import("./state/providers");
     const load = vi.fn();
     useProvidersStore.setState({ load });
 
