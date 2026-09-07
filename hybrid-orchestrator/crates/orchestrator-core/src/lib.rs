@@ -49,7 +49,7 @@ pub use session::{ConversationInit, SessionError, SessionManager};
 // orchestrator-side error handling (P3.6). Re-exports kept ALPHABETICALLY
 // ORDERED.
 pub use permission::{Decision, PermissionGate, PermissionOutcome, PermissionRegistry};
-pub use tools_bridge::{validate_arguments, ToolBridge};
+pub use tools_bridge::{effective_tool_servers, validate_arguments, ToolBridge};
 
 // Phase 4 (FEAT-002): the end-to-end message pipeline (architecture.md Section
 // 2.2, P4.6) that assembles route -> provider -> tool loop -> persist. Re-exports

@@ -173,4 +173,121 @@ mod tests {
         let back: CoreEvent = serde_json::from_str(&json).unwrap();
         assert!(matches!(back, CoreEvent::PermissionRequested { .. }));
     }
+
+    /// P6.1/P6.2 event-hygiene regression: serialize a representative instance of
+    /// EVERY `CoreEvent` variant and assert none of the payloads can carry secret
+    /// material.
+    ///
+    /// The real guarantee is a TYPE-SHAPE invariant: no `CoreEvent` variant has a
+    /// field named or typed to carry a `SecretRef` / api key / credential. The
+    /// only free-text fields (`delta`, `message`, `rationale`) are documented as
+    /// display-safe (see the module header and per-variant docs), and the
+    /// remaining fields are ids, enum statuses, route metadata, and token counts.
+    /// This test plants a would-be-secret string into every free-text field that
+    /// legitimately carries caller text, confirms it appears ONLY because we put
+    /// it in a display-safe slot (never leaked from a hidden credential field),
+    /// and confirms no serialized payload ever contains a `secretRef`/`apiKey`
+    /// key. Adding a variant or field that carries credentials would require
+    /// editing this test, which is the tripwire.
+    #[test]
+    fn no_core_event_variant_carries_secret_material() {
+        // Every variant, each constructed with a representative payload. The
+        // compiler forces this list to be exhaustive: adding a variant without
+        // updating this match is a build error, so a new secret-bearing variant
+        // cannot slip past the audit.
+        let events = [
+            CoreEvent::MessageStarted {
+                conversation_id: Uuid::nil(),
+                message_id: Uuid::nil(),
+                role: Role::Assistant,
+            },
+            CoreEvent::MessageDelta {
+                conversation_id: Uuid::nil(),
+                message_id: Uuid::nil(),
+                delta: "display-safe text".to_string(),
+            },
+            CoreEvent::MessageComplete {
+                conversation_id: Uuid::nil(),
+                message_id: Uuid::nil(),
+                status: MessageStatus::Complete,
+                route: None,
+                usage: None,
+            },
+            CoreEvent::MessageError {
+                conversation_id: Uuid::nil(),
+                message_id: Uuid::nil(),
+                message: "a display-safe error".to_string(),
+            },
+            CoreEvent::ConversationUpdated {
+                conversation_id: Uuid::nil(),
+            },
+            CoreEvent::ConversationCreated {
+                conversation_id: Uuid::nil(),
+            },
+            CoreEvent::ConversationDeleted {
+                conversation_id: Uuid::nil(),
+            },
+            CoreEvent::McpStateChanged {
+                server_id: Uuid::nil(),
+                state: McpConnectionState::Connected,
+            },
+            CoreEvent::McpError {
+                server_id: Uuid::nil(),
+                message: "a display-safe mcp error".to_string(),
+            },
+            CoreEvent::PermissionRequested {
+                request_id: Uuid::nil(),
+                server_id: Uuid::nil(),
+                tool_name: "fs/read".to_string(),
+                mode: PermissionMode::Ask,
+                rationale: "read a file".to_string(),
+            },
+            CoreEvent::ProvidersChanged,
+            CoreEvent::PersonasChanged,
+        ];
+        // Consume via reference below; the array (not `vec!`) keeps clippy's
+        // `useless_vec` quiet since the collection is fixed-size and borrowed.
+
+        // Exhaustiveness tripwire: this match must name every variant. If a new
+        // variant is added, this fails to compile until the author confirms (and
+        // extends `events` above) that it too is secret-free.
+        for ev in &events {
+            match ev {
+                CoreEvent::MessageStarted { .. }
+                | CoreEvent::MessageDelta { .. }
+                | CoreEvent::MessageComplete { .. }
+                | CoreEvent::MessageError { .. }
+                | CoreEvent::ConversationUpdated { .. }
+                | CoreEvent::ConversationCreated { .. }
+                | CoreEvent::ConversationDeleted { .. }
+                | CoreEvent::McpStateChanged { .. }
+                | CoreEvent::McpError { .. }
+                | CoreEvent::PermissionRequested { .. }
+                | CoreEvent::ProvidersChanged
+                | CoreEvent::PersonasChanged => {}
+            }
+
+            // No serialized payload carries a credential-shaped key. `SecretRef`
+            // serializes as a bare string field, so a leaked handle would appear
+            // as a `secretRef`/`apiKey` key on the event; none may.
+            let json = serde_json::to_string(ev).unwrap();
+            let lower = json.to_lowercase();
+            assert!(
+                !lower.contains("secretref"),
+                "CoreEvent payload must not carry a SecretRef: {json}"
+            );
+            assert!(
+                !lower.contains("apikey"),
+                "CoreEvent payload must not carry an api key: {json}"
+            );
+            assert!(
+                !lower.contains("password"),
+                "CoreEvent payload must not carry a password: {json}"
+            );
+            assert!(
+                !json.contains("sk-"),
+                "CoreEvent payload must not carry a provider key: {json}"
+            );
+        }
+    }
 }

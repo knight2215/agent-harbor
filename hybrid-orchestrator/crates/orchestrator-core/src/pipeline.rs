@@ -62,7 +62,7 @@ use crate::models::{
 };
 use crate::permission::PermissionGate;
 use crate::session::{SessionError, SessionManager};
-use crate::tools_bridge::ToolBridge;
+use crate::tools_bridge::{effective_tool_servers, ToolBridge};
 
 use mcp_client::McpServerHandle;
 use tokio::sync::mpsc::UnboundedSender;
@@ -299,8 +299,30 @@ async fn run_turn_inner(
         chat_request.max_tokens = params.max_tokens;
     }
 
-    let bridge = if !ctx.servers.is_empty() && capabilities.tools {
-        let bridge = ToolBridge::new(ctx.servers.clone(), ctx.gate.clone(), ctx.events.clone());
+    // Tool gating (Sections 5.6 / 9.4): expose ONLY tools from servers that pass
+    // BOTH the conversation gate and the active persona gate, as computed by
+    // `effective_tool_servers` over the connected handles. Each gate restricts
+    // only when its allow-list is non-empty; an empty gate imposes no
+    // restriction.
+    //
+    // This enforces the persona `allowed_tool_servers` restriction even when the
+    // conversation's `enabled_tool_servers` is empty (the current default, since
+    // the creation flow does not populate it): a persona that allows only server
+    // A exposes only A regardless of whether the conversation opted in. Genuine
+    // backward compatibility is preserved for the no-gate case: a conversation
+    // with an empty list and no persona restriction still exposes every
+    // connected server.
+    let connected_ids: Vec<Uuid> = ctx.servers.iter().map(|h| h.config().id).collect();
+    let allowed_servers = effective_tool_servers(&connected_ids, &conversation, persona.as_ref());
+    let gated_servers: Vec<Arc<McpServerHandle>> = ctx
+        .servers
+        .iter()
+        .filter(|h| allowed_servers.contains(&h.config().id))
+        .cloned()
+        .collect();
+
+    let bridge = if !gated_servers.is_empty() && capabilities.tools {
+        let bridge = ToolBridge::new(gated_servers, ctx.gate.clone(), ctx.events.clone());
         bridge.attach_tools(&mut chat_request).await;
         Some(bridge)
     } else {

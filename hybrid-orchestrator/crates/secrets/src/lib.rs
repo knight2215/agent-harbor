@@ -271,6 +271,42 @@ mod tests {
         );
     }
 
+    /// P6.1 keychain audit regression: [`SecretStore::resolve`] is the SINGLE
+    /// seam that returns plaintext. The other trait methods (`store`, `delete`,
+    /// `rotate`) return only a [`SecretRef`] handle or `()` - never the secret
+    /// material - so no accessor other than `resolve` can leak the key.
+    ///
+    /// This is a type-shape guard: the trait return types are what enforce the
+    /// invariant (there is no `fn peek(&self) -> String` etc.), and this test
+    /// exercises each method to assert its observable output never contains the
+    /// planted secret. A regression that added a plaintext-returning accessor or
+    /// made `store`/`rotate` echo the secret would fail here.
+    #[test]
+    fn resolve_is_the_only_plaintext_seam() {
+        let store = InMemorySecretStore::new();
+        let plaintext = "sk-ONLY-resolve-may-return-this";
+
+        // `store` returns only the opaque handle.
+        let secret_ref = store.store("provider-x", plaintext).unwrap();
+        assert_eq!(secret_ref, SecretRef::new("provider-x"));
+        assert!(!format!("{secret_ref:?}").contains(plaintext));
+        assert!(!serde_json::to_string(&secret_ref)
+            .unwrap()
+            .contains(plaintext));
+
+        // `rotate` returns only the (stable) handle, not the new material.
+        let rotated = store.rotate(&secret_ref, "sk-rotated-secret").unwrap();
+        assert_eq!(rotated, secret_ref);
+        assert!(!format!("{rotated:?}").contains("sk-rotated-secret"));
+
+        // `resolve` is the ONE method that returns the material.
+        assert_eq!(store.resolve(&secret_ref).unwrap(), "sk-rotated-secret");
+
+        // `delete` returns `Result<(), _>`, carrying nothing on success (the
+        // `()` payload type itself is the proof that no material is returned).
+        store.delete(&secret_ref).unwrap();
+    }
+
     /// Keyring-backed round-trip. IGNORED by default because headless Linux CI
     /// has no Secret Service (the call would hang or fail); run manually on a
     /// machine with a real OS keychain via `cargo test -- --ignored`.
