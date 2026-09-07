@@ -19,8 +19,10 @@ import {
   assignPersona as assignPersonaCmd,
   createConversation as createConversationCmd,
   deleteConversation as deleteConversationCmd,
+  exportConversation as exportConversationCmd,
   getMessages,
   listConversations,
+  openConversation as openConversationCmd,
   renameConversation as renameConversationCmd,
   resolvePermission as resolvePermissionCmd,
   sendMessage as sendMessageCmd,
@@ -31,6 +33,7 @@ import {
 import type {
   Conversation,
   CoreEvent,
+  ExportFormat,
   ManualRoute,
   Message,
   MessageContent,
@@ -65,6 +68,14 @@ export interface ConversationsState {
   loadConversations: () => Promise<void>;
   /** Open a conversation: set it active and load its messages. */
   openConversation: (conversationId: string) => Promise<void>;
+  /**
+   * Resume a full session (architecture.md Section 8.5): load the conversation
+   * plus its messages in one round-trip via the `open_conversation` command,
+   * set it active, and refresh the cached `Conversation` record so the restored
+   * persona, route pin (`conversationPref`), privacy tags, and enabled tool
+   * servers are reflected across the chat, model-selector, and tool surfaces.
+   */
+  resumeConversation: (conversationId: string) => Promise<Conversation>;
 
   // --- Mutations (delegate to the core, then reflect the result) -----------
   createConversation: (title?: string) => Promise<Conversation>;
@@ -73,6 +84,16 @@ export interface ConversationsState {
   deleteConversation: (conversationId: string) => Promise<void>;
   setConversationRoute: (conversationId: string, route: ManualRoute | null) => Promise<void>;
   assignPersona: (conversationId: string, personaId: string | null) => Promise<void>;
+  /**
+   * Duplicate a conversation by creating a NEW one seeded from the source's
+   * persona, route pin, and privacy tags (there is no dedicated duplicate
+   * command in Phase 5, so the seed is applied client-side over
+   * `create_conversation`). The new conversation starts with an empty message
+   * history.
+   */
+  duplicateConversation: (conversationId: string) => Promise<Conversation>;
+  /** Export a conversation to a display-safe string in the given format. */
+  exportConversation: (conversationId: string, format: ExportFormat) => Promise<string>;
 
   // --- Transient per-message override (owned here, Section 8.2) ------------
   setPendingOverride: (route: ManualRoute | null) => void;
@@ -134,6 +155,24 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
     set({ activeConversationId: conversationId, messages });
   },
 
+  resumeConversation: async (conversationId) => {
+    const opened = await openConversationCmd(conversationId);
+    const { conversation, messages } = opened;
+    set((state) => {
+      const present = state.conversations.some((c) => c.id === conversation.id);
+      return {
+        // Refresh the cached record so the restored persona / route pin /
+        // privacy tags / enabled tool servers are current for every surface.
+        conversations: present
+          ? state.conversations.map((c) => (c.id === conversation.id ? conversation : c))
+          : [...state.conversations, conversation],
+        activeConversationId: conversation.id,
+        messages,
+      };
+    });
+    return conversation;
+  },
+
   createConversation: async (title) => {
     const conversation = await createConversationCmd(title ? { title } : {});
     set((state) => ({ conversations: [...state.conversations, conversation] }));
@@ -176,6 +215,30 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
     set((state) => ({
       conversations: state.conversations.map((c) => (c.id === updated.id ? updated : c)),
     }));
+  },
+
+  duplicateConversation: async (conversationId) => {
+    const source = get().conversations.find((c) => c.id === conversationId);
+    if (source === undefined) {
+      throw new Error(`unknown conversation: ${conversationId}`);
+    }
+    // Seed the new conversation from the source's persona / tags (Section 8.5).
+    const created = await createConversationCmd({
+      title: `${source.title} (copy)`,
+      personaId: source.personaId,
+      privacyTags: source.privacyTags,
+    });
+    // Carry over the route pin, which create_conversation does not accept.
+    let seeded = created;
+    if (source.conversationPref !== null) {
+      seeded = await setConversationRouteCmd(created.id, source.conversationPref);
+    }
+    set((state) => ({ conversations: [...state.conversations, seeded] }));
+    return seeded;
+  },
+
+  exportConversation: (conversationId, format) => {
+    return exportConversationCmd(conversationId, format);
   },
 
   setPendingOverride: (route) => set({ pendingOverride: route }),

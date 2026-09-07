@@ -214,4 +214,69 @@ describe("conversations store", () => {
     await useConversationsStore.getState().stopGeneration();
     expect(invoke).toHaveBeenCalledWith("stop_generation", { conversationId: "c-1" });
   });
+
+  it("resumeConversation loads via open_conversation and restores the full record", async () => {
+    const resumed: Conversation = {
+      ...conversation("c-1"),
+      personaId: "p-1",
+      conversationPref: { providerId: "openai", model: "gpt-4o" },
+      privacyTags: ["confidential"],
+      enabledToolServers: ["srv-1"],
+    };
+    invoke.mockResolvedValue({
+      conversation: resumed,
+      messages: [streamingMessage("m-1", "c-1")],
+    });
+    useConversationsStore.setState({ conversations: [conversation("c-1")] });
+
+    const returned = await useConversationsStore.getState().resumeConversation("c-1");
+    expect(invoke).toHaveBeenCalledWith("open_conversation", { conversationId: "c-1" });
+    expect(returned.personaId).toBe("p-1");
+    const state = useConversationsStore.getState();
+    expect(state.activeConversationId).toBe("c-1");
+    expect(state.messages).toHaveLength(1);
+    const active = state.conversations.find((c) => c.id === "c-1");
+    expect(active?.conversationPref).toEqual({ providerId: "openai", model: "gpt-4o" });
+    expect(active?.privacyTags).toEqual(["confidential"]);
+    expect(active?.enabledToolServers).toEqual(["srv-1"]);
+  });
+
+  it("duplicateConversation seeds a new conversation from the source and carries the pin", async () => {
+    const source: Conversation = {
+      ...conversation("c-1", "Alpha"),
+      personaId: "p-1",
+      privacyTags: ["confidential"],
+      conversationPref: { providerId: "openai", model: "gpt-4o" },
+    };
+    const created = conversation("c-2", "Alpha (copy)");
+    useConversationsStore.setState({ conversations: [source] });
+    invoke.mockImplementation((command: string) => {
+      if (command === "create_conversation") return Promise.resolve(created);
+      if (command === "set_conversation_route") {
+        return Promise.resolve({ ...created, conversationPref: source.conversationPref });
+      }
+      return Promise.resolve(undefined);
+    });
+
+    const result = await useConversationsStore.getState().duplicateConversation("c-1");
+    expect(invoke).toHaveBeenCalledWith("create_conversation", {
+      args: { title: "Alpha (copy)", personaId: "p-1", privacyTags: ["confidential"] },
+    });
+    expect(invoke).toHaveBeenCalledWith("set_conversation_route", {
+      conversationId: "c-2",
+      route: { providerId: "openai", model: "gpt-4o" },
+    });
+    expect(result.conversationPref).toEqual({ providerId: "openai", model: "gpt-4o" });
+    expect(useConversationsStore.getState().conversations.map((c) => c.id)).toContain("c-2");
+  });
+
+  it("exportConversation delegates to the export_conversation command", async () => {
+    invoke.mockResolvedValue("# Alpha\n");
+    const out = await useConversationsStore.getState().exportConversation("c-1", "markdown");
+    expect(invoke).toHaveBeenCalledWith("export_conversation", {
+      conversationId: "c-1",
+      format: "markdown",
+    });
+    expect(out).toBe("# Alpha\n");
+  });
 });
