@@ -43,6 +43,12 @@ pub struct Conversation {
     pub persona_id: Option<Uuid>,
     /// Per-conversation model pin.
     pub conversation_pref: Option<ManualRoute>,
+    /// The per-conversation routing mode (Section 6.1). `None` (an older row
+    /// that predates the column, or an unset mode) is treated as
+    /// [`RoutingMode::Auto`]. Omitted from JSON when `None` so old configs load
+    /// and the TypeScript mirror sees an absent field rather than `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_mode: Option<RoutingMode>,
     pub privacy_tags: Vec<PrivacyTag>,
     /// Which MCP servers are active in this conversation.
     pub enabled_tool_servers: Vec<Uuid>,
@@ -210,6 +216,51 @@ pub enum RoutingHint {
     PreferSpeed,
 }
 
+/// The per-conversation routing mode the UI exposes as a segmented toggle
+/// (architecture.md Section 6.1 / 8.2): Auto, Prefer Local, Prefer Quality, or
+/// Manual. It is a THIN wrapper over the existing [`RoutingHint`] bias knob and
+/// carries no new routing mechanism of its own: [`RoutingMode::effective_hint`]
+/// maps each mode onto an optional [`RoutingHint`] that the automatic policy
+/// already understands. Serializes as `auto` / `preferLocal` / `preferQuality`
+/// / `manual` (camelCase) so the hand-mirrored TypeScript union matches.
+///
+/// Design note (no backend change required): a FUTURE continuous
+/// quality/cost slider could map its position onto the SAME [`RoutingHint`]
+/// bias (e.g. the low end onto `PreferCheap`/`PreferLocal`, the high end onto
+/// `PreferQuality`) without touching the routing engine, since the mode's only
+/// job is to select a hint. This enum is the discrete, segmented-toggle form of
+/// that same knob; a slider is deliberately NOT built here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RoutingMode {
+    /// Fully automatic routing: no conversation-level hint bias is contributed;
+    /// the persona hint (if any) still applies.
+    Auto,
+    /// Bias the automatic policy toward local models.
+    PreferLocal,
+    /// Bias the automatic policy toward higher-quality models.
+    PreferQuality,
+    /// Manual routing: the per-conversation pin / per-message override decides,
+    /// so no automatic hint bias is contributed.
+    Manual,
+}
+
+impl RoutingMode {
+    /// Map this mode onto the optional [`RoutingHint`] the automatic policy
+    /// consumes. `Auto` and `Manual` contribute NO automatic bias (they return
+    /// `None`): `Auto` defers to the persona hint, and `Manual` defers to the
+    /// per-conversation pin / per-message override, whose precedence is
+    /// unchanged. `PreferLocal` / `PreferQuality` map onto the matching existing
+    /// [`RoutingHint`].
+    pub fn effective_hint(&self) -> Option<RoutingHint> {
+        match self {
+            RoutingMode::Auto | RoutingMode::Manual => None,
+            RoutingMode::PreferLocal => Some(RoutingHint::PreferLocal),
+            RoutingMode::PreferQuality => Some(RoutingHint::PreferQuality),
+        }
+    }
+}
+
 /// A data-handling constraint tag on a conversation or message (Section 6.1 /
 /// 6.2). `LocalOnly` and `Confidential` are hard constraints that force local
 /// routing. Extensible.
@@ -333,6 +384,7 @@ mod tests {
                 provider_id: "openai".to_string(),
                 model: "gpt-4o".to_string(),
             }),
+            routing_mode: None,
             privacy_tags: vec![PrivacyTag::LocalOnly],
             enabled_tool_servers: vec![Uuid::new_v4()],
         };
@@ -341,9 +393,68 @@ mod tests {
         assert!(json.contains("\"createdAt\""));
         assert!(json.contains("\"conversationPref\""));
         assert!(json.contains("\"enabledToolServers\""));
+        // An absent routing mode is OMITTED (skip_serializing_if) so old configs
+        // that never had the field round-trip cleanly.
+        assert!(!json.contains("routingMode"));
         let back: Conversation = serde_json::from_str(&json).unwrap();
         assert_eq!(back.id, conv.id);
         assert_eq!(back.title, conv.title);
+        assert_eq!(back.routing_mode, None);
+    }
+
+    #[test]
+    fn routing_mode_serializes_camel_case() {
+        // Guards the camelCase contract the TS union relies on.
+        assert_eq!(
+            serde_json::to_string(&RoutingMode::Auto).unwrap(),
+            "\"auto\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RoutingMode::PreferLocal).unwrap(),
+            "\"preferLocal\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RoutingMode::PreferQuality).unwrap(),
+            "\"preferQuality\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RoutingMode::Manual).unwrap(),
+            "\"manual\""
+        );
+    }
+
+    #[test]
+    fn routing_mode_effective_hint_maps_to_existing_knob() {
+        assert_eq!(RoutingMode::Auto.effective_hint(), None);
+        assert_eq!(RoutingMode::Manual.effective_hint(), None);
+        assert_eq!(
+            RoutingMode::PreferLocal.effective_hint(),
+            Some(RoutingHint::PreferLocal)
+        );
+        assert_eq!(
+            RoutingMode::PreferQuality.effective_hint(),
+            Some(RoutingHint::PreferQuality)
+        );
+    }
+
+    #[test]
+    fn conversation_round_trips_with_routing_mode() {
+        let now = Utc::now();
+        let conv = Conversation {
+            id: Uuid::new_v4(),
+            title: "Test".to_string(),
+            created_at: now,
+            updated_at: now,
+            persona_id: None,
+            conversation_pref: None,
+            routing_mode: Some(RoutingMode::PreferQuality),
+            privacy_tags: vec![],
+            enabled_tool_servers: vec![],
+        };
+        let json = serde_json::to_string(&conv).unwrap();
+        assert!(json.contains("\"routingMode\":\"preferQuality\""));
+        let back: Conversation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.routing_mode, Some(RoutingMode::PreferQuality));
     }
 
     #[test]

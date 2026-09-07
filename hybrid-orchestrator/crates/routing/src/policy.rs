@@ -40,6 +40,14 @@ pub struct RoutingRequest {
     /// The active persona, if any: supplies a `routing_hint` bias and a
     /// `default_route`.
     pub persona: Option<domain::AgentPersona>,
+    /// The CONVERSATION-LEVEL effective routing bias, derived from the
+    /// per-conversation routing mode (`domain::RoutingMode::effective_hint`).
+    /// When `Some`, it takes PRECEDENCE over the persona `routing_hint`; when
+    /// `None`, routing falls back to the persona hint. It reuses the SAME
+    /// `RoutingHint` bias mechanism the persona hint already drives (it adds no
+    /// new routing knob) and never affects the privacy hard constraint, which is
+    /// enforced fail-closed before any hint applies.
+    pub routing_hint: Option<domain::RoutingHint>,
     /// Per-message manual override (Section 6.3, highest precedence).
     pub manual_override: Option<ManualRoute>,
     /// Per-conversation pin (Section 6.3, applies when no per-message override).

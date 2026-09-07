@@ -124,6 +124,7 @@ mod tests {
             messages: vec![ChatMessage::text(MessageRole::User, "hi")],
             privacy_tags: Vec::new(),
             persona: None,
+            routing_hint: None,
             manual_override: None,
             conversation_pref: None,
             available: vec![

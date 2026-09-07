@@ -354,6 +354,7 @@ async fn persona_conversation_gating_exposes_only_allowed_server_tools() {
         updated_at: now,
         persona_id: Some(persona.id),
         conversation_pref: None::<ManualRoute>,
+        routing_mode: None,
         privacy_tags: Vec::<PrivacyTag>::new(),
         enabled_tool_servers: vec![allowed_id, disabled_id],
     };
@@ -439,6 +440,7 @@ async fn empty_conversation_list_still_enforces_persona_gate() {
         updated_at: now,
         persona_id: Some(persona.id),
         conversation_pref: None::<ManualRoute>,
+        routing_mode: None,
         privacy_tags: Vec::<PrivacyTag>::new(),
         // The conversation never opted into per-conversation gating.
         enabled_tool_servers: Vec::new(),

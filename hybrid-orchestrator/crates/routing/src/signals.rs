@@ -298,6 +298,7 @@ mod tests {
             messages,
             privacy_tags: Vec::new(),
             persona: None,
+            routing_hint: None,
             manual_override: None,
             conversation_pref: None,
             available: Vec::new(),

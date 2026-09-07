@@ -389,6 +389,7 @@ mod tests {
             updated_at: now,
             persona_id,
             conversation_pref: None::<ManualRoute>,
+            routing_mode: None,
             privacy_tags: Vec::<PrivacyTag>::new(),
             enabled_tool_servers: enabled,
         }

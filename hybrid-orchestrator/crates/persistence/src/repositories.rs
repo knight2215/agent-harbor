@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use domain::{
     AgentPersona, Conversation, ManualRoute, McpServerConfig, McpTransport, Message,
     MessageContent, MessageStatus, ModelParameters, PermissionMode, PrivacyTag, ProviderConfig,
-    ProviderKind, Role, RouteMetadata, RoutingHint, SecretRef, TokenUsage,
+    ProviderKind, Role, RouteMetadata, RoutingHint, RoutingMode, SecretRef, TokenUsage,
 };
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
@@ -49,8 +49,8 @@ impl<'a> ConversationRepo<'a> {
     pub async fn insert(&self, c: &Conversation) -> Result<()> {
         sqlx::query(
             "INSERT INTO conversations (id, title, created_at, updated_at, persona_id, \
-             conversation_pref, privacy_tags, enabled_tool_servers) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             conversation_pref, routing_mode, privacy_tags, enabled_tool_servers) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(c.id.to_string())
         .bind(&c.title)
@@ -58,6 +58,7 @@ impl<'a> ConversationRepo<'a> {
         .bind(c.updated_at.to_rfc3339())
         .bind(c.persona_id.map(|id| id.to_string()))
         .bind(opt_to_json(&c.conversation_pref)?)
+        .bind(opt_to_json(&c.routing_mode)?)
         .bind(to_json(&c.privacy_tags)?)
         .bind(to_json(&c.enabled_tool_servers)?)
         .execute(self.pool)
@@ -83,12 +84,14 @@ impl<'a> ConversationRepo<'a> {
     pub async fn update(&self, c: &Conversation) -> Result<()> {
         let res = sqlx::query(
             "UPDATE conversations SET title = ?, updated_at = ?, persona_id = ?, \
-             conversation_pref = ?, privacy_tags = ?, enabled_tool_servers = ? WHERE id = ?",
+             conversation_pref = ?, routing_mode = ?, privacy_tags = ?, \
+             enabled_tool_servers = ? WHERE id = ?",
         )
         .bind(&c.title)
         .bind(c.updated_at.to_rfc3339())
         .bind(c.persona_id.map(|id| id.to_string()))
         .bind(opt_to_json(&c.conversation_pref)?)
+        .bind(opt_to_json(&c.routing_mode)?)
         .bind(to_json(&c.privacy_tags)?)
         .bind(to_json(&c.enabled_tool_servers)?)
         .bind(c.id.to_string())
@@ -112,6 +115,7 @@ impl<'a> ConversationRepo<'a> {
 fn row_to_conversation(r: &sqlx::sqlite::SqliteRow) -> Result<Conversation> {
     let persona_id: Option<String> = r.try_get("persona_id")?;
     let pref: Option<String> = r.try_get("conversation_pref")?;
+    let routing_mode: Option<String> = r.try_get("routing_mode")?;
     Ok(Conversation {
         id: parse_uuid(r.try_get::<String, _>("id")?)?,
         title: r.try_get("title")?,
@@ -119,6 +123,7 @@ fn row_to_conversation(r: &sqlx::sqlite::SqliteRow) -> Result<Conversation> {
         updated_at: parse_dt(r.try_get::<String, _>("updated_at")?)?,
         persona_id: persona_id.map(parse_uuid).transpose()?,
         conversation_pref: opt_from_json::<ManualRoute>(pref)?,
+        routing_mode: opt_from_json::<RoutingMode>(routing_mode)?,
         privacy_tags: from_json::<Vec<PrivacyTag>>(&r.try_get::<String, _>("privacy_tags")?)?,
         enabled_tool_servers: from_json::<Vec<Uuid>>(
             &r.try_get::<String, _>("enabled_tool_servers")?,
@@ -511,6 +516,7 @@ mod tests {
             updated_at: now,
             persona_id: None,
             conversation_pref: None,
+            routing_mode: None,
             privacy_tags: vec![PrivacyTag::LocalOnly],
             enabled_tool_servers: vec![],
         }
@@ -541,6 +547,34 @@ mod tests {
 
         repo.delete(conv.id).await.unwrap();
         assert!(repo.get(conv.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn conversation_routing_mode_round_trips() {
+        let db = test_db().await;
+        let repo = ConversationRepo::new(&db);
+        let mut conv = sample_conversation();
+
+        // A freshly-inserted conversation with no mode reads back as None.
+        repo.insert(&conv).await.unwrap();
+        assert_eq!(repo.get(conv.id).await.unwrap().unwrap().routing_mode, None);
+
+        // Setting a mode persists and reads back through update + get + list.
+        conv.routing_mode = Some(RoutingMode::PreferLocal);
+        repo.update(&conv).await.unwrap();
+        assert_eq!(
+            repo.get(conv.id).await.unwrap().unwrap().routing_mode,
+            Some(RoutingMode::PreferLocal)
+        );
+        assert_eq!(
+            repo.list().await.unwrap()[0].routing_mode,
+            Some(RoutingMode::PreferLocal)
+        );
+
+        // Clearing it back to None (Auto) persists.
+        conv.routing_mode = None;
+        repo.update(&conv).await.unwrap();
+        assert_eq!(repo.get(conv.id).await.unwrap().unwrap().routing_mode, None);
     }
 
     #[tokio::test]

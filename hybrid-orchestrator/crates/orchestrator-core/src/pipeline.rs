@@ -258,10 +258,18 @@ async fn run_turn_inner(
     }
 
     // 3. Build the routing request and resolve a decision.
+    //    The conversation-level effective hint comes from the per-conversation
+    //    routing mode and takes precedence over the persona hint inside the auto
+    //    policy. Manual mode (and Auto) map to `None` here, so the manual
+    //    pin/override precedence is handled exactly as before via
+    //    `conversation_pref` / `manual_override`; the mode contributes no
+    //    automatic bias in those cases.
+    let conversation_hint = conversation.routing_mode.and_then(|m| m.effective_hint());
     let request = RoutingRequest {
         messages: messages.clone(),
         privacy_tags: conversation.privacy_tags.clone(),
         persona: persona.clone(),
+        routing_hint: conversation_hint,
         manual_override,
         conversation_pref: conversation.conversation_pref.clone(),
         available: ctx.available.clone(),
