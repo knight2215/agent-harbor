@@ -8,6 +8,18 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => undefined),
 }));
+// The About / Updates section reads getVersion() on mount and calls the updater
+// plugins on interaction; mock all three so switching to that section does not
+// hang the suite on a live Tauri runtime.
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: vi.fn().mockResolvedValue("0.4.0"),
+}));
+vi.mock("@tauri-apps/plugin-updater", () => ({
+  check: vi.fn().mockResolvedValue(null),
+}));
+vi.mock("@tauri-apps/plugin-process", () => ({
+  relaunch: vi.fn().mockResolvedValue(undefined),
+}));
 
 import { Settings } from "./Settings";
 
@@ -45,6 +57,9 @@ describe("Settings", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
     expect(await screen.findByRole("region", { name: "Appearance" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "About / Updates" }));
+    expect(await screen.findByRole("region", { name: "About / Updates" })).toBeInTheDocument();
   });
 
   it("stores a provider key via set_provider_secret without retaining plaintext", async () => {

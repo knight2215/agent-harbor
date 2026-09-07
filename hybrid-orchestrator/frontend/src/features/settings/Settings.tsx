@@ -11,6 +11,7 @@
 import { useState } from "react";
 import { AgentEditor } from "../agent-editor/AgentEditor";
 import { ToolManager } from "../tool-manager/ToolManager";
+import { AboutUpdatesSection } from "./AboutUpdatesSection";
 import { AppearanceSection } from "./AppearanceSection";
 import { LocalRuntimesSection } from "./LocalRuntimesSection";
 import { ProviderKeysSection } from "./ProviderKeysSection";
@@ -18,7 +19,7 @@ import { RoutingSection } from "./RoutingSection";
 
 /** The Settings sub-sections, in display order. */
 type SettingsSection =
-  "providers" | "localRuntimes" | "tools" | "agents" | "routing" | "appearance";
+  "providers" | "localRuntimes" | "tools" | "agents" | "routing" | "appearance" | "about";
 
 const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string }> = [
   { id: "providers", label: "Providers & Keys" },
@@ -27,6 +28,7 @@ const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string }> = [
   { id: "agents", label: "Agents" },
   { id: "routing", label: "Routing" },
   { id: "appearance", label: "Appearance" },
+  { id: "about", label: "About / Updates" },
 ];
 
 export function Settings() {
@@ -54,6 +56,7 @@ export function Settings() {
       {section === "agents" && <AgentEditor />}
       {section === "routing" && <RoutingSection />}
       {section === "appearance" && <AppearanceSection />}
+      {section === "about" && <AboutUpdatesSection />}
     </div>
   );
 }

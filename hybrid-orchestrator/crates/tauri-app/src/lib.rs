@@ -35,6 +35,12 @@ pub fn run() {
             .expect("failed to initialize application state (open db / run migrations)");
 
     tauri::Builder::default()
+        // Phase 8b: enable the signed self-updater. `tauri_plugin_updater`
+        // checks the GitHub Releases `latest.json` endpoint and verifies +
+        // installs the signed update; `tauri_plugin_process` provides the
+        // relaunch the in-app flow calls after a successful install.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(app_state)
         .setup(move |app| {
             // Pump core events to the frontend over CORE_EVENT_CHANNEL. The

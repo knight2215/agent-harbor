@@ -28,6 +28,13 @@ routing = { path = "../routing" }
 persistence = { path = "../persistence" }
 secrets = { path = "../secrets" }
 tauri = "2"
+# Phase 8b (FEAT-001): the signed in-app self-updater. `tauri-plugin-updater`
+# checks GitHub Releases `latest.json` + downloads/installs the signed update;
+# `tauri-plugin-process` provides the relaunch after install. Concrete literal
+# 2.x versions (same major style as `tauri = "2"`) because this crate is under
+# `[workspace] exclude` and has no workspace root to inherit from.
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Async runtime for the DB init (block_on) and the core-event bridge channel.

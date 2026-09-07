@@ -472,7 +472,20 @@ jobs:
       # Bundles the app. This compiles tauri-app and the frontend production
       # build, catching bundling / capability / COPY-path issues that unit tests
       # miss (tasks.md P0.6).
+      #
+      # Phase 8b (signed auto-updater): the two TAURI_SIGNING_* env vars below
+      # are pre-configured repository secrets that drive the updater signing.
+      # With `plugins.updater.pubkey` set in tauri.conf.json (FEAT-001), the
+      # presence of TAURI_SIGNING_PRIVATE_KEY (+ its password) makes
+      # `cargo tauri build` emit updater artifacts alongside a minisign `.sig`
+      # signature file for each (e.g. *.AppImage.sig, *.exe.sig, *.msi.sig).
+      # The private key is NEVER stored in the repo; only these `${{ secrets.* }}`
+      # references appear here, and the matching PUBLIC key lives in
+      # tauri.conf.json for the client to verify downloaded updates against.
       - name: tauri build
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: cargo tauri build --config crates/tauri-app/tauri.conf.json
 
       # Upload the installers produced above as downloadable workflow artifacts
@@ -489,12 +502,22 @@ jobs:
           # tauri-app is a `[workspace] exclude`d crate, so `cargo tauri build`
           # writes its bundle output under the CRATE's own target dir
           # (crates/tauri-app/target/...), NOT the workspace root target/.
+          #
+          # Phase 8b: also collect the minisign `.sig` signature files that
+          # `cargo tauri build` emits for the updater bundles (AppImage on
+          # Linux, NSIS .exe / MSI on Windows). The downstream
+          # `publish-updater-manifest` job reads these `.sig` contents to
+          # compose latest.json. `if-no-files-found: warn` keeps each OS's
+          # non-matching globs from failing the step.
           path: |
             hybrid-orchestrator/crates/tauri-app/target/release/bundle/deb/*.deb
             hybrid-orchestrator/crates/tauri-app/target/release/bundle/rpm/*.rpm
             hybrid-orchestrator/crates/tauri-app/target/release/bundle/appimage/*.AppImage
+            hybrid-orchestrator/crates/tauri-app/target/release/bundle/appimage/*.AppImage.sig
             hybrid-orchestrator/crates/tauri-app/target/release/bundle/msi/*.msi
+            hybrid-orchestrator/crates/tauri-app/target/release/bundle/msi/*.msi.sig
             hybrid-orchestrator/crates/tauri-app/target/release/bundle/nsis/*.exe
+            hybrid-orchestrator/crates/tauri-app/target/release/bundle/nsis/*.exe.sig
           if-no-files-found: warn
           retention-days: 14
 
@@ -506,11 +529,139 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          # Phase 8b: publish the updater `.sig` signature files to the Release
+          # too, so the updater client can fetch and verify them. The AppImage /
+          # NSIS .exe assets referenced from latest.json are attached here; their
+          # `.sig` contents are additionally inlined into latest.json by the
+          # `publish-updater-manifest` job. `fail_on_unmatched_files: false` so
+          # an OS's non-matching globs don't fail the step.
           files: |
             hybrid-orchestrator/crates/tauri-app/target/release/bundle/deb/*.deb
             hybrid-orchestrator/crates/tauri-app/target/release/bundle/rpm/*.rpm
             hybrid-orchestrator/crates/tauri-app/target/release/bundle/appimage/*.AppImage
+            hybrid-orchestrator/crates/tauri-app/target/release/bundle/appimage/*.AppImage.sig
             hybrid-orchestrator/crates/tauri-app/target/release/bundle/msi/*.msi
+            hybrid-orchestrator/crates/tauri-app/target/release/bundle/msi/*.msi.sig
             hybrid-orchestrator/crates/tauri-app/target/release/bundle/nsis/*.exe
+            hybrid-orchestrator/crates/tauri-app/target/release/bundle/nsis/*.exe.sig
           fail_on_unmatched_files: false
           generate_release_notes: true
+
+  # --- Publish the updater manifest (latest.json) --------------------------
+  # Phase 8b (signed auto-updater aggregation): after BOTH matrix legs of
+  # `tauri-bundle` have produced their installers + `.sig` signatures, this job
+  # composes the single cross-platform `latest.json` manifest that the Tauri
+  # updater plugin polls, and uploads it as an asset on the tag's GitHub
+  # Release.
+  #
+  # RELEASE-ASSET URL NAMING ASSUMPTIONS (documented so future maintainers can
+  # reason about the update flow):
+  #   * tauri.conf.json's updater `endpoints` points at
+  #       https://github.com/knight2215/agent-harbor/releases/latest/download/latest.json
+  #     GitHub resolves `releases/latest/download/<name>` to the asset `<name>`
+  #     on the NEWEST published (non-draft, non-prerelease) release, so as long
+  #     as each `v*` tag's release carries a `latest.json`, clients always fetch
+  #     the newest one without the URL ever changing.
+  #   * The per-platform update artifacts are the AppImage (linux-x86_64) and the
+  #     NSIS .exe (windows-x86_64). Their filenames EMBED the app version (0.4.0
+  #     for this phase, e.g. `agent-harbor_0.4.0_amd64.AppImage`), so the exact
+  #     names are resolved at runtime from the downloaded artifacts via glob +
+  #     basename rather than hardcoded, and the download URLs are composed
+  #     against
+  #       https://github.com/knight2215/agent-harbor/releases/download/${GITHUB_REF_NAME}/<filename>
+  #     which is where the `Publish installers to GitHub Release` step above
+  #     attaches them for this same tag.
+  #   * Each platform's `signature` field is the VERBATIM contents of that
+  #     artifact's `.sig` file; `jq` is used to build the JSON so the signature
+  #     text is escaped correctly.
+  #
+  # Runs only on `v*` tag pushes (a release must exist to attach the asset to),
+  # needs both bundle legs, and needs `contents: write` to upload the asset.
+  publish-updater-manifest:
+    name: publish-updater-manifest
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [tauri-bundle]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      # Pull BOTH OS artifacts uploaded by the tauri-bundle matrix legs into a
+      # single working tree. Each artifact expands into its own subdirectory
+      # under `artifacts/` (download-artifact preserves the artifact name), and
+      # the bundle files retain their `hybrid-orchestrator/crates/...` path
+      # prefix from the upload globs.
+      - name: Download installer artifacts (both OSes)
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          pattern: agent-harbor-installers-*
+
+      # Compose latest.json from the downloaded per-platform bundles + `.sig`
+      # files. Uses `jq` (pre-installed on ubuntu-latest runners) so the
+      # signature contents are JSON-escaped correctly.
+      - name: Compose latest.json
+        run: |
+          set -euo pipefail
+
+          # Version is the tag without the leading `v` (e.g. v0.4.0 -> 0.4.0).
+          VERSION="${GITHUB_REF_NAME#v}"
+          PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          # Resolve the actual per-platform update-artifact + signature file
+          # paths from the downloaded artifacts. The filenames embed the version,
+          # so glob for them rather than hardcoding. `find` handles the nested
+          # per-artifact + bundle-path directory layout.
+          LINUX_APPIMAGE="$(find artifacts -type f -name '*.AppImage' | head -n1)"
+          LINUX_SIG="$(find artifacts -type f -name '*.AppImage.sig' | head -n1)"
+          # Restrict to the NSIS bundle subpath so a stray non-installer `.exe`
+          # (if any is ever bundled) can never be selected as the updater target.
+          WINDOWS_EXE="$(find artifacts -type f -path '*/nsis/*.exe' | head -n1)"
+          WINDOWS_SIG="$(find artifacts -type f -path '*/nsis/*.exe.sig' | head -n1)"
+
+          # Fail loudly if any expected update artifact / signature is missing:
+          # latest.json MUST cover both platforms for the updater to work.
+          for f in "$LINUX_APPIMAGE" "$LINUX_SIG" "$WINDOWS_EXE" "$WINDOWS_SIG"; do
+            if [ -z "$f" ] || [ ! -f "$f" ]; then
+              echo "::error::Missing an expected updater artifact or signature (linux AppImage/.sig or windows .exe/.sig)." >&2
+              echo "Resolved: LINUX_APPIMAGE='$LINUX_APPIMAGE' LINUX_SIG='$LINUX_SIG' WINDOWS_EXE='$WINDOWS_EXE' WINDOWS_SIG='$WINDOWS_SIG'" >&2
+              exit 1
+            fi
+          done
+
+          # Basenames feed the release download URLs (assets are attached to the
+          # tag's release under their bare filenames by the publish step above).
+          LINUX_FILE="$(basename "$LINUX_APPIMAGE")"
+          WINDOWS_FILE="$(basename "$WINDOWS_EXE")"
+          RELEASE_BASE="https://github.com/knight2215/agent-harbor/releases/download/${GITHUB_REF_NAME}"
+
+          # Signature contents are read verbatim and passed to jq as raw strings
+          # (`--rawfile`) so jq escapes them into valid JSON string values.
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "Automated release ${GITHUB_REF_NAME} of agent-harbor." \
+            --arg pub_date "$PUB_DATE" \
+            --rawfile linux_sig "$LINUX_SIG" \
+            --arg linux_url "${RELEASE_BASE}/${LINUX_FILE}" \
+            --rawfile windows_sig "$WINDOWS_SIG" \
+            --arg windows_url "${RELEASE_BASE}/${WINDOWS_FILE}" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "linux-x86_64": { signature: $linux_sig, url: $linux_url },
+                "windows-x86_64": { signature: $windows_sig, url: $windows_url }
+              }
+            }' > latest.json
+
+          echo "Composed latest.json:" >&2
+          cat latest.json >&2
+
+      # Attach latest.json to the tag's GitHub Release. This one MUST match, so
+      # `fail_on_unmatched_files: true` (unlike the per-OS installer globs).
+      - name: Publish latest.json to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: latest.json
+          fail_on_unmatched_files: true
