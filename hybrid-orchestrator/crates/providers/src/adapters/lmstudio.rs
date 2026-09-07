@@ -81,6 +81,30 @@ mod tests {
     use secrets::InMemorySecretStore;
     use serde_json::Value;
 
+    /// LM Studio on the default local path sends NO implicit API key: with
+    /// `api_key_ref = None`, [`build_lmstudio`] must select [`AuthStrategy::None`]
+    /// so no `Authorization` header goes on the wire (architecture.md Section
+    /// 9.3 / 4.3, the local path needs no key by default).
+    #[test]
+    fn lmstudio_sends_no_implicit_api_key_when_ref_is_none() {
+        let store = InMemorySecretStore::new();
+        let cfg = ProviderConfig {
+            id: "lmstudio-local".to_string(),
+            kind: ProviderKind::LmStudio,
+            base_url: None, // default http://localhost:1234/v1
+            api_key_ref: None,
+            extra: Value::Null,
+        };
+        let adapter = build_lmstudio(&cfg, &store).expect("build lmstudio adapter");
+        // AuthStrategy::None emits no headers; a Bearer key would add an
+        // `Authorization` header. Asserting on the produced headers proves the
+        // local path sends no implicit API key.
+        assert!(
+            adapter.auth_headers_for_test().is_empty(),
+            "LM Studio must use AuthStrategy::None (no auth header) when api_key_ref is None"
+        );
+    }
+
     /// OPTIONAL manual integration check against a REAL LM Studio server at
     /// `http://localhost:1234/v1` (default). Requires LM Studio running with a
     /// model loaded. NOT run in CI (no such server there); run by hand with:
