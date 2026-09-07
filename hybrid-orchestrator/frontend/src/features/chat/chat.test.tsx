@@ -220,8 +220,8 @@ describe("chat surface", () => {
       rationale: "read a file",
     });
     // The dialog now shows the queued request.
-    expect(screen.getByRole("dialog")).toBeInTheDocument();
-    expect(screen.getByText("read_file")).toBeInTheDocument();
+    expect(await screen.findByRole("dialog")).toBeInTheDocument();
+    expect(await screen.findByText("read_file")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Allow" }));
     // The decision is forwarded to the core, then the prompt is dequeued.
