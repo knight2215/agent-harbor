@@ -1,0 +1,406 @@
+/*
+ * App layout styling (Phase 7 UX refactor, FEAT-003).
+ *
+ * Hand-rolled CSS for the navigable shell (sidebar + destinations), the Chat
+ * surface, the Settings area, the segmented routing-mode control, and the route
+ * badge. It consumes ONLY the design tokens from tokens.css; there is NO UI
+ * component library. Covers spacing, hover/active states, focus-visible for
+ * a11y, empty states, and a responsive sidebar.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--ah-font-sans);
+  font-size: var(--ah-font-size);
+  line-height: var(--ah-line-height);
+  color: var(--ah-text);
+  background: var(--ah-bg);
+}
+
+:focus-visible {
+  outline: 2px solid var(--ah-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--ah-radius-sm);
+}
+
+/* --- Shell ---------------------------------------------------------------- */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--ah-sidebar-width) 1fr;
+  grid-template-rows: 1fr auto;
+  grid-template-areas:
+    "sidebar main"
+    "sidebar status";
+  height: 100vh;
+  transition: grid-template-columns 0.15s ease;
+}
+
+.app[data-collapsed="true"] {
+  grid-template-columns: var(--ah-sidebar-width-collapsed) 1fr;
+}
+
+/* --- Sidebar -------------------------------------------------------------- */
+
+.app__sidebar {
+  grid-area: sidebar;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-3);
+  padding: var(--ah-space-4);
+  background: var(--ah-surface);
+  border-right: 1px solid var(--ah-border);
+  overflow: hidden;
+}
+
+.app__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--ah-space-2);
+  margin: 0 0 var(--ah-space-2);
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--ah-text);
+}
+
+.app__brand-logo {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-accent-soft);
+  color: var(--ah-accent);
+  display: grid;
+  place-items: center;
+}
+
+.app[data-collapsed="true"] .app__brand-text,
+.app[data-collapsed="true"] .app__nav-label {
+  display: none;
+}
+
+.app__collapse {
+  align-self: flex-end;
+  padding: var(--ah-space-1) var(--ah-space-2);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface-2);
+  color: var(--ah-text-muted);
+  cursor: pointer;
+}
+
+.app__collapse:hover {
+  background: var(--ah-surface-hover);
+  color: var(--ah-text);
+}
+
+.app__nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+}
+
+.app__nav-item {
+  display: flex;
+  align-items: center;
+  gap: var(--ah-space-3);
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: none;
+  border-radius: var(--ah-radius-md);
+  background: transparent;
+  color: var(--ah-text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.app__nav-item:hover {
+  background: var(--ah-surface-hover);
+  color: var(--ah-text);
+}
+
+.app__nav-item[data-active="true"] {
+  background: var(--ah-accent-soft);
+  color: var(--ah-accent);
+  font-weight: 600;
+}
+
+.app__nav-icon {
+  width: 18px;
+  text-align: center;
+  flex: 0 0 auto;
+}
+
+.app__sidebar-history {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* --- Main pane ------------------------------------------------------------ */
+
+.app__main {
+  grid-area: main;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--ah-space-5);
+}
+
+.app__status {
+  grid-area: status;
+  padding: var(--ah-space-2) var(--ah-space-5);
+  border-top: 1px solid var(--ah-border);
+  background: var(--ah-surface);
+  color: var(--ah-text-faint);
+  font-size: 12px;
+}
+
+/* --- Chat surface --------------------------------------------------------- */
+
+.app__chat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-4);
+  max-width: 880px;
+  margin: 0 auto;
+}
+
+/* --- Segmented routing-mode control --------------------------------------- */
+
+.routing-mode {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--ah-space-3);
+}
+
+.routing-mode__toggle {
+  display: inline-flex;
+  padding: var(--ah-space-1);
+  gap: var(--ah-space-1);
+  background: var(--ah-surface-2);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+}
+
+.routing-mode__toggle button {
+  padding: var(--ah-space-1) var(--ah-space-3);
+  border: none;
+  border-radius: var(--ah-radius-sm);
+  background: transparent;
+  color: var(--ah-text-muted);
+  font: inherit;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.routing-mode__toggle button:hover {
+  color: var(--ah-text);
+}
+
+.routing-mode__toggle button[data-active="true"] {
+  background: var(--ah-accent);
+  color: var(--ah-accent-contrast);
+  font-weight: 600;
+}
+
+/* --- Route badge ---------------------------------------------------------- */
+
+.route-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ah-space-2);
+  padding: 2px var(--ah-space-2);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface-2);
+  border: 1px solid var(--ah-border);
+  font-size: 12px;
+}
+
+.route-badge__model {
+  font-family: var(--ah-font-mono);
+  color: var(--ah-text);
+}
+
+.route-badge__source {
+  color: var(--ah-text-faint);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* --- Settings ------------------------------------------------------------- */
+
+.settings {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: var(--ah-space-5);
+  align-items: start;
+}
+
+.settings__nav {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+  padding: var(--ah-space-2);
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+}
+
+.settings__nav button {
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: none;
+  border-radius: var(--ah-radius-sm);
+  background: transparent;
+  color: var(--ah-text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.settings__nav button:hover {
+  background: var(--ah-surface-hover);
+  color: var(--ah-text);
+}
+
+.settings__nav button[data-active="true"] {
+  background: var(--ah-accent-soft);
+  color: var(--ah-accent);
+  font-weight: 600;
+}
+
+.settings__panel {
+  min-width: 0;
+  padding: var(--ah-space-5);
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+}
+
+.settings__section-title {
+  margin: 0 0 var(--ah-space-2);
+  font-size: 18px;
+}
+
+.settings__section-desc {
+  margin: 0 0 var(--ah-space-4);
+  color: var(--ah-text-muted);
+}
+
+/* Empty-state placeholder (e.g. future Ollama / Hugging Face runtimes). */
+.settings__empty-state {
+  padding: var(--ah-space-5);
+  border: 1px dashed var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface-2);
+  color: var(--ah-text-faint);
+  text-align: center;
+}
+
+/* --- Providers & keys / local runtimes forms ------------------------------ */
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-3);
+  max-width: 480px;
+}
+
+.settings-form label {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+  color: var(--ah-text-muted);
+}
+
+.settings-form input,
+.settings-form select {
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text);
+  font: inherit;
+}
+
+.settings-form button {
+  align-self: flex-start;
+  padding: var(--ah-space-2) var(--ah-space-4);
+  border: none;
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-accent);
+  color: var(--ah-accent-contrast);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.settings-form button:hover {
+  background: var(--ah-accent-strong);
+}
+
+/* --- Appearance / theme toggle -------------------------------------------- */
+
+.theme-toggle {
+  display: inline-flex;
+  padding: var(--ah-space-1);
+  gap: var(--ah-space-1);
+  background: var(--ah-surface-2);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+}
+
+.theme-toggle button {
+  padding: var(--ah-space-1) var(--ah-space-3);
+  border: none;
+  border-radius: var(--ah-radius-sm);
+  background: transparent;
+  color: var(--ah-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.theme-toggle button:hover {
+  color: var(--ah-text);
+}
+
+.theme-toggle button[data-active="true"] {
+  background: var(--ah-accent);
+  color: var(--ah-accent-contrast);
+  font-weight: 600;
+}
+
+/* --- Responsive sidebar --------------------------------------------------- */
+
+@media (max-width: 720px) {
+  .app {
+    grid-template-columns: var(--ah-sidebar-width-collapsed) 1fr;
+  }
+
+  .app .app__brand-text,
+  .app .app__nav-label {
+    display: none;
+  }
+
+  .settings {
+    grid-template-columns: 1fr;
+  }
+}

@@ -15,6 +15,7 @@ import type {
   PrivacyTag,
   RouteExplanation,
   RoutingHint,
+  RoutingMode,
   SecretRef,
   ToolDescriptorView,
 } from "../types";
@@ -178,6 +179,20 @@ export function setConversationRoute(
   route: ManualRoute | null,
 ): Promise<Conversation> {
   return invoke<Conversation>("set_conversation_route", { conversationId, route });
+}
+
+/**
+ * Set (or clear) the per-conversation routing mode (FEAT-002). Pass
+ * `mode = null` (or `"auto"`) to return the conversation to automatic routing;
+ * `"preferLocal"` / `"preferQuality"` bias the auto policy; `"manual"` pairs
+ * with {@link setConversationRoute} to pin a specific provider/model. Backed by
+ * `set_conversation_routing_mode`, mirroring {@link setConversationRoute}.
+ */
+export function setConversationRoutingMode(
+  conversationId: string,
+  mode: RoutingMode | null,
+): Promise<Conversation> {
+  return invoke<Conversation>("set_conversation_routing_mode", { conversationId, mode });
 }
 
 /**

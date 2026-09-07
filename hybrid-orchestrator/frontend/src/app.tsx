@@ -1,27 +1,33 @@
-// Root application shell (architecture.md Section 8).
+// Root application shell (architecture.md Section 8; Phase 7 UX refactor).
 //
-// Assembles all five UI surfaces into a navigable layout and establishes the
-// SINGLE top-level core-event subscription. A left sidebar hosts the History
-// surface (Section 8.5); the main pane hosts the Chat surface (Section 8.1)
-// with the Model selector's routing controls next to the Composer (Section 8.2)
-// and switchable panels for the Tool manager (Section 8.3) and Agent editor
-// (Section 8.4). The Phase 0 `app_version` display is folded into a small
-// status/about footer.
+// A navigable shell with a collapsible left sidebar hosting the brand/logo and
+// the primary destinations Chat / History / Settings. The main pane renders the
+// active destination:
+//   - Chat (default): the chat surface (MessageList + Composer + PermissionPrompt)
+//     with the model selector's per-conversation routing-mode + model control
+//     next to the Composer (RouteBadge surfaces the chosen provider/model +
+//     rationale, Section 8.2).
+//   - History: the conversation history / session-management surface (Section 8.5).
+//   - Settings: the heavy-configuration area (providers & keys, local runtimes,
+//     MCP / tools, agents, routing, appearance) with its own sub-navigation.
 //
-// EVENT FAN-OUT (Section 7.3): rather than each surface subscribing to core
-// events independently, the shell opens ONE `onCoreEvent` subscription in a
-// `useEffect` and dispatches every CoreEvent to each store's `applyCoreEvent`.
-// The effect returns a stable cleanup that awaits and calls the `UnlistenFn`, so
-// the subscription is torn down exactly once on unmount.
+// EVENT FAN-OUT (Section 7.3): the shell opens ONE `onCoreEvent` subscription in
+// a `useEffect` at the shell ROOT and dispatches every CoreEvent to each store's
+// `applyCoreEvent`. This effect has EMPTY deps and reads each store's reducer
+// via `getState()`, so switching destinations NEVER tears it down or opens a
+// second subscription. The effect returns a stable cleanup that awaits and
+// calls the `UnlistenFn`, so the subscription is torn down exactly once on
+// unmount. The Phase 0 `app_version` display is folded into the status footer.
 
 import { useEffect, useState } from "react";
+import logoUrl from "./assets/logo.svg";
 import { Composer } from "./features/chat/Composer";
 import { MessageList } from "./features/chat/MessageList";
 import { PermissionPrompt } from "./features/chat/PermissionPrompt";
+import { PerMessageOverrideControl } from "./features/model-selector/PerMessageOverrideControl";
 import { RoutingModeToggle } from "./features/model-selector/RoutingModeToggle";
-import { AgentEditor } from "./features/agent-editor/AgentEditor";
 import { History } from "./features/history/History";
-import { ToolManager } from "./features/tool-manager/ToolManager";
+import { Settings } from "./features/settings/Settings";
 import { appVersion } from "./ipc/commands";
 import { onCoreEvent } from "./ipc/events";
 import { useConversationsStore } from "./state/conversations";
@@ -29,8 +35,26 @@ import { usePersonasStore } from "./state/personas";
 import { useProvidersStore } from "./state/providers";
 import { useToolsStore } from "./state/tools";
 
-/** The switchable panels in the main pane's secondary area. */
-type Panel = "chat" | "tools" | "agents";
+/** The primary sidebar destinations in the shell. */
+type Destination = "chat" | "history" | "settings";
+
+/** localStorage key persisting the sidebar collapse state. */
+const SIDEBAR_COLLAPSED_KEY = "ah-sidebar-collapsed";
+
+/** Read the persisted sidebar collapse state (guarded for constrained envs). */
+function readCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+const NAV_ITEMS: ReadonlyArray<{ id: Destination; label: string; icon: string }> = [
+  { id: "chat", label: "Chat", icon: "💬" },
+  { id: "history", label: "History", icon: "🕘" },
+  { id: "settings", label: "Settings", icon: "⚙" },
+];
 
 /** Fold the app version into a small status/about footer (Phase 0 wiring). */
 function StatusBar() {
@@ -58,11 +82,14 @@ function StatusBar() {
 }
 
 export function App() {
-  const [panel, setPanel] = useState<Panel>("chat");
+  const [destination, setDestination] = useState<Destination>("chat");
+  const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
 
   // Single top-level core-event subscription: fan every CoreEvent out to each
   // store's reducer so the surfaces stay in sync without subscribing
-  // independently (architecture.md Section 7.3).
+  // independently (architecture.md Section 7.3). EMPTY deps + getState() keep
+  // this stable across destination switches: it is opened once and torn down
+  // once (on unmount), never re-run when the active view changes.
   useEffect(() => {
     const applyConversations = useConversationsStore.getState().applyCoreEvent;
     const applyProviders = useProvidersStore.getState().applyCoreEvent;
@@ -81,54 +108,73 @@ export function App() {
     };
   }, []);
 
+  const toggleCollapsed = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, String(next));
+      } catch {
+        // Ignore storage write errors (private mode / constrained env).
+      }
+      return next;
+    });
+  };
+
   return (
-    <div className="app">
+    <div className="app" data-collapsed={collapsed}>
       <aside className="app__sidebar">
-        <h1 className="app__brand">Agent Harbor</h1>
-        <History />
+        <h1 className="app__brand">
+          <img className="app__brand-logo" src={logoUrl} alt="" width={28} height={28} />
+          <span className="app__brand-text">Agent Harbor</span>
+        </h1>
+
+        <button
+          type="button"
+          className="app__collapse"
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-pressed={collapsed}
+          onClick={toggleCollapsed}
+        >
+          {collapsed ? "»" : "«"}
+        </button>
+
+        <nav className="app__nav" role="navigation" aria-label="Primary">
+          {NAV_ITEMS.map(({ id, label, icon }) => (
+            <button
+              key={id}
+              type="button"
+              className="app__nav-item"
+              data-active={destination === id}
+              aria-current={destination === id ? "page" : undefined}
+              onClick={() => setDestination(id)}
+            >
+              <span className="app__nav-icon" aria-hidden="true">
+                {icon}
+              </span>
+              <span className="app__nav-label">{label}</span>
+            </button>
+          ))}
+        </nav>
+
+        {destination === "chat" && (
+          <div className="app__sidebar-history">
+            <History />
+          </div>
+        )}
       </aside>
 
       <main className="app__main">
-        <nav className="app__tabs" role="tablist" aria-label="Surfaces">
-          <button
-            type="button"
-            role="tab"
-            aria-selected={panel === "chat"}
-            data-active={panel === "chat"}
-            onClick={() => setPanel("chat")}
-          >
-            Chat
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={panel === "tools"}
-            data-active={panel === "tools"}
-            onClick={() => setPanel("tools")}
-          >
-            Tools
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={panel === "agents"}
-            data-active={panel === "agents"}
-            onClick={() => setPanel("agents")}
-          >
-            Agents
-          </button>
-        </nav>
-
-        {panel === "chat" && (
+        {destination === "chat" && (
           <section className="app__chat" aria-label="Chat">
             <MessageList />
             <RoutingModeToggle />
+            <PerMessageOverrideControl />
             <Composer />
             <PermissionPrompt />
           </section>
         )}
-        {panel === "tools" && <ToolManager />}
-        {panel === "agents" && <AgentEditor />}
+        {destination === "history" && <History />}
+        {destination === "settings" && <Settings />}
       </main>
 
       <StatusBar />
