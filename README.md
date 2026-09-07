@@ -266,6 +266,33 @@ omitted):
   run **only** on manual dispatch (`workflow_dispatch`) and on version-tag pushes
   (`v*`), so the slow bundle step does not run on every commit.
 
+## Auto-updates
+
+From **v0.4.0** onward the desktop app can update itself in place via Tauri's
+updater plugin. Updates are **cryptographically signed** (minisign) and verified
+on-device against the public key embedded in the app, so a downloaded update is
+installed only if its signature matches; unsigned or tampered payloads are
+rejected.
+
+- The updater polls the project's GitHub Releases for a `latest.json` manifest
+  (resolved from `releases/latest/download/latest.json`, which always points at
+  the newest published release) and compares its version to the running app.
+- Signing happens **in CI**: the gated `tauri-bundle` job signs each updater
+  bundle with the repository's pre-configured `TAURI_SIGNING_PRIVATE_KEY` /
+  `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` secrets, emitting a `.sig` file per
+  installer, and the `publish-updater-manifest` job composes `latest.json` (with
+  each platform's signature + release download URL) and attaches it to the
+  release. The private signing key is never stored in the repository.
+- There is an in-app **Check for updates** control in **Settings > About /
+  Updates** that shows the current version, checks for a newer release, and
+  offers **Install and restart** when one is available.
+
+> **Note - Windows SmartScreen.** This signed auto-updater is a **separate
+> concern** from Windows executable code-signing. Until the app ships with a
+> code-signing certificate (a paid task deferred to a later phase), Windows may
+> still show a SmartScreen "unknown publisher" warning on first launch of the
+> installer. The updater's minisign signing does not remove that warning.
+
 ## Extending the app
 
 The architecture is built around traits + registries so the three most common

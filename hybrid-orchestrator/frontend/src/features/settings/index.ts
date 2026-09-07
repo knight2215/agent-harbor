@@ -4,6 +4,7 @@
 // reuse the existing tool-manager and agent-editor surfaces and thin wrappers
 // over existing IPC commands (provider secret) plus the theme store.
 
+export { AboutUpdatesSection } from "./AboutUpdatesSection";
 export { AppearanceSection } from "./AppearanceSection";
 export { LocalRuntimesSection } from "./LocalRuntimesSection";
 export { ProviderKeysSection } from "./ProviderKeysSection";
