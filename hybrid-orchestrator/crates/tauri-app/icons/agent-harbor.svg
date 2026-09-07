@@ -1,0 +1,71 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="512"
+  height="512"
+  viewBox="0 0 512 512"
+  role="img"
+  aria-label="Agent Harbor"
+>
+  <title>Agent Harbor</title>
+  <!--
+    Canonical square app-icon source (Phase 7, FEAT-004).
+
+    This is the MASTER artwork for the raster app-icon set. It shares the
+    harbor-anchor + agent-node/network motif with the frontend logo
+    (../../../frontend/src/assets/logo.svg) but is centered and padded on a
+    solid rounded field so it reduces cleanly to 32x32. Everything is baked in
+    and self-contained (no external references) so a high-resolution PNG export
+    of this file can be fed to `cargo tauri icon` to regenerate the rasters.
+  -->
+  <defs>
+    <linearGradient id="ahFieldGrad" x1="72" y1="72" x2="440" y2="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f8e9e" />
+      <stop offset="1" stop-color="#0a636f" />
+    </linearGradient>
+    <linearGradient id="ahMarkGrad" x1="176" y1="96" x2="336" y2="416" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#eafbfd" />
+      <stop offset="1" stop-color="#9fe8f1" />
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded field: gives the icon a stable silhouette at small sizes. -->
+  <rect x="48" y="48" width="416" height="416" rx="104" fill="url(#ahFieldGrad)" />
+  <rect
+    x="48"
+    y="48"
+    width="416"
+    height="416"
+    rx="104"
+    fill="none"
+    stroke="#2bbccf"
+    stroke-width="6"
+    opacity="0.5"
+  />
+
+  <!-- Anchor + network mark, centered on the field. -->
+  <g
+    fill="none"
+    stroke="url(#ahMarkGrad)"
+    stroke-width="26"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <!-- Shank / graph spine. -->
+    <line x1="256" y1="168" x2="256" y2="368" />
+    <!-- Stock crossbar. -->
+    <line x1="168" y1="208" x2="344" y2="208" />
+    <!-- Crown + flukes sweeping to the outer nodes. -->
+    <path d="M136 300c0 63 54 104 120 104s120-41 120-104" />
+    <path d="M136 300l-36 18M136 300l30 30" />
+    <path d="M376 300l36 18M376 300l-30 30" />
+  </g>
+
+  <!-- Network nodes: ring hub plus stock and fluke endpoints. -->
+  <g fill="#eafbfd">
+    <circle cx="256" cy="136" r="40" fill="none" stroke="#eafbfd" stroke-width="26" />
+    <circle cx="168" cy="208" r="24" />
+    <circle cx="344" cy="208" r="24" />
+    <circle cx="100" cy="318" r="22" fill="#9fe8f1" />
+    <circle cx="412" cy="318" r="22" fill="#9fe8f1" />
+  </g>
+</svg>

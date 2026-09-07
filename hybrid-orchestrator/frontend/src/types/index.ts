@@ -38,6 +38,13 @@ export type RouteSource = "manual" | "conversationPin" | "automatic";
 /** Coarse routing preference expressed by a persona. Mirrors Rust `RoutingHint`. */
 export type RoutingHint = "preferLocal" | "preferQuality" | "preferCheap" | "preferSpeed";
 
+/**
+ * Per-conversation routing mode selected in the model selector. Mirrors Rust
+ * `RoutingMode` (crates/domain/src/models.rs, FEAT-002). serde uses
+ * `#[serde(rename_all = "camelCase")]`, so the JSON literals are exactly these.
+ */
+export type RoutingMode = "auto" | "preferLocal" | "preferQuality" | "manual";
+
 /** The supported provider families. Mirrors Rust `ProviderKind`. */
 export type ProviderKind =
   "openAI" | "anthropic" | "bedrock" | "gemini" | "azure" | "lmStudio" | "genericOpenAI";
@@ -133,6 +140,11 @@ export interface Conversation {
   updatedAt: string;
   personaId: string | null;
   conversationPref: ManualRoute | null;
+  /**
+   * The per-conversation routing mode (FEAT-002). serde omits it when `None`,
+   * so it may be ABSENT from the JSON: treat a missing/`null` value as Auto.
+   */
+  routingMode: RoutingMode | null;
   privacyTags: PrivacyTag[];
   enabledToolServers: string[];
 }

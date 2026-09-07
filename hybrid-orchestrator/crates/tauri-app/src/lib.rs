@@ -60,6 +60,7 @@ pub fn run() {
             commands::resolve_permission,
             commands::get_messages,
             commands::set_conversation_route,
+            commands::set_conversation_routing_mode,
             commands::assign_persona,
             commands::get_route_explanation,
             commands::list_mcp_servers,

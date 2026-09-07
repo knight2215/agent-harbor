@@ -39,6 +39,7 @@ function conversation(id: string): Conversation {
     updatedAt: "2024-01-01T00:00:00Z",
     personaId: null,
     conversationPref: null,
+    routingMode: null,
     privacyTags: [],
     enabledToolServers: [],
   };
@@ -83,7 +84,20 @@ describe("model selector", () => {
     expect(onChange).toHaveBeenCalledWith({ providerId: "openai", model: "gpt-4o" });
   });
 
-  it("RoutingModeToggle: Auto clears the pin via set_conversation_route null", async () => {
+  it("RoutingModeToggle: renders four segmented positions", () => {
+    useConversationsStore.setState({
+      conversations: [conversation("c-1")],
+      activeConversationId: "c-1",
+    });
+
+    render(<RoutingModeToggle />);
+    expect(screen.getByRole("radio", { name: "Auto" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Prefer Local" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Prefer Quality" })).toBeInTheDocument();
+    expect(screen.getByRole("radio", { name: "Manual" })).toBeInTheDocument();
+  });
+
+  it("RoutingModeToggle: Auto sets mode auto and clears the pin when leaving Manual", async () => {
     invoke.mockResolvedValue(conversation("c-1"));
     useConversationsStore.setState({
       conversations: [
@@ -99,14 +113,50 @@ describe("model selector", () => {
 
     fireEvent.click(screen.getByRole("radio", { name: "Auto" }));
     await waitFor(() => {
-      expect(invoke).toHaveBeenCalledWith("set_conversation_route", {
+      expect(invoke).toHaveBeenCalledWith("set_conversation_routing_mode", {
         conversationId: "c-1",
-        route: null,
+        mode: "auto",
       });
+    });
+    // Leaving Manual clears the pin.
+    expect(invoke).toHaveBeenCalledWith("set_conversation_route", {
+      conversationId: "c-1",
+      route: null,
     });
   });
 
-  it("RoutingModeToggle: Manual reveals the picker and pins the chosen model", async () => {
+  it("RoutingModeToggle: Prefer Local / Prefer Quality set the matching mode", async () => {
+    invoke.mockResolvedValue(conversation("c-1"));
+    useConversationsStore.setState({
+      conversations: [conversation("c-1")],
+      activeConversationId: "c-1",
+    });
+
+    render(<RoutingModeToggle />);
+
+    fireEvent.click(screen.getByRole("radio", { name: "Prefer Local" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_conversation_routing_mode", {
+        conversationId: "c-1",
+        mode: "preferLocal",
+      });
+    });
+
+    fireEvent.click(screen.getByRole("radio", { name: "Prefer Quality" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_conversation_routing_mode", {
+        conversationId: "c-1",
+        mode: "preferQuality",
+      });
+    });
+    // No pin existed, so no clearing call is issued.
+    expect(invoke).not.toHaveBeenCalledWith("set_conversation_route", {
+      conversationId: "c-1",
+      route: null,
+    });
+  });
+
+  it("RoutingModeToggle: Manual sets mode manual, reveals the picker, and pins", async () => {
     invoke.mockResolvedValue(conversation("c-1"));
     useConversationsStore.setState({
       conversations: [conversation("c-1")],
@@ -118,6 +168,13 @@ describe("model selector", () => {
     expect(screen.getByRole("radio", { name: "Auto" })).toBeChecked();
 
     fireEvent.click(screen.getByRole("radio", { name: "Manual" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_conversation_routing_mode", {
+        conversationId: "c-1",
+        mode: "manual",
+      });
+    });
+
     fireEvent.click(screen.getByRole("button", { name: /openai \/ gpt-4o/ }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("set_conversation_route", {

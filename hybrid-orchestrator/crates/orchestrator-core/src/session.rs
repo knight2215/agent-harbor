@@ -39,7 +39,7 @@ use persistence::{ConversationRepo, Db, MessageRepo, PersistenceError, PersonaRe
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
-use crate::models::{Conversation, ManualRoute, Message, PrivacyTag};
+use crate::models::{Conversation, ManualRoute, Message, PrivacyTag, RoutingMode};
 
 /// Errors from session operations.
 #[derive(Debug, thiserror::Error)]
@@ -112,6 +112,7 @@ impl SessionManager {
             updated_at: now,
             persona_id: init.persona_id,
             conversation_pref: None,
+            routing_mode: None,
             privacy_tags: init.privacy_tags,
             enabled_tool_servers: Vec::new(),
         };
@@ -165,6 +166,20 @@ impl SessionManager {
     ) -> Result<Conversation, SessionError> {
         self.mutate_conversation(id, |c| {
             c.conversation_pref = route;
+        })
+        .await
+    }
+
+    /// Set (or clear) a conversation's routing mode (Section 6.1). Passing
+    /// `mode = None` returns the conversation to the default Auto behavior (no
+    /// conversation-level hint bias). Mirrors [`Self::set_conversation_route`].
+    pub async fn set_conversation_routing_mode(
+        &self,
+        id: Uuid,
+        mode: Option<RoutingMode>,
+    ) -> Result<Conversation, SessionError> {
+        self.mutate_conversation(id, |c| {
+            c.routing_mode = mode;
         })
         .await
     }
@@ -336,6 +351,41 @@ mod tests {
         // Delete.
         mgr.delete_conversation(conv.id).await.unwrap();
         assert!(mgr.get_conversation(conv.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn set_conversation_routing_mode_persists_and_clears() {
+        use crate::models::RoutingMode;
+        let mgr = manager().await;
+        let conv = mgr
+            .create_conversation(ConversationInit::default())
+            .await
+            .unwrap();
+
+        // A brand-new conversation has no mode (== Auto).
+        assert_eq!(conv.routing_mode, None);
+
+        // Set a mode; it persists.
+        let updated = mgr
+            .set_conversation_routing_mode(conv.id, Some(RoutingMode::PreferLocal))
+            .await
+            .unwrap();
+        assert_eq!(updated.routing_mode, Some(RoutingMode::PreferLocal));
+        assert_eq!(
+            mgr.get_conversation(conv.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .routing_mode,
+            Some(RoutingMode::PreferLocal)
+        );
+
+        // Clear it back to None (Auto).
+        let cleared = mgr
+            .set_conversation_routing_mode(conv.id, None)
+            .await
+            .unwrap();
+        assert_eq!(cleared.routing_mode, None);
     }
 
     #[tokio::test]

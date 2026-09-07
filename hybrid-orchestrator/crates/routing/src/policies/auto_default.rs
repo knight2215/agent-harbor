@@ -199,8 +199,16 @@ impl RoutingPolicy for AutoDefaultPolicy {
             }
         }
 
-        // Persona hint biases the quality/cost blend (Section 6.2 / 7.1).
-        let hint = req.persona.as_ref().and_then(|p| p.routing_hint);
+        // The effective hint biases the quality/cost blend (Section 6.2 / 7.1).
+        // A conversation-level hint (from the per-conversation routing mode)
+        // takes PRECEDENCE over the persona hint; when absent, the persona hint
+        // applies. This reuses the SAME bias mechanism below (quality/cost
+        // weights + the PreferLocal nudge) and runs AFTER the privacy
+        // fail-closed filter, so it can never relax a LocalOnly/Confidential
+        // constraint.
+        let hint = req
+            .routing_hint
+            .or_else(|| req.persona.as_ref().and_then(|p| p.routing_hint));
 
         // Phase 2: rank survivors by a weighted quality-for-complexity + cost
         // blend. Higher complexity weights quality more; hints/budget bias the
@@ -398,6 +406,7 @@ mod tests {
             messages,
             privacy_tags: Vec::new(),
             persona: None,
+            routing_hint: None,
             manual_override: None,
             conversation_pref: None,
             available,
@@ -655,6 +664,77 @@ mod tests {
         });
         let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
         assert_eq!(decision.provider_id, "lmstudio");
+    }
+
+    #[tokio::test]
+    async fn conversation_hint_takes_precedence_over_persona_hint() {
+        use domain::{AgentPersona, ModelParameters};
+        // Two adequate cloud models at low complexity. The persona hint asks to
+        // prefer quality (which would lean toward the pricey model), but the
+        // conversation-level hint asks to prefer cheap, and it must WIN: the
+        // cheaper model is chosen.
+        let cheap = model(
+            "cheap",
+            "mini",
+            TokenPrice::new(0.5, 1.5),
+            caps(true, true, Some(128_000)),
+        );
+        let pricey = model(
+            "pricey",
+            "max",
+            TokenPrice::new(5.0, 20.0),
+            caps(true, true, Some(128_000)),
+        );
+        let mut req = request(
+            vec![ChatMessage::text(MessageRole::User, "hi")],
+            vec![cheap, pricey],
+        );
+        req.persona = Some(AgentPersona {
+            id: Default::default(),
+            name: "p".to_string(),
+            system_prompt: String::new(),
+            default_route: None,
+            routing_hint: Some(RoutingHint::PreferQuality),
+            allowed_tool_servers: Vec::new(),
+            parameters: ModelParameters::default(),
+        });
+        req.routing_hint = Some(RoutingHint::PreferCheap);
+        let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
+        assert_eq!(decision.provider_id, "cheap");
+    }
+
+    #[tokio::test]
+    async fn prefer_quality_conversation_hint_cannot_override_local_only() {
+        // A LocalOnly tag applies AND the conversation-level hint asks to prefer
+        // quality (which would otherwise lean toward the cloud model). The
+        // privacy hard constraint runs BEFORE any hint bias and must stay
+        // fail-closed: only the provably-local model can be chosen.
+        let mut req = request(
+            vec![ChatMessage::text(MessageRole::User, "secret data")],
+            vec![cloud(), local()],
+        );
+        req.privacy_tags = vec![PrivacyTag::LocalOnly];
+        req.routing_hint = Some(RoutingHint::PreferQuality);
+        let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
+        assert_eq!(decision.provider_id, "lmstudio");
+    }
+
+    #[tokio::test]
+    async fn prefer_quality_conversation_hint_fails_closed_when_no_local() {
+        // The same precedence guarantee under Confidential with NO provably-local
+        // candidate: the policy fails closed rather than leaking to the cloud
+        // model the quality hint would otherwise favor.
+        let mut req = request(
+            vec![ChatMessage::text(MessageRole::User, "secret")],
+            vec![cloud()],
+        );
+        req.privacy_tags = vec![PrivacyTag::Confidential];
+        req.routing_hint = Some(RoutingHint::PreferQuality);
+        let err = AutoDefaultPolicy::new().decide(&req).await.unwrap_err();
+        assert!(matches!(
+            err,
+            RoutingError::PrivacyConstraintUnsatisfiable(_)
+        ));
     }
 
     #[tokio::test]

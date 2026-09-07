@@ -18,7 +18,7 @@ use mcp_client::McpServerHandle;
 use orchestrator_core::{
     run_turn, AgentPersona, Conversation, ConversationInit, Decision, ManualRoute, McpServerConfig,
     McpTransport, Message, ModelParameters, PermissionGate, PermissionMode, PrivacyTag,
-    ProviderConfig, ProviderKind, RouteSource, RoutingHint, SecretRef, TurnContext,
+    ProviderConfig, ProviderKind, RouteSource, RoutingHint, RoutingMode, SecretRef, TurnContext,
 };
 use persistence::config::{AppConfig, PricingConfig};
 use persistence::{McpServerRepo, ProviderRepo};
@@ -843,6 +843,40 @@ pub async fn set_conversation_route(
     state
         .session_manager
         .set_conversation_route(id, route)
+        .await
+        .map_err(CommandError::from)
+}
+
+/// Set (or clear) a conversation's routing mode (architecture.md Section 6.1 /
+/// 8.2). The segmented UI toggle maps Auto / Prefer Local / Prefer Quality /
+/// Manual onto a `domain::RoutingMode`, which the pipeline turns into the
+/// existing `RoutingHint` bias via `RoutingMode::effective_hint`. Passing
+/// `mode = None` returns the conversation to the default Auto behavior (no
+/// conversation-level hint bias). The mode never relaxes the privacy hard
+/// constraint, which stays fail-closed in the routing policy.
+#[tauri::command]
+pub async fn set_conversation_routing_mode(
+    state: tauri::State<'_, AppState>,
+    conversation_id: String,
+    mode: Option<RoutingMode>,
+) -> Result<Conversation, CommandError> {
+    set_conversation_routing_mode_inner(&state, &conversation_id, mode).await
+}
+
+/// The full validate-then-delegate body of [`set_conversation_routing_mode`],
+/// factored out so it can be driven directly in tests without a live Tauri
+/// `State` (the established `_inner` testability pattern). The `mode` is already
+/// validated by enum membership through serde deserialization; this parses the
+/// id and delegates to [`SessionManager::set_conversation_routing_mode`].
+async fn set_conversation_routing_mode_inner(
+    state: &AppState,
+    conversation_id: &str,
+    mode: Option<RoutingMode>,
+) -> Result<Conversation, CommandError> {
+    let id = parse_uuid("conversationId", conversation_id)?;
+    state
+        .session_manager
+        .set_conversation_routing_mode(id, mode)
         .await
         .map_err(CommandError::from)
 }
@@ -1967,6 +2001,106 @@ mod tests {
             model: "m".to_string(),
         };
         assert!(validate_manual_route(&bad).is_err());
+    }
+
+    /// `set_conversation_routing_mode` persists a mode (PreferLocal) and clears
+    /// it back to Auto/None through the extracted handler body; an invalid id is
+    /// rejected before touching the core.
+    #[tokio::test]
+    async fn set_conversation_routing_mode_persists_and_clears() {
+        let state = test_state().await;
+        let id = seed_conversation(&state).await;
+
+        // Set PreferLocal.
+        let updated = set_conversation_routing_mode_inner(
+            &state,
+            &id.to_string(),
+            Some(RoutingMode::PreferLocal),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.routing_mode, Some(RoutingMode::PreferLocal));
+
+        // Clear back to Auto/None.
+        let cleared = set_conversation_routing_mode_inner(&state, &id.to_string(), None)
+            .await
+            .unwrap();
+        assert!(cleared.routing_mode.is_none());
+
+        // A malformed conversation id is rejected before touching the core.
+        let err =
+            set_conversation_routing_mode_inner(&state, "nope", Some(RoutingMode::PreferQuality))
+                .await
+                .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+    }
+
+    /// Policy-level guarantee surfaced through the routing crate: with a
+    /// LocalOnly privacy tag, a PreferQuality conversation-level hint (what
+    /// `RoutingMode::PreferQuality` maps to) can NEVER select a non-local model,
+    /// and a Manual pin to a cloud model is still rejected by the hard-constraint
+    /// gate. This mirrors the auto_default privacy test structure at the command
+    /// crate boundary so a regression in the mode plumbing is caught here too.
+    #[tokio::test]
+    async fn routing_mode_and_manual_pin_cannot_override_local_only() {
+        use providers::{AvailableModel, Capabilities, ChatMessage, MessageRole, TokenPrice};
+        use routing::{
+            AutoDefaultPolicy, ManualOverrideResolver, ManualRoute as RoutingManualRoute,
+            RoutingError, RoutingPolicy, RoutingRequest,
+        };
+
+        fn caps() -> Capabilities {
+            Capabilities {
+                streaming: true,
+                tools: true,
+                vision: false,
+                json_mode: true,
+                max_context: Some(8_000),
+            }
+        }
+        let cloud = AvailableModel {
+            provider_id: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            capabilities: caps(),
+            price: TokenPrice::new(2.5, 10.0),
+        };
+        let local = AvailableModel {
+            provider_id: "lmstudio".to_string(),
+            model: "llama".to_string(),
+            capabilities: caps(),
+            price: TokenPrice::ZERO,
+        };
+
+        // Base request: LocalOnly tag, only the lmstudio row is provably local,
+        // and a PreferQuality conversation-level hint (RoutingMode::PreferQuality
+        // maps to this) is applied.
+        let base = RoutingRequest {
+            messages: vec![ChatMessage::text(MessageRole::User, "secret data")],
+            privacy_tags: vec![PrivacyTag::LocalOnly],
+            persona: None,
+            routing_hint: Some(RoutingHint::PreferQuality),
+            manual_override: None,
+            conversation_pref: None,
+            available: vec![cloud, local],
+            local_provider_ids: ["lmstudio".to_string()].into_iter().collect(),
+            budget: None,
+        };
+
+        // Automatic policy with the PreferQuality hint still fails closed to
+        // local: it never selects the cloud model.
+        let auto = AutoDefaultPolicy::new().decide(&base).await.unwrap();
+        assert_eq!(auto.provider_id, "lmstudio");
+
+        // A Manual pin to the cloud model under the same LocalOnly tag is
+        // rejected by the hard-constraint gate rather than honored.
+        let resolver = ManualOverrideResolver::new(Arc::new(AutoDefaultPolicy::new()));
+        let mut pinned = base;
+        pinned.conversation_pref = Some(RoutingManualRoute {
+            provider_id: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+        });
+        let err = resolver.decide(&pinned).await.unwrap_err();
+        assert!(matches!(err, RoutingError::ManualRouteRejected(_)));
     }
 
     /// `get_route_explanation` previews a pin as `ConversationPin`, and reports

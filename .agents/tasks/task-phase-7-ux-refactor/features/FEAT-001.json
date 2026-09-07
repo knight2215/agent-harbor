@@ -1,0 +1,26 @@
+{
+  "id": "FEAT-001",
+  "type": "chore",
+  "description": "Establish the Phase 7 working branch and confirm the baseline is green with the offline-runnable checks. This is the environment-setup feature: because the sandbox is INTEGRATIONS_ONLY (no crates.io/npm, no node_modules install, no Tauri CLI, no Docker), the only baseline verification runnable locally is `cargo fmt --check` per crate and global `npx prettier --check`. This feature records that baseline so later features can prove they did not introduce formatting regressions. Independent of other features (must run first).",
+  "status": "completed",
+  "steps": [
+    "From /projects/agent-harbor, create and check out a new branch off the current origin/main tip: `git fetch origin && git checkout -b phase-7-ux-refactor origin/main` (do NOT push).",
+    "Confirm repo layout: hybrid-orchestrator/ holds the Cargo workspace (crates/) and frontend/. Confirm crates present: domain, secrets, persistence, providers, mcp-client, routing, orchestrator-core, tauri-app.",
+    "Run the offline baseline formatting checks and record their output as the baseline: for each crate run `cargo fmt --manifest-path crates/<crate>/Cargo.toml --check` from hybrid-orchestrator (expect all clean on a fresh checkout).",
+    "From hybrid-orchestrator/frontend run `NODE_OPTIONS= npx prettier --check .` and record it as the baseline (expect clean). If npx cannot fetch prettier because node_modules is absent and the registry is blocked, note that prettier is expected to be globally available; if it truly cannot run, record that constraint in findings so later features rely on CI's format:check instead.",
+    "Do NOT attempt `npm install`, `cargo build`, `cargo test`, `cargo clippy`, vitest, eslint, tsc, or `cargo tauri icon` (all blocked offline); note in findings that these are CI-only."
+  ],
+  "acceptance_criteria": [
+    "Branch phase-7-ux-refactor exists locally, based on origin/main tip, and is checked out.",
+    "`cargo fmt --manifest-path crates/<crate>/Cargo.toml --check` reports clean for every workspace crate on the fresh checkout.",
+    "`NODE_OPTIONS= npx prettier --check .` from hybrid-orchestrator/frontend reports clean (or the offline limitation is documented in findings).",
+    "findings records exactly which checks are runnable offline and which defer to CI."
+  ],
+  "verification": [
+    "git rev-parse --abbrev-ref HEAD prints phase-7-ux-refactor",
+    "cargo fmt --manifest-path crates/domain/Cargo.toml --check (and each other crate) exits 0",
+    "NODE_OPTIONS= npx prettier --check . exits 0 from hybrid-orchestrator/frontend, or the limitation is documented"
+  ],
+  "blocked_reason": null,
+  "findings": "Branch phase-7-ux-refactor created off origin/main tip (ab517c6) and checked out; git rev-parse --abbrev-ref HEAD prints phase-7-ux-refactor. No source files modified in this feature. Repo layout confirmed: hybrid-orchestrator/ holds the Cargo workspace under crates/ and the frontend under frontend/. All 8 crates present and accounted for: domain, secrets, persistence, providers, mcp-client, routing, orchestrator-core, tauri-app.\n\nBASELINE CHECKS RUNNABLE OFFLINE (all green on fresh checkout):\n- `cargo fmt --manifest-path crates/<crate>/Cargo.toml --check` for each of the 8 crates -> all exit 0 (clean). rustfmt.toml at hybrid-orchestrator root: edition 2021, max_width 100.\n- `NODE_OPTIONS= npx prettier --check .` from hybrid-orchestrator/frontend -> exit 0, 'All matched files use Prettier code style!'. Global prettier IS available offline via npx (no registry fetch or node_modules install needed), so prettier format checks are runnable locally in later features; no need to fall back to CI-only for formatting.\n\nCHECKS THAT ARE CI-ONLY (blocked offline under INTEGRATIONS_ONLY; NOT attempted, per steps): `npm install`, `npm run build`, `npm run test` (vitest), eslint, tsc, `cargo build`, `cargo test`, `cargo clippy`, and `cargo tauri icon` (Tauri CLI absent). These defer to the authoritative CI 'build' workflow on ubuntu-latest + windows-latest which runs per-crate cargo fmt/build/clippy/test plus frontend npm install/lint/format:check/vitest. Do NOT un-gate the tauri-bundle workflow.\n\nGUIDANCE FOR LATER FEATURES: after any Rust edit, run `cargo fmt --manifest-path crates/<crate>/Cargo.toml --check` on each touched crate; after any frontend edit, run `NODE_OPTIONS= npx prettier --check .` from frontend/. Self-audit clippy -D warnings, eslint, tsc, and vitest by code inspection since they cannot run offline. Keep serde IPC types in exact sync with frontend/src/types/index.ts (camelCase, skip_serializing_if). sqlx migrations are additive."
+}

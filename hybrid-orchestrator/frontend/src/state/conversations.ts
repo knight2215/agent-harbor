@@ -27,6 +27,7 @@ import {
   resolvePermission as resolvePermissionCmd,
   sendMessage as sendMessageCmd,
   setConversationRoute as setConversationRouteCmd,
+  setConversationRoutingMode as setConversationRoutingModeCmd,
   setConversationTags as setConversationTagsCmd,
   stopGeneration as stopGenerationCmd,
 } from "../ipc/commands";
@@ -41,6 +42,7 @@ import type {
   PermissionMode,
   PrivacyTag,
   Role,
+  RoutingMode,
 } from "../types";
 
 /** A pending Ask-mode tool-permission request awaiting the user's decision. */
@@ -84,6 +86,13 @@ export interface ConversationsState {
   setConversationTags: (conversationId: string, tags: PrivacyTag[]) => Promise<void>;
   deleteConversation: (conversationId: string) => Promise<void>;
   setConversationRoute: (conversationId: string, route: ManualRoute | null) => Promise<void>;
+  /**
+   * Set (or clear) the per-conversation routing mode (FEAT-002). Delegates to
+   * the `set_conversation_routing_mode` command and reflects the returned
+   * record into the cache, mirroring {@link setConversationRoute}. The manual
+   * pin (`conversationPref`) is managed separately via `setConversationRoute`.
+   */
+  setConversationRoutingMode: (conversationId: string, mode: RoutingMode | null) => Promise<void>;
   assignPersona: (conversationId: string, personaId: string | null) => Promise<void>;
   /**
    * Duplicate a conversation by creating a NEW one seeded from the source's
@@ -225,6 +234,13 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
 
   setConversationRoute: async (conversationId, route) => {
     const updated = await setConversationRouteCmd(conversationId, route);
+    set((state) => ({
+      conversations: state.conversations.map((c) => (c.id === updated.id ? updated : c)),
+    }));
+  },
+
+  setConversationRoutingMode: async (conversationId, mode) => {
+    const updated = await setConversationRoutingModeCmd(conversationId, mode);
     set((state) => ({
       conversations: state.conversations.map((c) => (c.id === updated.id ? updated : c)),
     }));

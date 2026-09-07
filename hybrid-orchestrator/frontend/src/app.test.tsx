@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import { App } from "./app";
 
 // Mock the Tauri IPC bridge so the test runs without a live backend. The shell
@@ -50,19 +50,34 @@ describe("<App />", () => {
     expect(invoke).toHaveBeenCalledWith("app_version");
   });
 
-  it("assembles the five surfaces into a navigable layout", () => {
+  it("renders the sidebar with Chat / History / Settings destinations", () => {
     render(<App />);
 
-    // Sidebar hosts History; the main pane's tabs switch the secondary panels.
-    expect(screen.getByRole("region", { name: "Conversation history" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Chat" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Tools" })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: "Agents" })).toBeInTheDocument();
-    // Chat is the default panel.
+    const nav = screen.getByRole("navigation", { name: "Primary" });
+    expect(nav).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Chat/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /History/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Settings/ })).toBeInTheDocument();
+
+    // Chat is the default destination.
     expect(screen.getByRole("region", { name: "Chat" })).toBeInTheDocument();
   });
 
-  it("opens a SINGLE core-event subscription and dispatches events into the stores", async () => {
+  it("switches to the History and Settings destinations", async () => {
+    render(<App />);
+
+    fireEvent.click(screen.getByRole("button", { name: /History/ }));
+    // The History surface region appears in the main pane.
+    expect(await screen.findByRole("region", { name: "Conversation history" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
+    // The Settings area exposes its sub-navigation.
+    expect(
+      await screen.findByRole("navigation", { name: "Settings sections" }),
+    ).toBeInTheDocument();
+  });
+
+  it("opens a SINGLE core-event subscription that survives navigation between views", async () => {
     const { useProvidersStore } = await import("./state/providers");
     const load = vi.fn();
     useProvidersStore.setState({ load });
@@ -71,6 +86,14 @@ describe("<App />", () => {
 
     // Exactly one subscription is opened for the whole shell (the fan-out).
     expect(listen).toHaveBeenCalledTimes(1);
+
+    // Switching between destinations must NOT open a second subscription or
+    // tear down the existing one.
+    fireEvent.click(screen.getByRole("button", { name: /History/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Settings/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Chat/ }));
+    expect(listen).toHaveBeenCalledTimes(1);
+    expect(unlisten).not.toHaveBeenCalled();
 
     // The registered handler dispatches to every store; a providersChanged
     // event drives the providers store to refetch its models.

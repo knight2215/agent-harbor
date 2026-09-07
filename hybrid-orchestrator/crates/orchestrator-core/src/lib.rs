@@ -36,8 +36,8 @@ pub use domain::models;
 pub use domain::{
     AgentPersona, Attachment, Conversation, ManualRoute, McpServerConfig, McpTransport, Message,
     MessageContent, MessageStatus, ModelParameters, PermissionMode, PrivacyTag, ProviderConfig,
-    ProviderKind, Role, RouteMetadata, RouteSource, RoutingHint, SecretRef, TokenUsage, ToolCall,
-    ToolResult,
+    ProviderKind, Role, RouteMetadata, RouteSource, RoutingHint, RoutingMode, SecretRef,
+    TokenUsage, ToolCall, ToolResult,
 };
 
 // Section 8 event surface and Section 7.5 session manager.

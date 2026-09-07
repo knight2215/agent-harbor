@@ -1,0 +1,104 @@
+/*
+ * Design tokens (Phase 7 UX refactor, FEAT-003).
+ *
+ * A single CSS custom-property system that drives the whole UI. The LIGHT
+ * palette lives on :root; the DARK palette is applied under
+ * [data-theme="dark"]. When no explicit choice is stored the theme module
+ * leaves data-theme following the OS, and @media (prefers-color-scheme: dark)
+ * provides the dark palette as the default until/unless a light choice is set.
+ *
+ * Accent is a modern harbor teal/blue. Only these variables are consumed by
+ * app.css; there is NO UI-component library.
+ */
+
+:root {
+  /* Accent (harbor teal/blue). */
+  --ah-accent: #0d7d8c;
+  --ah-accent-strong: #0a636f;
+  --ah-accent-contrast: #ffffff;
+  --ah-accent-soft: rgba(13, 125, 140, 0.12);
+
+  /* Surfaces + text (light). */
+  --ah-bg: #f5f7f9;
+  --ah-surface: #ffffff;
+  --ah-surface-2: #eef1f4;
+  --ah-surface-hover: #e6ebef;
+  --ah-border: #d5dce2;
+  --ah-text: #16232b;
+  --ah-text-muted: #5a6b76;
+  --ah-text-faint: #8494a0;
+
+  /* Status. */
+  --ah-danger: #b4232a;
+  --ah-focus-ring: rgba(13, 125, 140, 0.55);
+
+  /* Spacing scale. */
+  --ah-space-1: 4px;
+  --ah-space-2: 8px;
+  --ah-space-3: 12px;
+  --ah-space-4: 16px;
+  --ah-space-5: 24px;
+  --ah-space-6: 32px;
+
+  /* Radius. */
+  --ah-radius-sm: 4px;
+  --ah-radius-md: 8px;
+  --ah-radius-lg: 12px;
+
+  /* Typography. */
+  --ah-font-sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --ah-font-mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  --ah-font-size: 14px;
+  --ah-line-height: 1.5;
+
+  /* Elevation + layout. */
+  --ah-shadow: 0 1px 3px rgba(16, 32, 40, 0.12);
+  --ah-sidebar-width: 260px;
+  --ah-sidebar-width-collapsed: 60px;
+}
+
+/* Dark palette applied by an explicit choice. */
+[data-theme="dark"] {
+  --ah-accent: #2bbccf;
+  --ah-accent-strong: #4fd0e0;
+  --ah-accent-contrast: #062026;
+  --ah-accent-soft: rgba(43, 188, 207, 0.16);
+
+  --ah-bg: #0e161b;
+  --ah-surface: #16222a;
+  --ah-surface-2: #1d2c35;
+  --ah-surface-hover: #263843;
+  --ah-border: #2c3d47;
+  --ah-text: #e6eef2;
+  --ah-text-muted: #9fb0bb;
+  --ah-text-faint: #6f828e;
+
+  --ah-danger: #f0666c;
+  --ah-focus-ring: rgba(79, 208, 224, 0.6);
+
+  --ah-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+/* System default: when no explicit [data-theme] wins, honor the OS. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ah-accent: #2bbccf;
+    --ah-accent-strong: #4fd0e0;
+    --ah-accent-contrast: #062026;
+    --ah-accent-soft: rgba(43, 188, 207, 0.16);
+
+    --ah-bg: #0e161b;
+    --ah-surface: #16222a;
+    --ah-surface-2: #1d2c35;
+    --ah-surface-hover: #263843;
+    --ah-border: #2c3d47;
+    --ah-text: #e6eef2;
+    --ah-text-muted: #9fb0bb;
+    --ah-text-faint: #6f828e;
+
+    --ah-danger: #f0666c;
+    --ah-focus-ring: rgba(79, 208, 224, 0.6);
+
+    --ah-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  }
+}

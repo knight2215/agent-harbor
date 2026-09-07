@@ -18,6 +18,6 @@ pub mod models;
 pub use models::{
     AgentPersona, Attachment, Conversation, ManualRoute, McpServerConfig, McpTransport, Message,
     MessageContent, MessageStatus, ModelParameters, PermissionMode, PrivacyTag, ProviderConfig,
-    ProviderKind, Role, RouteMetadata, RouteSource, RoutingHint, SecretRef, TokenUsage, ToolCall,
-    ToolResult,
+    ProviderKind, Role, RouteMetadata, RouteSource, RoutingHint, RoutingMode, SecretRef,
+    TokenUsage, ToolCall, ToolResult,
 };
