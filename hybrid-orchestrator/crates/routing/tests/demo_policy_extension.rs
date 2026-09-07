@@ -4,21 +4,17 @@
 //!
 //! It proves the "add a routing policy without touching the core" claim from
 //! Section 10: a brand-new [`RoutingPolicy`], defined entirely here in the test,
-//! can be
+//! can be registered on a [`PolicyRegistry`] via its public
+//! [`PolicyRegistry::register`] seam, selected active via
+//! [`PolicyRegistry::set_active`], and driven by [`PolicyRegistry::resolve`].
 //!
-//!   1. registered on a [`PolicyRegistry`] via its public
-//!      [`PolicyRegistry::register`] seam,
-//!   2. selected active via [`PolicyRegistry::set_active`], and
-//!   3. driven by [`PolicyRegistry::resolve`] so that
-//!     (a) with NO manual override, `resolve` delegates to the demo policy's
-//!     decision, and
-//!     (b) WITH a manual override, the Section 6.3 manual-override precedence
-//!     wrapper ([`ManualOverrideResolver`]) STILL short-circuits to the
-//!     manual route.
-//!
-//! (b) is the load-bearing assertion: it proves the registry keeps wrapping the
-//! active automatic policy in the manual-override precedence unchanged, i.e. the
-//! engine wrapper/pipeline is untouched by swapping in a custom policy.
+//! Two behaviors are asserted. With no manual override, `resolve` delegates to
+//! the demo policy's decision. With a manual override, the Section 6.3
+//! manual-override precedence wrapper ([`ManualOverrideResolver`]) still
+//! short-circuits to the manual route. The second case is load-bearing: it
+//! proves the registry keeps wrapping the active automatic policy in the
+//! manual-override precedence unchanged, i.e. the engine wrapper/pipeline is
+//! untouched by swapping in a custom policy.
 //!
 //! ZERO-EDIT PROOF: this file is the ONLY thing added for the demo policy. No
 //! file under `routing/src` or `orchestrator-core` changes to make the demo
