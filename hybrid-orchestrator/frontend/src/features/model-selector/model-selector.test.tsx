@@ -217,7 +217,8 @@ describe("model selector", () => {
     expect(screen.getAllByText("Override next message")).toHaveLength(1);
     // Empty state guides the user to Settings -> Providers & Keys and mentions
     // a local runtime, and there is exactly ONE such guidance node (no stacked
-    // empty pickers).
+    // empty pickers). Assert via the stable testid as well as the copy.
+    expect(screen.getAllByTestId("no-models-empty-state")).toHaveLength(1);
     const empties = screen.getAllByText(/Providers & Keys/);
     expect(empties).toHaveLength(1);
     expect(screen.getByText(/local runtime/)).toBeInTheDocument();

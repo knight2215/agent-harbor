@@ -116,6 +116,60 @@ describe("<App />", () => {
     expect(screen.getAllByText("Override next message")).toHaveLength(1);
   });
 
+  it("stacks only ONE no-models empty state with an active Manual conversation and no models", async () => {
+    // Reproduces the residual-stacking path: with an ACTIVE conversation in
+    // Manual mode and zero models, both RoutingModeToggle (its manual-pin
+    // picker) and PerMessageOverrideControl could each render a
+    // NoModelsEmptyState. Seed that exact state, then assert only one guidance
+    // block surfaces in the chat pane.
+    const { useConversationsStore } = await import("./state/conversations");
+    const { useProvidersStore } = await import("./state/providers");
+    useConversationsStore.setState({
+      conversations: [
+        {
+          id: "c-1",
+          title: "Chat",
+          createdAt: "2024-01-01T00:00:00Z",
+          updatedAt: "2024-01-01T00:00:00Z",
+          personaId: null,
+          conversationPref: null,
+          routingMode: "manual",
+          privacyTags: [],
+          enabledToolServers: [],
+        },
+      ],
+      activeConversationId: "c-1",
+      messages: [],
+      pendingOverride: null,
+      pendingPermissions: [],
+    });
+    useProvidersStore.setState({ models: [] });
+
+    render(<App />);
+
+    // The store was mutated outside act() before this read, so wait for the
+    // async shell render to settle before asserting on the DOM.
+    await waitFor(() => {
+      expect(screen.getByTestId("app-version")).toHaveTextContent("9.9.9-test");
+    });
+
+    // Exactly one NoModelsEmptyState in the whole chat pane, and the
+    // 'Override next message' label still renders exactly once.
+    expect(screen.getAllByTestId("no-models-empty-state")).toHaveLength(1);
+    expect(screen.getAllByText("Override next message")).toHaveLength(1);
+
+    // Reset the shared stores so the seeded conversation does not bleed into
+    // sibling tests in this file.
+    useConversationsStore.setState({
+      conversations: [],
+      activeConversationId: null,
+      messages: [],
+      pendingOverride: null,
+      pendingPermissions: [],
+    });
+    useProvidersStore.setState({ models: [] });
+  });
+
   it("switches to the History and Settings destinations", async () => {
     render(<App />);
 

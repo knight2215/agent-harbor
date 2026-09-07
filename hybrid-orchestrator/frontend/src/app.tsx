@@ -62,7 +62,9 @@ const NAV_ITEMS: ReadonlyArray<{ id: Destination; label: string; icon: string }>
  * Fold the real app version into a small status/about footer. The version is
  * read at runtime from `@tauri-apps/api/app` getVersion() (backed by
  * tauri.conf.json), so it tracks the shipped build automatically on every
- * version bump. Renders "loading…" until the async read resolves.
+ * version bump. Renders "loading…" until the async read resolves, and a
+ * distinct "unknown" fallback if the read rejects (so a failed read is not
+ * indistinguishable from a still-pending one).
  */
 function StatusBar() {
   const [version, setVersion] = useState<string | null>(null);
@@ -74,7 +76,9 @@ function StatusBar() {
         if (active) setVersion(v);
       })
       .catch(() => {
-        if (active) setVersion(null);
+        // A failed read should be distinguishable from a pending one: render a
+        // concrete fallback rather than leaving the "loading…" placeholder up.
+        if (active) setVersion("unknown");
       });
     return () => {
       active = false;

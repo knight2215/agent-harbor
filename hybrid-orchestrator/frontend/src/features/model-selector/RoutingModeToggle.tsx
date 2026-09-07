@@ -110,7 +110,15 @@ export function RoutingModeToggle() {
 
       {!isManual && <AutoRationaleTooltip conversationId={activeConversationId} />}
 
-      {(isManual || showPicker) && (
+      {/*
+        Reveal the manual-pin picker only when Manual/showPicker is on AND there
+        are models to choose from. With zero models the picker would render a
+        NoModelsEmptyState that stacks with the one PerMessageOverrideControl
+        already shows in the chat pane; suppressing it here keeps a single piece
+        of guidance visible (the override control owns it) without changing the
+        routing-mode or pin semantics.
+      */}
+      {(isManual || showPicker) && models.length > 0 && (
         <ProviderModelPicker models={models} value={pin} onChange={pinRoute} />
       )}
     </div>

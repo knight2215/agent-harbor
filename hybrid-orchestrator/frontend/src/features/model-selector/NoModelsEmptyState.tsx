@@ -7,7 +7,7 @@
 
 export function NoModelsEmptyState() {
   return (
-    <p className="model-picker__empty">
+    <p className="model-picker__empty" data-testid="no-models-empty-state">
       No models available yet. Add a provider under <strong>Settings → Providers &amp; Keys</strong>{" "}
       or start a local runtime to get started.
     </p>
