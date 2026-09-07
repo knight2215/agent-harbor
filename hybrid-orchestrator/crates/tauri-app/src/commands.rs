@@ -1012,10 +1012,12 @@ pub async fn set_mcp_enabled(
         // appears in send_message's live snapshot (review issue #4, mirroring
         // remove_mcp_server). On re-enable the branch above re-inserts + connects.
         handle.teardown().await;
-        let _ = state.core_events.send(orchestrator_core::CoreEvent::McpStateChanged {
-            server_id,
-            state: orchestrator_core::McpConnectionState::Disconnected,
-        });
+        let _ = state
+            .core_events
+            .send(orchestrator_core::CoreEvent::McpStateChanged {
+                server_id,
+                state: orchestrator_core::McpConnectionState::Disconnected,
+            });
     }
     Ok(cfg)
 }
@@ -1029,23 +1031,26 @@ pub async fn refresh_mcp_tools(
     id: String,
 ) -> Result<Vec<ToolDescriptorView>, CommandError> {
     let server_id = parse_uuid("id", &id)?;
-    let handle = state
-        .mcp_servers
-        .get(server_id)
-        .await
-        .ok_or_else(|| CommandError::not_found(format!("mcp server not connected: {server_id}")))?;
+    let handle =
+        state.mcp_servers.get(server_id).await.ok_or_else(|| {
+            CommandError::not_found(format!("mcp server not connected: {server_id}"))
+        })?;
     // Reconnect re-runs the handshake + tools/list, refreshing the cache.
     if let Err(err) = handle.reconnect().await {
-        let _ = state.core_events.send(orchestrator_core::CoreEvent::McpError {
-            server_id,
-            message: err.to_string(),
-        });
+        let _ = state
+            .core_events
+            .send(orchestrator_core::CoreEvent::McpError {
+                server_id,
+                message: err.to_string(),
+            });
         return Err(CommandError::internal(err.to_string()));
     }
-    let _ = state.core_events.send(orchestrator_core::CoreEvent::McpStateChanged {
-        server_id,
-        state: orchestrator_core::McpConnectionState::Connected,
-    });
+    let _ = state
+        .core_events
+        .send(orchestrator_core::CoreEvent::McpStateChanged {
+            server_id,
+            state: orchestrator_core::McpConnectionState::Connected,
+        });
     Ok(handle
         .tools()
         .await
@@ -1189,7 +1194,12 @@ fn render_content(content: &orchestrator_core::MessageContent) -> String {
             .join("\n"),
         MessageContent::ToolResults { results } => results
             .iter()
-            .map(|r| format!("_tool result ({})_", if r.is_error { "error" } else { "ok" }))
+            .map(|r| {
+                format!(
+                    "_tool result ({})_",
+                    if r.is_error { "error" } else { "ok" }
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         MessageContent::Attachments { attachments } => attachments
@@ -1751,7 +1761,9 @@ mod tests {
 
         // Unknown conversation id -> NotFound.
         let unknown = Uuid::new_v4().to_string();
-        let err = get_route_explanation_inner(&state, &unknown).await.unwrap_err();
+        let err = get_route_explanation_inner(&state, &unknown)
+            .await
+            .unwrap_err();
         assert!(matches!(err.code, ErrorCode::NotFound));
     }
 
