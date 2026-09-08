@@ -78,7 +78,7 @@ pub use adapters::openai::OpenAiFactory;
 // The embedded local inference engine factory (Strategy B / FEAT-002).
 // Registering this on a `ProviderRegistry` wires up the in-process
 // `ProviderKind::Embedded` engine.
-pub use adapters::embedded::EmbeddedFactory;
+pub use adapters::embedded::{EmbeddedFactory, EmbeddedProvider};
 
 // Translation-shim adapter factories (FEAT-003). Registering these on a
 // `ProviderRegistry` wires up the Anthropic / Gemini / Bedrock kinds.

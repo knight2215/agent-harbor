@@ -481,15 +481,19 @@ async fn list_available_models_inner(
     // Bridge the embedded engine seam (FEAT-002): the lifecycle commands import
     // `.gguf` models onto the SHARED `AppState.embedded_engine`, but
     // `build_registry` builds a FRESH, empty `EmbeddedEngine` for the persisted
-    // `ProviderKind::Embedded` row. Replace that throwaway instance with the
-    // shared engine so the models the user imported are the ones enumerated
-    // here (and therefore surface under Local in the picker across routing
-    // modes). Keyed by `ChatProvider::id()` == `EMBEDDED_PROVIDER_ID`, which is
-    // exactly the id the seeded embedded config row carries, so it matches
-    // `list_models`'s per-row `registry.get(&cfg.id)` lookup. No-op when no
-    // embedded row is persisted (nothing imported yet): the shared engine is
-    // registered but has no config row, so `list_models` skips it.
-    registry.insert_instance(state.embedded_engine.clone());
+    // `ProviderKind::Embedded` row. Replace that throwaway instance with an
+    // `EmbeddedProvider` wrapping the SHARED engine (via `from_shared`, so the
+    // provider and the lifecycle commands observe the SAME `Arc<EmbeddedEngine>`)
+    // so the models the user imported are the ones enumerated here (and
+    // therefore surface under Local in the picker across routing modes). Keyed
+    // by `ChatProvider::id()` == `EMBEDDED_ENGINE_ID`, which is exactly the id
+    // the seeded embedded config row carries, so it matches `list_models`'s
+    // per-row `registry.get(&cfg.id)` lookup. No-op when no embedded row is
+    // persisted (nothing imported yet): the shared engine is registered but has
+    // no config row, so `list_models` skips it.
+    registry.insert_instance(std::sync::Arc::new(
+        providers::EmbeddedProvider::from_shared(state.embedded_engine.clone()),
+    ));
 
     // Enumerate models (may hit the network per provider) and attach
     // capabilities + price.

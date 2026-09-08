@@ -61,13 +61,28 @@ pub fn build_embedded(cfg: &ProviderConfig) -> EmbeddedEngine {
 /// and mapping the engine's tokens/[`engine::StopReason`] to
 /// `ChatResponse`/`ChatDelta`) while delegating the actual inference to the
 /// provider-agnostic engine crate.
+///
+/// The wrapped engine is held behind an [`Arc`] so a single shared engine can
+/// be surfaced through the registry (the Tauri layer registers the SHARED
+/// `AppState.embedded_engine` here so models imported at runtime stay visible
+/// through the registry). All trait methods take `&self` on the engine, so
+/// going through the `Arc` is behaviourally identical to holding it by value.
 pub struct EmbeddedProvider {
-    engine: EmbeddedEngine,
+    engine: Arc<EmbeddedEngine>,
 }
 
 impl EmbeddedProvider {
-    /// Wrap an already-built [`EmbeddedEngine`].
+    /// Wrap an already-built [`EmbeddedEngine`] by value (the common factory
+    /// path). Delegates to [`EmbeddedProvider::from_shared`].
     pub fn new(engine: EmbeddedEngine) -> Self {
+        Self::from_shared(Arc::new(engine))
+    }
+
+    /// Wrap an already-shared [`EmbeddedEngine`]. Use this when the same engine
+    /// handle must be observable elsewhere (e.g. runtime model imports mutate
+    /// the shared engine and those models must remain visible through the
+    /// registry instance built here).
+    pub fn from_shared(engine: Arc<EmbeddedEngine>) -> Self {
         EmbeddedProvider { engine }
     }
 }
@@ -294,6 +309,20 @@ mod tests {
     async fn provider_lists_registered_models() {
         let provider = EmbeddedProvider::new(build_embedded(&config(None)));
         provider.engine.register_path("/models/tiny.gguf").await;
+        let models = provider.list_models().await.expect("list ok");
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "tiny");
+    }
+
+    #[tokio::test]
+    async fn from_shared_reflects_models_registered_on_the_shared_handle() {
+        // A provider built via `from_shared` wraps the SAME engine handle, so a
+        // model registered on that shared `Arc` afterwards is enumerated through
+        // the provider. This mirrors the Tauri seam where the registry instance
+        // must stay in sync with runtime imports on the shared engine.
+        let shared = Arc::new(build_embedded(&config(None)));
+        let provider = EmbeddedProvider::from_shared(Arc::clone(&shared));
+        shared.register_path("/models/tiny.gguf").await;
         let models = provider.list_models().await.expect("list ok");
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "tiny");
