@@ -1,0 +1,59 @@
+[package]
+name = "engine"
+# Concrete literals (kept in sync with the root `[workspace.package]`:
+# version = "0.1.0" here, edition = "2021", license = "MIT") rather than
+# `*.workspace = true` inheritance. This crate is under `[workspace] exclude` in
+# the root Cargo.toml (Strategy B / FEAT-001) because - like `providers` and the
+# other excluded crates - it carries crates.io deps unreachable in the offline
+# sandbox, AND because the native `llama` feature (default OFF) pulls in a heavy
+# llama.cpp binding that compiles a large C++ library needing a toolchain +
+# submodule sources that also cannot be fetched offline. When CI builds it
+# standalone via `--manifest-path crates/engine/Cargo.toml`, there is no
+# workspace root to inherit from, and `*.workspace = true` would fail to parse
+# ("failed to find a workspace root"). Making the crate self-contained keeps the
+# manifest parseable.
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+# NOTE: This is Strategy B, the zero-install embedded local inference engine
+# (llama.cpp family, in-process GGUF). It implements `providers::ChatProvider`
+# so routing/pipeline/UI treat it exactly like the HTTP adapters. The heavy
+# native llama.cpp binding (`llama-cpp-2`) is an OPTIONAL dependency gated behind
+# the cargo feature `llama`, which is DEFAULT OFF (`[features] default = []`).
+#
+# Under default features the crate is a dependency-light STUB: its `chat` /
+# `chat_stream` return a clear `ProviderError` telling the caller to rebuild with
+# the `llama` feature. This is what the routine per-crate CI `build-test` matrix
+# compiles (default features only), so it never needs the native lib, a C++
+# toolchain, or network. The real llama.cpp-backed implementation and its heavy
+# dep live entirely behind `#[cfg(feature = "llama")]` and are proven only by a
+# dedicated gated CI job (network + C++ toolchain), never in the offline sandbox.
+#
+# Version literals below are kept in sync with the root `[workspace.dependencies]`
+# table (an excluded crate has no workspace root to inherit from).
+
+[dependencies]
+providers = { path = "../providers" }
+domain = { path = "../domain" }
+
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+async-trait = "0.1"
+futures-util = "0.3"
+tokio = { version = "1", features = ["rt", "macros", "sync"] }
+
+# The native llama.cpp binding. OPTIONAL and gated by the `llama` feature so the
+# DEFAULT build pulls in NO native dependency. `llama-cpp-2` is a maintained
+# Rust binding over llama.cpp (built via its `llama-cpp-sys-2` -sys crate, which
+# compiles the bundled C++ library). It requires a C/C++ toolchain and cannot be
+# resolved/compiled/linked in the offline sandbox; the `llama` path is verified
+# only by a gated CI job.
+llama-cpp-2 = { version = "0.1.121", optional = true }
+
+[features]
+# Default OFF: the routine per-crate CI build compiles the dependency-light stub
+# with no native lib. Enabling `llama` turns on the native llama.cpp-backed path
+# and its optional binding dep (CI-only; needs a C++ toolchain + network).
+default = []
+llama = ["dep:llama-cpp-2"]
