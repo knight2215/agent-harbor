@@ -672,24 +672,29 @@ jobs:
           WINDOWS_SIG="$(find artifacts -type f -path '*/nsis/*.exe.sig' | head -n1)"
 
           # Base URL for release-download assets. productName is "Agent Harbor",
-          # so the emitted filenames contain a SPACE (e.g.
-          # `Agent Harbor_0.4.0_amd64.AppImage.tar.gz`). GitHub's
-          # release-download URLs must percent-encode that space as %20 or the
-          # updater 404s, so encode spaces in the URL path segment.
+          # so the LOCAL bundle filenames contain a SPACE (e.g.
+          # `Agent Harbor_0.4.0_amd64.AppImage.tar.gz`). When those files are
+          # uploaded as GitHub Release assets, GitHub sanitizes the asset name
+          # by replacing each SPACE with a DOT (e.g.
+          # `Agent.Harbor_0.4.0_amd64.AppImage.tar.gz`). The download URL in
+          # latest.json must therefore spell the name with DOTS to match the
+          # stored asset; percent-encoding the space as %20 points at a name
+          # that does not exist and the updater 404s (the bug this fixes).
           RELEASE_BASE="https://github.com/knight2215/agent-harbor/releases/download/${GITHUB_REF_NAME}"
 
           # Build the `platforms` object INCREMENTALLY, adding a platform only
           # when BOTH its payload and its `.sig` were found. Signature contents
           # are read verbatim via `--rawfile` so jq escapes them into valid JSON
-          # string values. Basenames (percent-encoded) feed the download URLs.
+          # string values. Basenames (spaces replaced with dots) feed the URLs.
           # We fail ONLY IF NO platform is available (COUNT == 0); a missing but
-          # expected platform is a non-fatal `::warning::`.
+          # expected platform is a non-fatal `::warning::`. Basenames have their
+          # spaces replaced with dots to match the uploaded asset names.
           PLATFORMS='{}'
           COUNT=0
 
           if [ -n "$WINDOWS_EXE" ] && [ -f "$WINDOWS_EXE" ] && [ -n "$WINDOWS_SIG" ] && [ -f "$WINDOWS_SIG" ]; then
             WINDOWS_FILE="$(basename "$WINDOWS_EXE")"
-            WINDOWS_FILE_ENC="${WINDOWS_FILE// /%20}"
+            WINDOWS_FILE_ENC="${WINDOWS_FILE// /.}"
             PLATFORMS="$(jq -n \
               --argjson p "$PLATFORMS" \
               --rawfile sig "$WINDOWS_SIG" \
@@ -703,7 +708,7 @@ jobs:
 
           if [ -n "$LINUX_UPDATER" ] && [ -f "$LINUX_UPDATER" ] && [ -n "$LINUX_SIG" ] && [ -f "$LINUX_SIG" ]; then
             LINUX_FILE="$(basename "$LINUX_UPDATER")"
-            LINUX_FILE_ENC="${LINUX_FILE// /%20}"
+            LINUX_FILE_ENC="${LINUX_FILE// /.}"
             PLATFORMS="$(jq -n \
               --argjson p "$PLATFORMS" \
               --rawfile sig "$LINUX_SIG" \
