@@ -29,6 +29,7 @@ pub mod adapters {
     pub mod native;
 
     pub mod azure_openai;
+    pub mod embedded;
     pub mod generic_openai;
     pub mod lmstudio;
     pub mod ollama;
@@ -73,6 +74,11 @@ pub use adapters::generic_openai::GenericOpenAiFactory;
 pub use adapters::lmstudio::LmStudioFactory;
 pub use adapters::ollama::OllamaFactory;
 pub use adapters::openai::OpenAiFactory;
+
+// The embedded local inference engine factory (Strategy B / FEAT-002).
+// Registering this on a `ProviderRegistry` wires up the in-process
+// `ProviderKind::Embedded` engine.
+pub use adapters::embedded::EmbeddedFactory;
 
 // Translation-shim adapter factories (FEAT-003). Registering these on a
 // `ProviderRegistry` wires up the Anthropic / Gemini / Bedrock kinds.

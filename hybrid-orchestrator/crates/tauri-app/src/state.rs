@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use engine::EmbeddedEngine;
 use mcp_client::{McpConnectionState, McpServerHandle};
 use orchestrator_core::{CoreEvent, McpServerConfig, PermissionRegistry, SessionManager};
 use persistence::config::AppConfig;
@@ -152,6 +153,20 @@ pub struct AppState {
     /// `send_message` reads the live connected set from it, so the pipeline
     /// attaches tools from whatever servers are currently connected.
     pub mcp_servers: McpRegistry,
+    /// The embedded local inference engine (Strategy B / FEAT-002). Holds the
+    /// registry of imported local `.gguf` models plus, on the native `llama`
+    /// path, the one-model-at-a-time load state. The embedded-model lifecycle
+    /// commands (`list`/`import`/`select`/`load`/`unload`/`status`) are thin
+    /// adapters over it. Behind an `Arc` so it is cheap to clone into async
+    /// command tasks and is `Send + Sync` for Tauri managed state.
+    pub embedded_engine: Arc<EmbeddedEngine>,
+    /// The id of the embedded model the user has selected/loaded (if any), for
+    /// the embedded-model lifecycle commands. This is display-only lifecycle
+    /// state distinct from the engine's model REGISTRY: `select`/`load` set it
+    /// (after validating the id is registered), `unload` clears it, and
+    /// `status` reports it. Behind an `RwLock` so command tasks can read/update
+    /// it concurrently; `Arc` keeps it cheap to clone into those tasks.
+    pub embedded_loaded_model: Arc<RwLock<Option<String>>>,
 }
 
 impl AppState {
@@ -214,6 +229,8 @@ impl AppState {
             permission_registry: PermissionRegistry::new(),
             policies: Arc::new(policies),
             mcp_servers,
+            embedded_engine: Arc::new(EmbeddedEngine::empty()),
+            embedded_loaded_model: Arc::new(RwLock::new(None)),
         };
         Ok((state, rx))
     }
@@ -237,6 +254,8 @@ impl AppState {
             // can override the field on the returned state.
             policies: Arc::new(PolicyRegistry::new()),
             mcp_servers: McpRegistry::new(),
+            embedded_engine: Arc::new(EmbeddedEngine::empty()),
+            embedded_loaded_model: Arc::new(RwLock::new(None)),
         };
         (state, rx)
     }

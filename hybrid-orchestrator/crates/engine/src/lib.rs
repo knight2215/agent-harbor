@@ -218,6 +218,14 @@ impl EmbeddedEngine {
         let cfg = self.config.lock().await;
         cfg.model_infos()
     }
+
+    /// Snapshot the registered model entries (id plus on-disk `.gguf` path), in
+    /// registration order. Used by the backend commands (FEAT-002) to present a
+    /// display-safe id+path view of the imported local models.
+    pub async fn registered_entries(&self) -> Vec<ModelEntry> {
+        let cfg = self.config.lock().await;
+        cfg.models.clone()
+    }
 }
 
 impl Default for EmbeddedEngine {

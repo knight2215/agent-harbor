@@ -23,6 +23,13 @@ license = "MIT"
 [dependencies]
 orchestrator-core = { path = "../orchestrator-core" }
 providers = { path = "../providers" }
+# The embedded local inference engine (Strategy B / FEAT-002). Used by the
+# embedded-model lifecycle Tauri commands to construct/drive an
+# `engine::EmbeddedEngine` and its `EngineConfig` registry. The path dep does
+# NOT enable the engine's native `llama` feature: the routine tauri-app build
+# stays dependency-light and compiles the engine's stub. The `[features] llama`
+# passthrough below turns the native path on from a release build.
+engine = { path = "../engine" }
 mcp-client = { path = "../mcp-client" }
 routing = { path = "../routing" }
 persistence = { path = "../persistence" }
@@ -43,6 +50,15 @@ serde_json = "1"
 # inherit from when built via `--manifest-path`.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+[features]
+# Default OFF: the routine tauri-app build compiles the engine crate's
+# dependency-light stub, so no native llama.cpp library is needed. Enabling
+# `llama` forwards through `providers` to the engine crate's `llama` feature,
+# turning on the native llama.cpp-backed inference path (CI-only; needs a C++
+# toolchain + network).
+default = []
+llama = ["providers/llama"]
 
 [build-dependencies]
 tauri-build = "2"

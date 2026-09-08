@@ -1,7 +1,7 @@
 //! Built-in provider registry wiring and `list_available_models` (architecture.md
 //! Section 4.5 registry + Section 6.1 / 6.2 / 8.2 model selector data).
 //!
-//! [`builtin_registry`] constructs a [`ProviderRegistry`] with all eight
+//! [`builtin_registry`] constructs a [`ProviderRegistry`] with all nine
 //! built-in [`ProviderFactory`]s registered, one per [`ProviderKind`] (Section
 //! 4.5: "built-in factories are registered at startup"). [`build_registry`]
 //! layers on the user-configured provider instances from persisted
@@ -11,10 +11,10 @@
 //! (Section 8.2) and Phase 4 routing (Section 6.1) consume: for every configured
 //! provider instance it lists the provider's models and attaches per-model
 //! [`Capabilities`] and an optional [`TokenPrice`] resolved from a
-//! [`PricingTable`]. Local providers (LM Studio, Ollama) default to zero price
-//! (Section 6.2). Because [`ChatProvider::list_models`] may hit the network, the
-//! function drives the trait method, so tests inject a fake provider whose
-//! `list_models` returns a fixed list (no live network).
+//! [`PricingTable`]. Local providers (LM Studio, Ollama, the embedded engine)
+//! default to zero price (Section 6.2). Because [`ChatProvider::list_models`]
+//! may hit the network, the function drives the trait method, so tests inject a
+//! fake provider whose `list_models` returns a fixed list (no live network).
 //!
 //! SECRET HYGIENE (Section 9.1 / 9.2): [`AvailableModel`] carries only
 //! provider/model/capabilities/price labels; it never carries secret material or
@@ -31,8 +31,8 @@ use secrets::SecretStore;
 use crate::contract::{Capabilities, ProviderError};
 use crate::registry::ProviderRegistry;
 use crate::{
-    AnthropicFactory, AzureOpenAiFactory, BedrockFactory, GeminiFactory, GenericOpenAiFactory,
-    LmStudioFactory, OllamaFactory, OpenAiFactory,
+    AnthropicFactory, AzureOpenAiFactory, BedrockFactory, EmbeddedFactory, GeminiFactory,
+    GenericOpenAiFactory, LmStudioFactory, OllamaFactory, OpenAiFactory,
 };
 
 /// Per-model token pricing in currency units per one million tokens
@@ -53,8 +53,8 @@ pub struct TokenPrice {
 }
 
 impl TokenPrice {
-    /// A zero-cost price, used for local providers (LM Studio, Ollama) and as the
-    /// default for unpriced entries (Section 6.2).
+    /// A zero-cost price, used for local providers (LM Studio, Ollama, the
+    /// embedded engine) and as the default for unpriced entries (Section 6.2).
     pub const ZERO: TokenPrice = TokenPrice {
         input_per_mtok: 0.0,
         output_per_mtok: 0.0,
@@ -116,6 +116,8 @@ impl PricingTable {
         table.set_kind(ProviderKind::LmStudio, TokenPrice::ZERO);
         table.set_kind(ProviderKind::GenericOpenAI, TokenPrice::ZERO);
         table.set_kind(ProviderKind::Ollama, TokenPrice::ZERO);
+        // The embedded engine runs in-process; it is always zero-cost.
+        table.set_kind(ProviderKind::Embedded, TokenPrice::ZERO);
         table
     }
 
@@ -177,6 +179,7 @@ pub fn builtin_registry() -> ProviderRegistry {
     registry.register_factory(Box::new(GeminiFactory));
     registry.register_factory(Box::new(BedrockFactory));
     registry.register_factory(Box::new(OllamaFactory));
+    registry.register_factory(Box::new(EmbeddedFactory));
     registry
 }
 
@@ -291,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_registry_registers_all_eight_kinds() {
+    fn builtin_registry_registers_all_nine_kinds() {
         let registry = builtin_registry();
         for kind in [
             ProviderKind::OpenAI,
@@ -302,6 +305,7 @@ mod tests {
             ProviderKind::Gemini,
             ProviderKind::Bedrock,
             ProviderKind::Ollama,
+            ProviderKind::Embedded,
         ] {
             assert!(
                 registry.has_factory(kind),

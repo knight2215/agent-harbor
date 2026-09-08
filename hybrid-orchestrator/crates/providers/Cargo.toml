@@ -28,6 +28,13 @@ license = "MIT"
 [dependencies]
 domain = { path = "../domain" }
 secrets = { path = "../secrets" }
+# The embedded local inference engine (Strategy B / FEAT-002). `EmbeddedFactory`
+# wraps `engine::EmbeddedEngine` behind the `ProviderKind::Embedded` factory.
+# The path dep does NOT enable the engine's native `llama` feature: the routine
+# providers build stays dependency-light and compiles the engine's stub. The
+# `[features] llama` passthrough below turns the native path on from higher up
+# when a release build wants it.
+engine = { path = "../engine" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -50,6 +57,14 @@ bytes = "1"
 # Bedrock SigV4 signing (P2.9). Pure-Rust, Windows-friendly.
 aws-sigv4 = "1"
 aws-credential-types = "1"
+
+[features]
+# Default OFF: the routine providers build compiles the engine crate's
+# dependency-light stub, so no native llama.cpp library is needed. Enabling
+# `llama` forwards to the engine crate's `llama` feature, turning on the native
+# llama.cpp-backed inference path (CI-only; needs a C++ toolchain + network).
+default = []
+llama = ["engine/llama"]
 
 [dev-dependencies]
 # Mocked HTTP + SSE server for adapter/client tests (no live network). tokio

@@ -200,6 +200,9 @@ jobs:
       - name: cargo fmt (check, tauri-app)
         run: cargo fmt --manifest-path crates/tauri-app/Cargo.toml --check
 
+      - name: cargo fmt (check, engine)
+        run: cargo fmt --manifest-path crates/engine/Cargo.toml --check
+
       - name: cargo fmt (check, providers)
         run: cargo fmt --manifest-path crates/providers/Cargo.toml --check
 
@@ -254,6 +257,24 @@ jobs:
 
       - name: cargo test (persistence)
         run: cargo test --manifest-path crates/persistence/Cargo.toml
+
+      # --- Rust: engine (excluded from the workspace, built explicitly) -------
+      # engine is under `[workspace] exclude` (Strategy B / FEAT-001): its native
+      # llama.cpp binding (`llama-cpp-2`) sits behind the DEFAULT-OFF `llama`
+      # feature, so these DEFAULT-feature steps compile the dependency-light STUB
+      # only - no native lib, C++ toolchain, or network needed. Built BEFORE
+      # providers because providers now path-depends on engine (the
+      # `EmbeddedFactory` wraps `engine::EmbeddedEngine`). The native `--features
+      # llama` compile is exercised ONLY in the gated `engine-native` job below,
+      # never in this routine per-push job.
+      - name: cargo build (engine)
+        run: cargo build --manifest-path crates/engine/Cargo.toml
+
+      - name: cargo clippy (engine)
+        run: cargo clippy --manifest-path crates/engine/Cargo.toml --all-targets -- -D warnings
+
+      - name: cargo test (engine)
+        run: cargo test --manifest-path crates/engine/Cargo.toml
 
       # --- Rust: providers (excluded from the workspace, built explicitly) ----
       # providers is under `[workspace] exclude` because Phase 2 (FEAT-001) gave
@@ -370,6 +391,78 @@ jobs:
       - name: npm run test (frontend vitest)
         working-directory: hybrid-orchestrator/frontend
         run: npm run test
+
+  # --- Gated native llama.cpp compile (Strategy B / FEAT-002) --------------
+  # This is the ONLY place the embedded engine's NATIVE llama.cpp path is
+  # exercised. The `engine` crate's `llama` feature pulls in the `llama-cpp-2`
+  # binding, whose `-sys` crate compiles the bundled llama.cpp C++ library; that
+  # needs a C/C++ toolchain (cmake + a C++ compiler, plus libclang for the
+  # binding's bindgen) and network access to fetch the crate + its vendored
+  # sources. NONE of that is available in the offline sandbox or exercised by the
+  # routine `build` job (which compiles the DEFAULT-feature stub), so nothing
+  # local can prove this path - the orchestrator MUST WATCH this job.
+  #
+  # Gated exactly like `tauri-bundle`: it runs ONLY on manual dispatch
+  # (`workflow_dispatch`) and on version-tag pushes (`v*`), on the ubuntu +
+  # windows matrix, so the native compile is validated cross-platform at release
+  # / manual time without slowing the routine per-push signal.
+  engine-native:
+    name: engine-native (${{ matrix.os }})
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        # Match the other jobs' matrix: no macOS (see the note on `build`).
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    defaults:
+      run:
+        working-directory: hybrid-orchestrator
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      # The C/C++ build toolchain the `llama-cpp-2` binding needs to compile the
+      # bundled llama.cpp: CMake, a C++ compiler, and libclang (the binding uses
+      # bindgen). Ubuntu installs them via apt; Windows runners already ship
+      # MSVC + CMake, and LLVM/libclang is preinstalled at $env:LLVM_PATH, which
+      # bindgen discovers via LIBCLANG_PATH.
+      - name: Install llama.cpp build toolchain (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake clang libclang-dev build-essential
+        working-directory: .
+
+      - name: Set up LIBCLANG_PATH (Windows)
+        if: matrix.os == 'windows-latest'
+        run: echo "LIBCLANG_PATH=$env:LLVM_PATH\bin" >> $env:GITHUB_ENV
+        working-directory: .
+
+      - name: Cache cargo registry and build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            hybrid-orchestrator/target
+          key: ${{ runner.os }}-cargo-engine-native-${{ hashFiles('hybrid-orchestrator/**/Cargo.lock', 'hybrid-orchestrator/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-engine-native-
+            ${{ runner.os }}-cargo-
+
+      # The native-feature compile. This is the sole native-compile site for the
+      # embedded engine; a green run here is the only proof the llama.cpp-backed
+      # path builds. The `#[ignore]`d manual integration test (which needs a real
+      # `.gguf`) is intentionally NOT run.
+      - name: cargo build (engine, --features llama)
+        run: cargo build --manifest-path crates/engine/Cargo.toml --features llama
 
   # --- Gated Tauri installer bundle ----------------------------------------
   # This job carries the two expensive steps that used to run on every push and

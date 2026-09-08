@@ -515,8 +515,9 @@ fn pricing_table_from_config(config: &PricingConfig) -> PricingTable {
 /// for the privacy hard constraint (instead of trusting a zero price, which a
 /// misconfigured cloud provider could carry):
 ///
-///   - [`ProviderKind::LmStudio`] and [`ProviderKind::Ollama`] run on the local
-///     machine, so they are always local.
+///   - [`ProviderKind::LmStudio`], [`ProviderKind::Ollama`], and
+///     [`ProviderKind::Embedded`] run on the local machine (the embedded engine
+///     runs in-process), so they are always local.
 ///   - [`ProviderKind::GenericOpenAI`] is local ONLY when its endpoint is a
 ///     loopback host (`localhost` / `127.0.0.1` / `[::1]`); a generic endpoint
 ///     pointed at a remote host is treated as cloud.
@@ -527,6 +528,7 @@ fn local_provider_ids(configs: &[ProviderConfig]) -> std::collections::BTreeSet<
         .filter(|cfg| match cfg.kind {
             ProviderKind::LmStudio => true,
             ProviderKind::Ollama => true,
+            ProviderKind::Embedded => true,
             ProviderKind::GenericOpenAI => {
                 cfg.base_url.as_deref().is_some_and(is_loopback_endpoint)
             }
@@ -1498,6 +1500,167 @@ fn resolve_permission_inner(
     Ok(state.permission_registry.resolve(id, decision))
 }
 
+// --- Embedded local inference engine (Strategy B / FEAT-002) ----------------
+
+/// A display-safe view of one imported embedded (local `.gguf`) model
+/// (architecture.md Section 4, Strategy B). Crosses the IPC boundary, so it is
+/// camelCase-serde and carries ONLY the model id and its on-disk path: never any
+/// secret material (the embedded engine needs no key).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedModelView {
+    /// The provider-scoped model id (defaults to the `.gguf` file stem).
+    pub id: String,
+    /// The on-disk path to the `.gguf` file, for display in the settings UI.
+    pub path: String,
+    /// Whether this model is the one currently selected/loaded.
+    pub loaded: bool,
+}
+
+/// The embedded engine's lifecycle status (architecture.md Section 4, Strategy
+/// B). Display-safe camelCase DTO: reports which model (if any) is currently
+/// selected/loaded and how many local models are imported.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmbeddedModelStatus {
+    /// The id of the currently selected/loaded model, if any.
+    pub loaded_model_id: Option<String>,
+    /// The number of imported local `.gguf` models.
+    pub registered_count: usize,
+}
+
+/// Upper bound on a supplied `.gguf` file path (Section 9.2 "bounds").
+const MAX_MODEL_PATH_LEN: usize = 4_096;
+
+/// Validate a user-supplied local `.gguf` model path: trimmed non-empty, within
+/// bounds, and ending in the `.gguf` extension (case-insensitive). This rejects
+/// obvious mistakes before the path reaches the engine registry; it does NOT
+/// touch the filesystem (existence is checked lazily on the native load path).
+fn validate_gguf_path(path: &str) -> Result<(), CommandError> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(CommandError::invalid("`path` must not be empty"));
+    }
+    if trimmed.len() > MAX_MODEL_PATH_LEN {
+        return Err(CommandError::invalid(format!(
+            "`path` exceeds the maximum length of {MAX_MODEL_PATH_LEN} bytes"
+        )));
+    }
+    if !trimmed.to_ascii_lowercase().ends_with(".gguf") {
+        return Err(CommandError::invalid(
+            "`path` must point to a `.gguf` model file",
+        ));
+    }
+    Ok(())
+}
+
+/// Snapshot the imported embedded models as display-safe views, marking the
+/// currently selected/loaded model. Shared by the list/import/select handlers so
+/// they all return the same up-to-date view.
+async fn embedded_model_views(state: &AppState) -> Vec<EmbeddedModelView> {
+    let loaded = state.embedded_loaded_model.read().await.clone();
+    state
+        .embedded_engine
+        .registered_entries()
+        .await
+        .into_iter()
+        .map(|m| EmbeddedModelView {
+            loaded: Some(&m.id) == loaded.as_ref(),
+            path: m.path.to_string_lossy().into_owned(),
+            id: m.id,
+        })
+        .collect()
+}
+
+/// List the imported embedded (local `.gguf`) models (architecture.md Section 4,
+/// Strategy B). Display-safe: returns only id/path/loaded, never secret
+/// material. Backed by the engine's model registry.
+#[tauri::command]
+pub async fn list_embedded_models(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<EmbeddedModelView>, CommandError> {
+    Ok(embedded_model_views(&state).await)
+}
+
+/// Import a local `.gguf` model by path, registering it with the embedded
+/// engine (architecture.md Section 4, Strategy B). Validates the path shape
+/// (non-empty, bounded, `.gguf` extension) before registering; the file is
+/// opened only later on the native load path. Returns the refreshed model list.
+#[tauri::command]
+pub async fn import_embedded_model(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<Vec<EmbeddedModelView>, CommandError> {
+    validate_gguf_path(&path)?;
+    state.embedded_engine.register_path(path.trim()).await;
+    Ok(embedded_model_views(&state).await)
+}
+
+/// Select (import if needed, then mark active) a local `.gguf` model by path
+/// (architecture.md Section 4, Strategy B). Registers the path and records its
+/// id as the selected/loaded model. Returns the refreshed model list.
+#[tauri::command]
+pub async fn select_embedded_model(
+    state: tauri::State<'_, AppState>,
+    path: String,
+) -> Result<Vec<EmbeddedModelView>, CommandError> {
+    validate_gguf_path(&path)?;
+    let id = state.embedded_engine.register_path(path.trim()).await;
+    *state.embedded_loaded_model.write().await = Some(id);
+    Ok(embedded_model_views(&state).await)
+}
+
+/// Load (make active) an already-imported embedded model by id (architecture.md
+/// Section 4, Strategy B). Rejects an id that is not registered. Records it as
+/// the selected/loaded model and returns the engine status.
+#[tauri::command]
+pub async fn load_embedded_model(
+    state: tauri::State<'_, AppState>,
+    model_id: String,
+) -> Result<EmbeddedModelStatus, CommandError> {
+    validate_nonempty("modelId", &model_id, MAX_MODEL_PATH_LEN)?;
+    let registered = state.embedded_engine.registered_models().await;
+    if !registered.iter().any(|m| m.id == model_id) {
+        return Err(CommandError::not_found(format!(
+            "no imported embedded model with id: {model_id}"
+        )));
+    }
+    *state.embedded_loaded_model.write().await = Some(model_id);
+    Ok(embedded_model_status_inner(&state).await)
+}
+
+/// Unload the currently selected/loaded embedded model (architecture.md Section
+/// 4, Strategy B), clearing the active-model state. Idempotent: unloading when
+/// nothing is loaded is a no-op. Returns the engine status.
+#[tauri::command]
+pub async fn unload_embedded_model(
+    state: tauri::State<'_, AppState>,
+) -> Result<EmbeddedModelStatus, CommandError> {
+    *state.embedded_loaded_model.write().await = None;
+    Ok(embedded_model_status_inner(&state).await)
+}
+
+/// Report the embedded engine's lifecycle status (architecture.md Section 4,
+/// Strategy B): which model (if any) is selected/loaded and how many are
+/// imported. Display-safe camelCase DTO.
+#[tauri::command]
+pub async fn embedded_model_status(
+    state: tauri::State<'_, AppState>,
+) -> Result<EmbeddedModelStatus, CommandError> {
+    Ok(embedded_model_status_inner(&state).await)
+}
+
+/// The shared status snapshot behind [`embedded_model_status`],
+/// [`load_embedded_model`], and [`unload_embedded_model`].
+async fn embedded_model_status_inner(state: &AppState) -> EmbeddedModelStatus {
+    let loaded_model_id = state.embedded_loaded_model.read().await.clone();
+    let registered_count = state.embedded_engine.registered_models().await.len();
+    EmbeddedModelStatus {
+        loaded_model_id,
+        registered_count,
+    }
+}
+
 // --- Diagnostics ------------------------------------------------------------
 
 /// Returns the application version compiled into the binary.
@@ -1767,6 +1930,8 @@ mod tests {
         let configs = [
             cfg("lm", ProviderKind::LmStudio, None),
             cfg("ollama", ProviderKind::Ollama, None),
+            // The embedded engine runs in-process, so it is always local.
+            cfg("embedded", ProviderKind::Embedded, None),
             cfg(
                 "local-generic",
                 ProviderKind::GenericOpenAI,
@@ -1791,6 +1956,8 @@ mod tests {
         assert!(local.contains("lm"));
         // Ollama runs on the local machine, so it is always local.
         assert!(local.contains("ollama"));
+        // The embedded engine runs in-process, so it is always local.
+        assert!(local.contains("embedded"));
         assert!(local.contains("local-generic"));
         assert!(local.contains("localhost-generic"));
         assert!(!local.contains("remote-generic"));
@@ -2454,5 +2621,84 @@ mod tests {
         let ok_tags = vec![PrivacyTag::Custom("work".to_string())];
         assert!(validate_opt_len("title", &Some("Chat".to_string()), MAX_TITLE_LEN).is_ok());
         assert!(validate_privacy_tags(&ok_tags).is_ok());
+    }
+
+    // --- Embedded local inference engine (Strategy B / FEAT-002) ------------
+
+    /// `validate_gguf_path` rejects empty/over-long/non-`.gguf` paths and
+    /// accepts a well-formed `.gguf` path (case-insensitive extension).
+    #[test]
+    fn validate_gguf_path_enforces_extension_and_bounds() {
+        assert!(validate_gguf_path("   ").is_err());
+        assert!(validate_gguf_path("/models/llama.bin").is_err());
+        assert!(validate_gguf_path(&format!("{}.gguf", "x".repeat(MAX_MODEL_PATH_LEN))).is_err());
+        assert!(validate_gguf_path("/models/phi-3-mini.gguf").is_ok());
+        // Case-insensitive extension is accepted.
+        assert!(validate_gguf_path("/models/Phi-3-Mini.GGUF").is_ok());
+    }
+
+    /// The embedded-model lifecycle helpers drive the engine registry + the
+    /// loaded-model state end to end: import registers a model, select marks it
+    /// loaded, status reports it, and unload clears it. This exercises the exact
+    /// bodies the `#[tauri::command]` handlers call.
+    #[tokio::test]
+    async fn embedded_model_lifecycle_import_select_unload() {
+        let state = test_state().await;
+
+        // Nothing imported yet: status is empty and the list is empty.
+        let status = embedded_model_status_inner(&state).await;
+        assert_eq!(status.registered_count, 0);
+        assert!(status.loaded_model_id.is_none());
+        assert!(embedded_model_views(&state).await.is_empty());
+
+        // Import a model: it is registered but not loaded.
+        state
+            .embedded_engine
+            .register_path("/models/phi-3-mini.gguf")
+            .await;
+        let views = embedded_model_views(&state).await;
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].id, "phi-3-mini");
+        assert_eq!(views[0].path, "/models/phi-3-mini.gguf");
+        assert!(!views[0].loaded);
+
+        // Select (mark loaded): status reflects the loaded id.
+        *state.embedded_loaded_model.write().await = Some("phi-3-mini".to_string());
+        let status = embedded_model_status_inner(&state).await;
+        assert_eq!(status.registered_count, 1);
+        assert_eq!(status.loaded_model_id.as_deref(), Some("phi-3-mini"));
+        let views = embedded_model_views(&state).await;
+        assert!(views[0].loaded);
+
+        // Unload clears the loaded state but keeps the registry.
+        *state.embedded_loaded_model.write().await = None;
+        let status = embedded_model_status_inner(&state).await;
+        assert_eq!(status.registered_count, 1);
+        assert!(status.loaded_model_id.is_none());
+    }
+
+    /// The embedded-model DTOs are display-safe camelCase and carry no secret
+    /// material (the embedded engine needs no key).
+    #[test]
+    fn embedded_model_dtos_are_display_safe_camel_case() {
+        let view = EmbeddedModelView {
+            id: "phi-3-mini".to_string(),
+            path: "/models/phi-3-mini.gguf".to_string(),
+            loaded: true,
+        };
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"id\":\"phi-3-mini\""));
+        assert!(json.contains("\"path\""));
+        assert!(json.contains("\"loaded\":true"));
+
+        let status = EmbeddedModelStatus {
+            loaded_model_id: Some("phi-3-mini".to_string()),
+            registered_count: 2,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("\"loadedModelId\":\"phi-3-mini\""));
+        assert!(json.contains("\"registeredCount\":2"));
+        assert!(!json.to_lowercase().contains("secret"));
+        assert!(!json.to_lowercase().contains("apikey"));
     }
 }
