@@ -826,8 +826,20 @@ async fn set_local_runtime_inner(
     validate_nonempty("baseUrl", base_url, MAX_BASE_URL_LEN)?;
     let warning = check_provider_base_url(base_url)?;
 
+    // Load any existing row up front: it decides insert-vs-update below and,
+    // when this save carries no key, tells us which prior secret to delete so
+    // nothing is orphaned under the stable per-kind handle (keychain hygiene,
+    // Section 9.1).
+    let repo = ProviderRepo::new(state.session_manager.db());
+    let existing = repo
+        .get(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
     // (3) Store the optional API key as an opaque SecretRef; keyless local
-    // endpoints leave api_key_ref as None.
+    // endpoints leave api_key_ref as None. On a keyless save, delete any secret
+    // the previous row stored so it does not linger in the keychain unreferenced
+    // (the store is idempotent, so deleting a missing entry is a no-op).
     let api_key_ref = match api_key {
         Some(key) if !key.is_empty() => {
             if key.len() > MAX_SECRET_LEN {
@@ -842,7 +854,15 @@ async fn set_local_runtime_inner(
                     .map_err(|e| CommandError::internal(e.to_string()))?,
             )
         }
-        _ => None,
+        _ => {
+            if let Some(prior_ref) = existing.as_ref().and_then(|cfg| cfg.api_key_ref.as_ref()) {
+                state
+                    .secret_store
+                    .delete(prior_ref)
+                    .map_err(|e| CommandError::internal(e.to_string()))?;
+            }
+            None
+        }
     };
     let has_api_key = api_key_ref.is_some();
 
@@ -855,13 +875,7 @@ async fn set_local_runtime_inner(
         api_key_ref,
         extra: serde_json::Value::Null,
     };
-    let repo = ProviderRepo::new(state.session_manager.db());
-    if repo
-        .get(id)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?
-        .is_some()
-    {
+    if existing.is_some() {
         repo.update(&config)
             .await
             .map_err(|e| CommandError::internal(e.to_string()))?;
@@ -930,8 +944,10 @@ pub async fn clear_local_runtime(
 }
 
 /// The full body of [`clear_local_runtime`], factored out for direct testing.
-/// It resolves the stable per-kind id (rejecting non-configurable kinds) and
-/// deletes that row via [`ProviderRepo`]; deleting a missing row is a no-op.
+/// It resolves the stable per-kind id (rejecting non-configurable kinds),
+/// deletes any secret the row stored so no credential material is orphaned in
+/// the keychain (Section 9.1 keychain hygiene), then deletes the row via
+/// [`ProviderRepo`]; deleting a missing secret or row is a no-op.
 async fn clear_local_runtime_inner(
     state: &AppState,
     kind: ProviderKind,
@@ -941,8 +957,24 @@ async fn clear_local_runtime_inner(
             "only LmStudio and GenericOpenAI local runtimes can be configured here",
         )
     })?;
-    ProviderRepo::new(state.session_manager.db())
-        .delete(id)
+    let repo = ProviderRepo::new(state.session_manager.db());
+    // Resolve the row's stored SecretRef (if any) and delete the secret before
+    // dropping the row, so clearing a runtime never leaves the key behind under
+    // the stable per-kind handle. The store is idempotent (deleting a missing
+    // entry is not an error).
+    if let Some(config) = repo
+        .get(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?
+    {
+        if let Some(secret_ref) = config.api_key_ref.as_ref() {
+            state
+                .secret_store
+                .delete(secret_ref)
+                .map_err(|e| CommandError::internal(e.to_string()))?;
+        }
+    }
+    repo.delete(id)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))
 }
@@ -3276,5 +3308,104 @@ mod tests {
             .await
             .unwrap();
         assert!(list_local_runtimes_inner(&state).await.unwrap().is_empty());
+    }
+
+    /// Clearing a runtime deletes the stored secret as well as the config row,
+    /// so no credential material is orphaned in the keychain under the stable
+    /// per-kind handle. After a keyed save the secret is resolvable; after the
+    /// clear the same `SecretRef` must no longer resolve and the row is gone.
+    #[tokio::test]
+    async fn clear_local_runtime_inner_deletes_stored_secret() {
+        let state = test_state().await;
+        let plaintext = "sk-clear-me-do-not-leak";
+
+        set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "http://localhost:8080/v1",
+            Some(plaintext),
+        )
+        .await
+        .unwrap();
+
+        // Capture the SecretRef the save stored and confirm it resolves now.
+        let old_ref = {
+            let configs = ProviderRepo::new(state.session_manager.db())
+                .list()
+                .await
+                .unwrap();
+            let row = configs
+                .iter()
+                .find(|c| c.id == "generic-openai-local")
+                .unwrap();
+            row.api_key_ref.clone().unwrap()
+        };
+        assert_eq!(state.secret_store.resolve(&old_ref).unwrap(), plaintext);
+
+        clear_local_runtime_inner(&state, ProviderKind::GenericOpenAI)
+            .await
+            .unwrap();
+
+        // The config row is removed.
+        assert!(list_local_runtimes_inner(&state).await.unwrap().is_empty());
+        // The secret is no longer resolvable (deleted, not merely dereferenced).
+        assert!(matches!(
+            state.secret_store.resolve(&old_ref),
+            Err(SecretError::NotFound(_))
+        ));
+    }
+
+    /// Re-saving a runtime with NO key deletes the previously stored secret so
+    /// nothing lingers under the stable per-kind handle: after a keyed save
+    /// then a keyless re-save, the prior `SecretRef` no longer resolves and the
+    /// row's `api_key_ref` is `None`.
+    #[tokio::test]
+    async fn keyless_resave_deletes_prior_secret() {
+        let state = test_state().await;
+        let plaintext = "sk-first-key-do-not-leak";
+
+        set_local_runtime_inner(
+            &state,
+            ProviderKind::LmStudio,
+            "http://localhost:1234/v1",
+            Some(plaintext),
+        )
+        .await
+        .unwrap();
+
+        let old_ref = {
+            let configs = ProviderRepo::new(state.session_manager.db())
+                .list()
+                .await
+                .unwrap();
+            let row = configs.iter().find(|c| c.id == "lmstudio-local").unwrap();
+            row.api_key_ref.clone().unwrap()
+        };
+        assert_eq!(state.secret_store.resolve(&old_ref).unwrap(), plaintext);
+
+        // Re-save the same kind without a key.
+        let view = set_local_runtime_inner(
+            &state,
+            ProviderKind::LmStudio,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!view.has_api_key);
+
+        // The row no longer references a secret.
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let row = configs.iter().find(|c| c.id == "lmstudio-local").unwrap();
+        assert!(row.api_key_ref.is_none());
+
+        // The prior secret is no longer resolvable in the store.
+        assert!(matches!(
+            state.secret_store.resolve(&old_ref),
+            Err(SecretError::NotFound(_))
+        ));
     }
 }

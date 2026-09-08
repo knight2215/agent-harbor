@@ -231,10 +231,20 @@ pub async fn list_available_models(
         };
         let models = match instance.list_models().await {
             Ok(models) => models,
-            Err(_) => {
+            Err(err) => {
                 // This provider could not be enumerated (e.g. an unreachable
-                // local endpoint); skip it so the rest of the picker still
-                // populates instead of blanking the entire list.
+                // local endpoint, a bad key, or a wrong URL); skip it so the
+                // rest of the picker still populates instead of blanking the
+                // entire list. Emit the provider id and the error to stderr
+                // (the codebase's existing lightweight logging facility; no new
+                // dependency) so a genuine misconfiguration is diagnosable
+                // rather than silently indistinguishable from an offline
+                // endpoint. DISPLAY-SAFE: only the config id and the provider
+                // error are logged, never any resolved secret or key material.
+                eprintln!(
+                    "provider '{}' could not be enumerated and was skipped: {err}",
+                    cfg.id
+                );
                 continue;
             }
         };
