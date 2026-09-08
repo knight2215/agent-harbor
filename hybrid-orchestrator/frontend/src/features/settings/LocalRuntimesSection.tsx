@@ -25,6 +25,7 @@
 // ships now, so neither is "coming soon"; the informational note at the bottom
 // only lists genuinely-future runtimes (Hugging Face).
 
+import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import {
   clearLocalRuntime,
@@ -123,6 +124,28 @@ export function LocalRuntimesSection() {
       .then(() => listLocalRuntimes())
       .then((next) => setRuntimes(next))
       .catch((err: unknown) => setError(String(err)));
+  };
+
+  // Open the native OS file-open dialog (Explorer/Finder/GTK/Dolphin) filtered
+  // to `.gguf`, and drop the chosen absolute path into the existing `ggufPath`
+  // state so the Import/Select buttons work unchanged. `open()` resolves to the
+  // selected path string (single-file mode), or null when the user cancels
+  // (a no-op). `multiple` is false so the string[] branch of the return type
+  // never occurs, but we narrow defensively to keep TypeScript strict-clean.
+  const browseForModel = async () => {
+    setEmbeddedError(null);
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "GGUF model", extensions: ["gguf"] }],
+      });
+      if (typeof selected === "string") {
+        setGgufPath(selected);
+      }
+    } catch (err: unknown) {
+      setEmbeddedError(String(err));
+    }
   };
 
   // Import (register) the entered `.gguf` path with the embedded engine and
@@ -272,6 +295,14 @@ export function LocalRuntimesSection() {
             />
           </label>
           <div className="settings-form__actions">
+            <button
+              type="button"
+              onClick={() => void browseForModel()}
+              aria-label="Browse for embedded model file"
+              data-testid="embedded-model-browse"
+            >
+              Browse…
+            </button>
             <button
               type="button"
               onClick={importModel}

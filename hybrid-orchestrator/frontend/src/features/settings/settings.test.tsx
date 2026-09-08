@@ -20,6 +20,11 @@ vi.mock("@tauri-apps/plugin-updater", () => ({
 vi.mock("@tauri-apps/plugin-process", () => ({
   relaunch: vi.fn().mockResolvedValue(undefined),
 }));
+// The embedded engine "Browse…" button opens the native OS file dialog via the
+// dialog plugin; mock open() so the picker resolves synchronously in tests.
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: vi.fn(),
+}));
 
 import { Settings } from "./Settings";
 
@@ -113,8 +118,11 @@ describe("Settings", () => {
   });
 });
 
+import { open } from "@tauri-apps/plugin-dialog";
 import { LocalRuntimesSection } from "./LocalRuntimesSection";
 import type { EmbeddedModelStatus, EmbeddedModelView } from "../../types";
+
+const openMock = vi.mocked(open);
 
 function status(loadedModelId: string | null, registeredCount: number): EmbeddedModelStatus {
   return { loadedModelId, registeredCount };
@@ -127,6 +135,7 @@ function view(id: string, path: string, loaded: boolean): EmbeddedModelView {
 describe("LocalRuntimesSection embedded engine", () => {
   beforeEach(() => {
     invoke.mockReset();
+    openMock.mockReset();
     window.localStorage.clear();
   });
 
@@ -279,6 +288,55 @@ describe("LocalRuntimesSection embedded engine", () => {
     expect(await screen.findByTestId("embedded-status")).toHaveTextContent(
       "Active model: model.gguf",
     );
+  });
+
+  it("browses for a .gguf via the native dialog and fills the model-path input", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
+      if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
+      return Promise.resolve(undefined);
+    });
+    // The native file picker resolves to the chosen absolute path.
+    openMock.mockResolvedValue("/models/picked.gguf");
+    render(<LocalRuntimesSection />);
+
+    fireEvent.click(screen.getByTestId("embedded-model-browse"));
+
+    // The dialog is opened as a single-file picker filtered to `.gguf`.
+    await waitFor(() => {
+      expect(openMock).toHaveBeenCalledWith({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "GGUF model", extensions: ["gguf"] }],
+      });
+    });
+    // The chosen path is dropped into the existing model-path input so the
+    // Import/Select buttons work unchanged.
+    await waitFor(() => {
+      expect((screen.getByTestId("embedded-model-path") as HTMLInputElement).value).toBe(
+        "/models/picked.gguf",
+      );
+    });
+  });
+
+  it("leaves the model-path input unchanged when the file dialog is cancelled", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
+      if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
+      return Promise.resolve(undefined);
+    });
+    // Cancelling the picker resolves to null; the input stays empty (no-op).
+    openMock.mockResolvedValue(null);
+    render(<LocalRuntimesSection />);
+
+    fireEvent.click(screen.getByTestId("embedded-model-browse"));
+
+    await waitFor(() => {
+      expect(openMock).toHaveBeenCalled();
+    });
+    expect((screen.getByTestId("embedded-model-path") as HTMLInputElement).value).toBe("");
   });
 });
 
