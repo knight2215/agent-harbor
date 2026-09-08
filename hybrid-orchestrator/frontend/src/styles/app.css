@@ -215,8 +215,83 @@ body {
   display: flex;
   flex-direction: column;
   gap: var(--ah-space-4);
+  /* Cap the reading width but never let a wide child (e.g. the composer
+   * textarea) force the chat column past its grid track: min-width:0 lets the
+   * flex item shrink below its content's intrinsic width, mirroring the same
+   * pattern used by .app__main / .settings__panel / .conversation-list__open. */
+  min-width: 0;
   max-width: 880px;
   margin: 0 auto;
+  width: 100%;
+}
+
+/* --- Composer (message input) --------------------------------------------- */
+
+.composer {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+  /* Keep the form (and its textarea) inside the chat/grid track at any width. */
+  min-width: 0;
+}
+
+.composer__input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  /* Grow with content vertically only; never let a horizontal drag widen the
+   * grid track. */
+  resize: vertical;
+  min-height: 96px;
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text);
+  font: inherit;
+}
+
+.composer__input::placeholder {
+  color: var(--ah-text-faint);
+}
+
+.composer__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--ah-space-2);
+}
+
+.composer__stop,
+.composer__send {
+  padding: var(--ah-space-2) var(--ah-space-4);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface-2);
+  color: var(--ah-text-muted);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.composer__send {
+  border-color: transparent;
+  background: var(--ah-accent);
+  color: var(--ah-accent-contrast);
+}
+
+.composer__send:hover {
+  background: var(--ah-accent-strong);
+}
+
+.composer__stop:hover {
+  background: var(--ah-surface-hover);
+  color: var(--ah-text);
+}
+
+.composer__stop:disabled,
+.composer__send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* --- Segmented routing-mode control --------------------------------------- */
@@ -793,14 +868,53 @@ body {
 
 /* --- Responsive sidebar --------------------------------------------------- */
 
+/*
+ * At <=720px (split-screen / snapped-to-half windows) the shell is forced into
+ * the icon-only rail regardless of the user's toggle. This block must stay in
+ * FULL PARITY with the `.app[data-collapsed="true"]` rule set above: same
+ * narrowed grid track, same hidden elements (brand text, nav labels, history),
+ * same centered icons, and the same tightened rail padding. Every selector here
+ * mirrors a collapsed selector one-for-one and reuses the identical tokens, so
+ * the two collapse paths can't drift apart. If you change a collapsed rule
+ * above, change its twin here (and vice versa).
+ */
 @media (max-width: 720px) {
+  /* twin of: .app[data-collapsed="true"] */
   .app {
     grid-template-columns: var(--ah-sidebar-width-collapsed) 1fr;
   }
 
+  /* twin of: .app[data-collapsed="true"] .app__brand-text,
+   *          .app[data-collapsed="true"] .app__nav-label,
+   *          .app[data-collapsed="true"] .app__sidebar-history */
   .app .app__brand-text,
-  .app .app__nav-label {
+  .app .app__nav-label,
+  .app .app__sidebar-history {
     display: none;
+  }
+
+  /* twin of: .app[data-collapsed="true"] .app__nav-item */
+  .app .app__nav-item {
+    justify-content: center;
+    gap: 0;
+    padding: var(--ah-space-2);
+  }
+
+  /* twin of: .app[data-collapsed="true"] .app__brand */
+  .app .app__brand {
+    justify-content: center;
+  }
+
+  /* twin of: .app[data-collapsed="true"] .app__collapse */
+  .app .app__collapse {
+    align-self: center;
+  }
+
+  /* twin of: .app[data-collapsed="true"] .app__sidebar */
+  .app .app__sidebar {
+    padding-left: var(--ah-space-2);
+    padding-right: var(--ah-space-2);
+    align-items: stretch;
   }
 
   .settings {
