@@ -19,6 +19,7 @@ use futures_util::StreamExt;
 use providers::adapters::azure_openai::build_azure_openai;
 use providers::adapters::generic_openai::build_generic_openai;
 use providers::adapters::lmstudio::build_lmstudio;
+use providers::adapters::ollama::build_ollama;
 use providers::adapters::openai::build_openai;
 use providers::{
     ensure_crypto_provider, negotiate, Capabilities, ChatMessage, ChatProvider, ChatRequest,
@@ -207,6 +208,122 @@ async fn lmstudio_sends_no_authorization_header() {
         resp.choices[0].message.content.as_deref(),
         Some("Hello there")
     );
+}
+
+// ---------------------------------------------------------------------------
+// Ollama
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ollama_discovers_models_via_api_tags() {
+    ensure_crypto_provider();
+    let server = MockServer::start().await;
+    let store = InMemorySecretStore::new();
+
+    // Ollama's native discovery endpoint is `GET /api/tags` on the SERVER ROOT
+    // (not under /v1), returning `{"models":[{"name":...}]}`.
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{"name": "llama3.1:8b"}, {"name": "qwen2.5:7b"}]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    // Point the chat base_url at `{server}/v1` so the tags-root strip resolves
+    // back to the server root that hosts `/api/tags`.
+    let cfg = ProviderConfig {
+        id: "ollama".to_string(),
+        kind: ProviderKind::Ollama,
+        base_url: Some(format!("{}/v1", server.uri())),
+        api_key_ref: None,
+        extra: Value::Null,
+    };
+    let adapter = build_ollama(&cfg, &store).unwrap();
+    let models = adapter.list_models().await.unwrap();
+    let ids: Vec<_> = models.into_iter().map(|m| m.id).collect();
+    assert_eq!(
+        ids,
+        vec!["llama3.1:8b".to_string(), "qwen2.5:7b".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn ollama_chat_sends_no_authorization_header() {
+    ensure_crypto_provider();
+    let server = MockServer::start().await;
+    let store = InMemorySecretStore::new();
+
+    // The OpenAI-compatible chat path lives under /v1, so the request lands on
+    // `{server}/v1/chat/completions`. Assert no Authorization header (local
+    // path uses AuthStrategy::None by default).
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(|req: &Request| {
+            assert!(
+                req.headers.get("authorization").is_none(),
+                "Ollama must not send an Authorization header by default"
+            );
+            ResponseTemplate::new(200).set_body_json(chat_completion_fixture())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cfg = ProviderConfig {
+        id: "ollama".to_string(),
+        kind: ProviderKind::Ollama,
+        base_url: Some(format!("{}/v1", server.uri())),
+        api_key_ref: None,
+        extra: Value::Null,
+    };
+    let adapter = build_ollama(&cfg, &store).unwrap();
+    let resp = adapter.chat(simple_request("llama3.1:8b")).await.unwrap();
+    assert_eq!(
+        resp.choices[0].message.content.as_deref(),
+        Some("Hello there")
+    );
+}
+
+#[tokio::test]
+async fn ollama_streaming_normalizes_sse_into_ordered_deltas() {
+    ensure_crypto_provider();
+    let server = MockServer::start().await;
+    let store = InMemorySecretStore::new();
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_fixture()),
+        )
+        .mount(&server)
+        .await;
+
+    let cfg = ProviderConfig {
+        id: "ollama".to_string(),
+        kind: ProviderKind::Ollama,
+        base_url: Some(format!("{}/v1", server.uri())),
+        api_key_ref: None,
+        extra: Value::Null,
+    };
+    let adapter = build_ollama(&cfg, &store).unwrap();
+
+    let mut req = simple_request("llama3.1:8b");
+    req.stream = true;
+    let deltas: Vec<_> = adapter
+        .chat_stream(req)
+        .await
+        .unwrap()
+        .map(|d| d.unwrap())
+        .collect()
+        .await;
+
+    let contents: Vec<_> = deltas.iter().filter_map(|d| d.content.clone()).collect();
+    assert_eq!(contents, vec!["Hel".to_string(), "lo".to_string()]);
+    assert!(deltas.iter().any(|d| d.finish_reason.is_some()));
 }
 
 // ---------------------------------------------------------------------------

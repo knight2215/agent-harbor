@@ -356,6 +356,7 @@ pub enum ProviderKind {
     Azure,
     LmStudio,
     GenericOpenAI,
+    Ollama,
 }
 
 #[cfg(test)]
@@ -369,6 +370,8 @@ mod tests {
         assert_eq!(json, "\"lmStudio\"");
         let json = serde_json::to_string(&ProviderKind::GenericOpenAI).unwrap();
         assert_eq!(json, "\"genericOpenAI\"");
+        let json = serde_json::to_string(&ProviderKind::Ollama).unwrap();
+        assert_eq!(json, "\"ollama\"");
     }
 
     #[test]

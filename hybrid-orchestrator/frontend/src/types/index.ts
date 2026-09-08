@@ -47,7 +47,7 @@ export type RoutingMode = "auto" | "preferLocal" | "preferQuality" | "manual";
 
 /** The supported provider families. Mirrors Rust `ProviderKind`. */
 export type ProviderKind =
-  "openAI" | "anthropic" | "bedrock" | "gemini" | "azure" | "lmStudio" | "genericOpenAI";
+  "openAI" | "anthropic" | "bedrock" | "gemini" | "azure" | "lmStudio" | "genericOpenAI" | "ollama";
 
 /** Permission gate applied to an MCP server's tool invocations. Mirrors Rust `PermissionMode`. */
 export type PermissionMode = "ask" | "allow" | "deny";

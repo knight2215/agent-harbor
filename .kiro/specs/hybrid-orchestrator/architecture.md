@@ -374,6 +374,7 @@ The `api_key_ref` is a handle the core resolves against the keystore at call tim
 | --- | --- | --- | --- |
 | **OpenAI** | OpenAI Chat Completions (native) | Direct: pass through with minimal mapping | `base_url` default `https://api.openai.com/v1`, `api_key_ref` |
 | **LM Studio (local)** | OpenAI-compatible (native) | Direct: same code path as OpenAI adapter, different base URL | `base_url` default `http://localhost:1234/v1`, usually no key |
+| **Ollama (local)** | OpenAI-compatible (native) chat + native model discovery | Direct for chat/streaming (same code path as OpenAI adapter, different base URL); `list_models` overridden to call Ollama's native `GET /api/tags` at the server root (not `/v1`) | `base_url` default `http://localhost:11434/v1`, no key; treated as a local provider like LM Studio |
 | **Azure OpenAI** | OpenAI-compatible with deployment routing | Near-direct: rewrite path to `/openai/deployments/{deployment}/chat/completions`, add `api-version` query and `api-key` header | `extra.deployment`, `extra.api_version`, `base_url` = resource endpoint |
 | **Anthropic** | Messages API (`/v1/messages`) | Translation shim: map roles, split system prompt to top-level `system`, map tool schema to Anthropic `tools`, translate SSE deltas | `base_url` default `https://api.anthropic.com`, `anthropic-version` header |
 | **Google Gemini** | `generateContent` / `streamGenerateContent` | Translation shim: map messages to `contents`/`parts`, map tools to `functionDeclarations`, translate streamed chunks | `extra.project`, key or OAuth per config |
@@ -381,10 +382,10 @@ The `api_key_ref` is a handle the core resolves against the keystore at call tim
 
 Adapters fall into two families:
 
-- **Native OpenAI-compatible** (OpenAI, LM Studio, Azure OpenAI, and any user-supplied `GenericOpenAI` endpoint): reuse a shared HTTP + SSE client with thin differences (path/header rewriting for Azure).
+- **Native OpenAI-compatible** (OpenAI, LM Studio, Ollama, Azure OpenAI, and any user-supplied `GenericOpenAI` endpoint): reuse a shared HTTP + SSE client with thin differences (path/header rewriting for Azure; Ollama additionally overrides model discovery to its native `GET /api/tags` endpoint at the server root).
 - **Translation shims** (Anthropic Messages API, Gemini `generateContent`, Bedrock SigV4 and per-model bodies): implement request/response translation and stream normalization so the rest of the system sees the OpenAI-compatible shape.
 
-Because LM Studio speaks the native format, local inference uses the exact same code path as OpenAI with only `base_url` differing. This is deliberate: it keeps the local path simple and reliable.
+Because LM Studio speaks the native format, local inference uses the exact same code path as OpenAI with only `base_url` differing. This is deliberate: it keeps the local path simple and reliable. Ollama is handled the same way for chat and streaming (OpenAI-compatible at `http://localhost:11434/v1`), with one addition: because Ollama does not surface installed models under the OpenAI `/v1/models` path, its adapter overrides `list_models` to call the native `GET /api/tags` endpoint (rooted at the server root, not `/v1`, and returning `{"models":[{"name":...}]}`). Like LM Studio, Ollama is classified as a local provider for the routing privacy gate and seeded at zero token price, so discovered Ollama models surface under Local in the model picker.
 
 On AWS Bedrock credentials specifically: to stay consistent with the keystore-only invariant in Section 9.1, AWS access keys entered in the app are stored as a `SecretRef` in the OS keychain exactly like every other provider's key, and the Bedrock adapter resolves them through that `SecretRef` at call time. The standard AWS credential provider chain (environment variables, shared config/profile, and instance or SSO roles) remains an optional secondary path for users who already manage AWS credentials outside the app; when that path is used no secret enters the app at all, so it does not weaken the "no secret material outside the keychain" invariant. In both cases the raw credentials never cross the IPC boundary.
 
