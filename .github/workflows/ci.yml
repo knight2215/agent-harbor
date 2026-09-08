@@ -430,8 +430,10 @@ jobs:
       # The C/C++ build toolchain the `llama-cpp-2` binding needs to compile the
       # bundled llama.cpp: CMake, a C++ compiler, and libclang (the binding uses
       # bindgen). Ubuntu installs them via apt; Windows runners already ship
-      # MSVC + CMake, and LLVM/libclang is preinstalled at $env:LLVM_PATH, which
-      # bindgen discovers via LIBCLANG_PATH.
+      # MSVC + CMake, and LLVM/libclang is preinstalled at
+      # C:\Program Files\LLVM on the hosted windows-latest runner. There is no
+      # $env:LLVM_PATH defined there, so we point LIBCLANG_PATH at that concrete
+      # bin directory, which bindgen discovers.
       - name: Install llama.cpp build toolchain (Linux)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -441,7 +443,7 @@ jobs:
 
       - name: Set up LIBCLANG_PATH (Windows)
         if: matrix.os == 'windows-latest'
-        run: echo "LIBCLANG_PATH=$env:LLVM_PATH\bin" >> $env:GITHUB_ENV
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
         working-directory: .
 
       - name: Cache cargo registry and build artifacts
