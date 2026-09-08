@@ -209,6 +209,23 @@ export interface ProviderConfig {
 }
 
 /**
+ * A display-safe view of one configured local runtime (LM Studio / generic
+ * OpenAI-compatible endpoint), returned by the `set_local_runtime` /
+ * `list_local_runtimes` commands. Mirrors Rust
+ * `commands::LocalRuntimeConfigView`. `hasApiKey` reports only WHETHER a key is
+ * stored (as an opaque {@link SecretRef}), never the key itself; `warning`
+ * carries the optional display-safe base-url advisory from the backend's
+ * `check_provider_base_url` validation (null when there is none).
+ */
+export interface LocalRuntimeConfig {
+  id: string;
+  kind: ProviderKind;
+  baseUrl: string;
+  hasApiKey: boolean;
+  warning: string | null;
+}
+
+/**
  * Per-model capability descriptor. Mirrors Rust `providers::Capabilities`
  * (architecture.md Section 4.1). Rust uses `#[serde(rename_all = "camelCase")]`,
  * so `json_mode` -> `jsonMode` and `max_context` -> `maxContext`.

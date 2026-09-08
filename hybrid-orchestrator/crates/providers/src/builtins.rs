@@ -210,6 +210,11 @@ where
 /// instance without a matching config row is skipped (it cannot be priced or
 /// attributed to a kind).
 ///
+/// Enumeration is fault-tolerant: an instance whose `list_models` errors (for
+/// example an unreachable or misconfigured local endpoint) is skipped rather
+/// than aborting the whole call, so one offline provider degrades gracefully
+/// and the remaining providers still populate the picker.
+///
 /// Because it drives the trait method, tests inject a fake [`ChatProvider`]
 /// whose `list_models` returns a fixed list, so no live network is required.
 pub async fn list_available_models(
@@ -224,7 +229,25 @@ pub async fn list_available_models(
             // nothing to enumerate.
             continue;
         };
-        let models = instance.list_models().await?;
+        let models = match instance.list_models().await {
+            Ok(models) => models,
+            Err(err) => {
+                // This provider could not be enumerated (e.g. an unreachable
+                // local endpoint, a bad key, or a wrong URL); skip it so the
+                // rest of the picker still populates instead of blanking the
+                // entire list. Emit the provider id and the error to stderr
+                // (the codebase's existing lightweight logging facility; no new
+                // dependency) so a genuine misconfiguration is diagnosable
+                // rather than silently indistinguishable from an offline
+                // endpoint. DISPLAY-SAFE: only the config id and the provider
+                // error are logged, never any resolved secret or key material.
+                eprintln!(
+                    "provider '{}' could not be enumerated and was skipped: {err}",
+                    cfg.id
+                );
+                continue;
+            }
+        };
         for model in models {
             let capabilities = instance.capabilities(&model.id);
             let price = pricing.price_for(cfg.kind, &model.id);
@@ -255,6 +278,10 @@ mod tests {
         id: String,
         models: Vec<ModelInfo>,
         caps: Capabilities,
+        /// When true, `list_models` returns an error instead of the fixed list,
+        /// modelling an unreachable/misconfigured endpoint so the softened
+        /// enumeration path (skip-on-error) can be exercised.
+        list_models_errors: bool,
     }
 
     #[async_trait]
@@ -266,6 +293,9 @@ mod tests {
             self.caps
         }
         async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            if self.list_models_errors {
+                return Err(ProviderError::Transport("endpoint unreachable".to_string()));
+            }
             Ok(self.models.clone())
         }
         async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, ProviderError> {
@@ -364,11 +394,13 @@ mod tests {
             id: "openai".to_string(),
             models: vec![ModelInfo::new("gpt-4o"), ModelInfo::new("gpt-4o-mini")],
             caps: cloud_caps,
+            list_models_errors: false,
         }));
         registry.insert_instance(Arc::new(FakeProvider {
             id: "local".to_string(),
             models: vec![ModelInfo::new("llama-3.1-8b")],
             caps: Capabilities::default(),
+            list_models_errors: false,
         }));
 
         let configs = vec![
@@ -417,12 +449,53 @@ mod tests {
             id: "ghost".to_string(),
             models: vec![ModelInfo::new("m")],
             caps: Capabilities::default(),
+            list_models_errors: false,
         }));
         // No config row references "ghost", so nothing is listed.
         let out = list_available_models(&registry, &[], &PricingTable::new())
             .await
             .unwrap();
         assert!(out.is_empty());
+    }
+
+    /// A single provider whose `list_models` errors (an unreachable/offline
+    /// local endpoint) is skipped rather than aborting the whole enumeration:
+    /// `list_available_models` still returns the healthy provider's models and
+    /// does not error. This proves the softened, fault-tolerant loop.
+    #[tokio::test]
+    async fn enumeration_skips_a_provider_that_errors_and_returns_the_rest() {
+        let mut registry = builtin_registry();
+
+        // A healthy provider that enumerates fine.
+        registry.insert_instance(Arc::new(FakeProvider {
+            id: "healthy".to_string(),
+            models: vec![ModelInfo::new("gpt-4o")],
+            caps: Capabilities::default(),
+            list_models_errors: false,
+        }));
+        // An offline local endpoint whose enumeration fails.
+        registry.insert_instance(Arc::new(FakeProvider {
+            id: "offline-local".to_string(),
+            models: vec![ModelInfo::new("llama-3.1-8b")],
+            caps: Capabilities::default(),
+            list_models_errors: true,
+        }));
+
+        let configs = vec![
+            config("healthy", ProviderKind::OpenAI),
+            config("offline-local", ProviderKind::LmStudio),
+        ];
+
+        let models = list_available_models(&registry, &configs, &PricingTable::new())
+            .await
+            .expect("one failing provider must not abort the whole enumeration");
+
+        // Only the healthy provider's model is returned; the failing one is
+        // silently skipped.
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].provider_id, "healthy");
+        assert_eq!(models[0].model, "gpt-4o");
+        assert!(!models.iter().any(|m| m.provider_id == "offline-local"));
     }
 
     #[test]

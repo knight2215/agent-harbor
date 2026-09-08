@@ -368,6 +368,8 @@ pub struct ProviderConfig {
 
 The `api_key_ref` is a handle the core resolves against the keystore at call time. The raw key is never stored in this struct and never crosses IPC.
 
+For local runtimes (LM Studio and generic OpenAI-compatible endpoints), the `set_local_runtime` command writes this `ProviderConfig` from the Local Runtimes settings surface: it validates the entered `base_url` through the Section 9.3 posture (`check_provider_base_url`) before persisting and upserts by a stable per-kind id, so a configured local endpoint enumerates its models under Local and routes like any other provider.
+
 ### 4.3 Mapping the six targets onto the contract
 
 | Provider | Native wire format | Adapter strategy | Notable config |
@@ -739,6 +741,7 @@ All five surfaces are React feature modules. Each calls the core through typed I
 - **Loopback binding**: local inference targets `http://localhost:1234/v1` (or a user-set loopback URL). The default and validation encourage `localhost`/`127.0.0.1` so traffic stays on the machine.
 - **Plaintext vs TLS tradeoff**: LM Studio's local server is typically plaintext HTTP on loopback. Because traffic never leaves the host, plaintext on loopback is acceptable; if a user points the base URL at a non-loopback host, the UI warns and recommends TLS, since plaintext off-host would expose prompts on the network.
 - **SSRF and loopback considerations**: user-supplied base URLs (for LM Studio and any generic OpenAI-compatible provider) are validated. The app distinguishes loopback from remote hosts, warns on remote non-TLS targets, and blocks obviously dangerous internal targets where feasible. Because the core (not the frontend) makes these calls, the webview cannot be tricked into arbitrary requests: the set of reachable endpoints is limited to configured providers and MCP servers.
+- **Validation on the write path**: this validation (`check_provider_base_url`) now runs when a Local Runtimes base URL is saved through the `set_local_runtime` command, which persists it into a `ProviderConfig`. A blocked URL rejects the save (persisting nothing) and an accepted non-loopback plaintext URL returns a non-blocking warning; the seam is no longer dead code awaiting a caller.
 - **No implicit key on local**: the LM Studio adapter does not require or send an API key by default, avoiding accidental credential exposure to a local process.
 
 ### 9.4 MCP server sandboxing and permission prompts

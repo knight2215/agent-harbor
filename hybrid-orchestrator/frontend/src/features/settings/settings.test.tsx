@@ -134,6 +134,7 @@ describe("LocalRuntimesSection embedded engine", () => {
     // The mount-time probes resolve to an empty engine (no imports, nothing
     // selected).
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
       if (cmd === "list_embedded_models") return Promise.resolve([]);
       if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
       return Promise.resolve(undefined);
@@ -157,6 +158,7 @@ describe("LocalRuntimesSection embedded engine", () => {
     // A prior-session import is returned by list_embedded_models; the status
     // probe reports it as the active model.
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
       if (cmd === "list_embedded_models") {
         return Promise.resolve([view("phi-3-mini", "/models/phi-3-mini.gguf", true)]);
       }
@@ -178,6 +180,7 @@ describe("LocalRuntimesSection embedded engine", () => {
 
   it("imports a local .gguf and lists it", async () => {
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
       if (cmd === "list_embedded_models") return Promise.resolve([]);
       if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
       if (cmd === "import_embedded_model") {
@@ -206,6 +209,7 @@ describe("LocalRuntimesSection embedded engine", () => {
   it("loads a selected .gguf and reflects the loaded status, then unloads", async () => {
     let loaded = false;
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
       if (cmd === "list_embedded_models") return Promise.resolve([]);
       if (cmd === "embedded_model_status") {
         return Promise.resolve(loaded ? status("model.gguf", 1) : status(null, loaded ? 1 : 0));
@@ -249,6 +253,7 @@ describe("LocalRuntimesSection embedded engine", () => {
 
   it("loads an already-imported model by id from the list", async () => {
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
       if (cmd === "list_embedded_models") return Promise.resolve([]);
       if (cmd === "embedded_model_status") return Promise.resolve(status(null, 1));
       if (cmd === "import_embedded_model") {
@@ -274,5 +279,168 @@ describe("LocalRuntimesSection embedded engine", () => {
     expect(await screen.findByTestId("embedded-status")).toHaveTextContent(
       "Active model: model.gguf",
     );
+  });
+});
+
+import type { LocalRuntimeConfig, ProviderKind } from "../../types";
+
+function runtime(
+  kind: ProviderKind,
+  baseUrl: string,
+  warning: string | null = null,
+  hasApiKey = false,
+): LocalRuntimeConfig {
+  const id = kind === "lmStudio" ? "lmstudio-local" : "generic-openai-local";
+  return { id, kind, baseUrl, hasApiKey, warning };
+}
+
+describe("LocalRuntimesSection OpenAI-compatible runtimes", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    window.localStorage.clear();
+  });
+
+  it("saves the LM Studio form via set_local_runtime with a null key and reflects it", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
+      if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
+      if (cmd === "set_local_runtime") {
+        return Promise.resolve(runtime("lmStudio", "http://localhost:1234/v1"));
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<LocalRuntimesSection />);
+
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "http://localhost:1234/v1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save runtime" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_local_runtime", {
+        kind: "lmStudio",
+        baseUrl: "http://localhost:1234/v1",
+        apiKey: null,
+      });
+    });
+    // The configured runtime is reflected as a persistent line.
+    expect(await screen.findByTestId("local-runtime-configured-lmStudio")).toHaveTextContent(
+      "LM Studio configured at http://localhost:1234/v1",
+    );
+    // The (optional) key field is cleared after saving.
+    expect((screen.getByLabelText("API key (optional)") as HTMLInputElement).value).toBe("");
+  });
+
+  it("displays the backend warning for an accepted plaintext non-loopback URL", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
+      if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
+      if (cmd === "set_local_runtime") {
+        return Promise.resolve(
+          runtime(
+            "genericOpenAI",
+            "http://192.168.1.10:1234/v1",
+            "This endpoint uses plaintext http over a non-loopback address.",
+          ),
+        );
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<LocalRuntimesSection />);
+
+    fireEvent.change(screen.getByLabelText("Runtime"), { target: { value: "genericOpenAI" } });
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "http://192.168.1.10:1234/v1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save runtime" }));
+
+    // The warning is shown without blocking the save (the runtime is still
+    // configured).
+    expect(await screen.findByTestId("local-runtime-warning")).toHaveTextContent(
+      "This endpoint uses plaintext http over a non-loopback address.",
+    );
+    expect(await screen.findByTestId("local-runtime-configured-genericOpenAI")).toBeInTheDocument();
+  });
+
+  it("shows an error and persists nothing when the base URL is blocked", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
+      if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
+      if (cmd === "set_local_runtime") {
+        return Promise.reject("base_url resolves to a blocked internal host");
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<LocalRuntimesSection />);
+
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "http://169.254.169.254/v1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save runtime" }));
+
+    // The rejection surfaces as a visible validation error.
+    expect(await screen.findByTestId("local-runtime-error")).toHaveTextContent(
+      "base_url resolves to a blocked internal host",
+    );
+    // Nothing is configured (no runtime line rendered).
+    expect(screen.queryByTestId("local-runtime-configured-lmStudio")).not.toBeInTheDocument();
+  });
+
+  it("rehydrates configured runtimes on mount and persists across unmount/remount", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") {
+        return Promise.resolve([runtime("lmStudio", "http://localhost:1234/v1")]);
+      }
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
+      if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
+      return Promise.resolve(undefined);
+    });
+    render(<LocalRuntimesSection />);
+
+    // The configured runtime is shown from the mount-time rehydration.
+    expect(await screen.findByTestId("local-runtime-configured-lmStudio")).toHaveTextContent(
+      "LM Studio configured at http://localhost:1234/v1",
+    );
+    expect(invoke).toHaveBeenCalledWith("list_local_runtimes");
+
+    // Simulate navigating away and back: unmount, then mount a fresh tree
+    // (which resets in-component state to defaults). It rehydrates from the
+    // backend source of truth.
+    cleanup();
+    render(<LocalRuntimesSection />);
+    expect(await screen.findByTestId("local-runtime-configured-lmStudio")).toHaveTextContent(
+      "LM Studio configured at http://localhost:1234/v1",
+    );
+  });
+
+  it("clears a configured runtime via clear_local_runtime and removes the line", async () => {
+    let configured = true;
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") {
+        return Promise.resolve(configured ? [runtime("lmStudio", "http://localhost:1234/v1")] : []);
+      }
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
+      if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
+      if (cmd === "clear_local_runtime") {
+        configured = false;
+        return Promise.resolve(undefined);
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<LocalRuntimesSection />);
+
+    const clear = await screen.findByTestId("local-runtime-clear-lmStudio");
+    fireEvent.click(clear);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("clear_local_runtime", { kind: "lmStudio" });
+    });
+    // The configured line is removed after the refreshed list comes back empty.
+    await waitFor(() => {
+      expect(screen.queryByTestId("local-runtime-configured-lmStudio")).not.toBeInTheDocument();
+    });
   });
 });

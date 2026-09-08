@@ -593,9 +593,9 @@ fn is_loopback_endpoint(url: &str) -> bool {
 
 /// Whether `url` uses TLS (an `https://` or `wss://` scheme). Absent or
 /// plaintext schemes (`http://`, none) are treated as NOT TLS.
-// Reachable only through `check_provider_base_url`, the not-yet-wired
-// provider-config write seam (see its doc comment); exercised by the unit tests.
-#[cfg_attr(not(test), allow(dead_code))]
+///
+/// Reached through `check_provider_base_url`, the provider-config write seam
+/// that `set_local_runtime` now exercises on a non-test path.
 fn is_tls_scheme(url: &str) -> bool {
     let scheme = url.split_once("://").map(|(s, _)| s).unwrap_or("");
     scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss")
@@ -612,9 +612,9 @@ fn is_tls_scheme(url: &str) -> bool {
 ///
 /// These are never a real inference endpoint; reaching them is almost always an
 /// SSRF-shaped mistake, so we block them conservatively.
-// Reachable only through `check_provider_base_url`, the not-yet-wired
-// provider-config write seam (see its doc comment); exercised by the unit tests.
-#[cfg_attr(not(test), allow(dead_code))]
+///
+/// Reached through `check_provider_base_url`, the provider-config write seam
+/// that `set_local_runtime` now exercises on a non-test path.
 fn is_blocked_internal_host(host: &str) -> bool {
     // IPv4 link-local 169.254.0.0/16 (covers the 169.254.169.254 metadata IP).
     if let Some(rest) = host.strip_prefix("169.254.") {
@@ -642,9 +642,9 @@ fn is_blocked_internal_host(host: &str) -> bool {
 
 /// The outcome of validating a user-supplied provider `base_url` against the
 /// Section 9.3 local-network posture.
-// Produced only through `check_provider_base_url`, the not-yet-wired
-// provider-config write seam (see its doc comment); exercised by the unit tests.
-#[cfg_attr(not(test), allow(dead_code))]
+///
+/// Produced through `check_provider_base_url`, the provider-config write seam
+/// that `set_local_runtime` now exercises on a non-test path.
 #[derive(Debug, PartialEq, Eq)]
 enum BaseUrlVerdict {
     /// A loopback endpoint (`localhost` / `127.0.0.1` / `[::1]`). Accept
@@ -681,9 +681,9 @@ enum BaseUrlVerdict {
 ///   - non-loopback host over plaintext `http://` (or no scheme) => accept, but
 ///     WARN and recommend TLS (private RFC-1918 LAN endpoints legitimate LM
 ///     Studio setups use land here: warned, never blocked).
-// Reachable only through `check_provider_base_url`, the not-yet-wired
-// provider-config write seam (see its doc comment); exercised by the unit tests.
-#[cfg_attr(not(test), allow(dead_code))]
+///
+/// Reached through `check_provider_base_url`, the provider-config write seam
+/// that `set_local_runtime` now exercises on a non-test path.
 fn validate_base_url(url: &str) -> BaseUrlVerdict {
     let host = extract_host(url);
     if host.is_empty() {
@@ -717,18 +717,266 @@ fn validate_base_url(url: &str) -> BaseUrlVerdict {
 ///
 /// # Enforcement seam (Section 9.3)
 ///
-/// No `#[tauri::command]` currently accepts a raw provider `base_url` from the
-/// webview (providers are seeded through [`persistence::ProviderRepo`], not an
-/// IPC command), so this is the enforcement point wherever a provider-config
-/// create/update command is added: call it before `ProviderRepo::insert` /
-/// `ProviderRepo::update`. It is fully covered by the unit tests below.
-#[cfg_attr(not(test), allow(dead_code))]
+/// [`set_local_runtime`] is the `#[tauri::command]` that accepts a raw provider
+/// `base_url` from the webview, so this is the enforcement point on that write
+/// path: it is called before `ProviderRepo::insert` / `ProviderRepo::update` so
+/// a blocked target is rejected before the value reaches the core. It is also
+/// covered by the unit tests below.
 fn check_provider_base_url(url: &str) -> Result<Option<String>, CommandError> {
     match validate_base_url(url) {
         BaseUrlVerdict::AcceptLoopback | BaseUrlVerdict::AcceptTls => Ok(None),
         BaseUrlVerdict::AcceptWithWarning(warning) => Ok(Some(warning)),
         BaseUrlVerdict::Blocked(reason) => Err(CommandError::invalid(reason)),
     }
+}
+
+// --- Local runtime configuration (Section 9.3 write path) ------------------
+
+/// Upper bound on a user-supplied provider `base_url` (Section 9.2 "bounds").
+const MAX_BASE_URL_LEN: usize = 2_048;
+
+/// The stable persisted [`ProviderConfig::id`] for a user-configurable local
+/// runtime kind. Keying on a fixed id PER KIND makes [`set_local_runtime`] an
+/// idempotent upsert: re-saving the same kind UPDATES the one row instead of
+/// inserting a duplicate, and [`list_local_runtimes`] / [`clear_local_runtime`]
+/// can address the row without tracking a generated id. Only the two
+/// user-configurable local kinds have an id; every other kind returns `None`
+/// (Ollama ships with its own default, Embedded is owned by the embedded
+/// lifecycle commands under [`EMBEDDED_PROVIDER_ID`], and cloud kinds are not
+/// configured here). The ids are distinct from [`EMBEDDED_PROVIDER_ID`].
+fn local_runtime_config_id(kind: ProviderKind) -> Option<&'static str> {
+    match kind {
+        ProviderKind::LmStudio => Some("lmstudio-local"),
+        ProviderKind::GenericOpenAI => Some("generic-openai-local"),
+        _ => None,
+    }
+}
+
+/// A display-safe view of a configured local runtime for the webview. Carries
+/// only non-secret fields (Section 9.1): the plaintext API key and any resolved
+/// secret NEVER cross this boundary. `has_api_key` reports only WHETHER a key is
+/// stored (as an opaque [`SecretRef`]), never the key itself; `warning` carries
+/// the optional display-safe base_url advisory from [`check_provider_base_url`].
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalRuntimeConfigView {
+    /// The stable per-kind config id (see [`local_runtime_config_id`]).
+    pub id: String,
+    /// The provider kind (LmStudio or GenericOpenAI).
+    pub kind: ProviderKind,
+    /// The persisted, validated base_url.
+    pub base_url: String,
+    /// Whether an API key is stored (as an opaque `SecretRef`), never the key.
+    pub has_api_key: bool,
+    /// Optional display-safe advisory (e.g. non-loopback plaintext HTTP), only
+    /// surfaced on the write path; `None` when rehydrating existing rows.
+    pub warning: Option<String>,
+}
+
+/// Persist (upsert) a user-configured local runtime: an OpenAI-compatible
+/// server the user runs themselves (LM Studio or a generic OpenAI-compatible
+/// endpoint). The entered `base_url` is validated through the Section 9.3
+/// posture ([`check_provider_base_url`]) and the config is written through
+/// [`ProviderRepo`], so the existing adapters, locality classifier, and routing
+/// pick it up with no further changes.
+///
+/// The optional `api_key` is stored straight into the keystore and referenced
+/// only as an opaque [`SecretRef`]; it never comes back across IPC. Tauri maps
+/// the snake_case params to camelCase over the wire (`baseUrl`, `apiKey`).
+#[tauri::command]
+pub async fn set_local_runtime(
+    state: tauri::State<'_, AppState>,
+    kind: ProviderKind,
+    base_url: String,
+    api_key: Option<String>,
+) -> Result<LocalRuntimeConfigView, CommandError> {
+    set_local_runtime_inner(&state, kind, &base_url, api_key.as_deref()).await
+}
+
+/// The full validate-then-store-then-upsert body of [`set_local_runtime`],
+/// factored out so it can be driven directly in tests without a live Tauri
+/// `State` (the `set_provider_secret_inner` testability pattern).
+///
+/// It (1) accepts ONLY the user-configurable local kinds (LmStudio,
+/// GenericOpenAI), rejecting anything else with [`CommandError::invalid`]; (2)
+/// trims and validates `base_url` via [`check_provider_base_url`], propagating a
+/// Blocked target as an error before anything is persisted and capturing the
+/// optional display-safe warning; (3) stores a non-empty `api_key` through the
+/// same secret store as [`set_provider_secret`], keeping only the opaque
+/// [`SecretRef`]; and (4) upserts the [`ProviderConfig`] by its stable per-kind
+/// id (get -> update | insert), so re-saving the same kind never duplicates the
+/// row. It returns a display-safe [`LocalRuntimeConfigView`] and NEVER the key.
+async fn set_local_runtime_inner(
+    state: &AppState,
+    kind: ProviderKind,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<LocalRuntimeConfigView, CommandError> {
+    // (1) Only LM Studio and generic OpenAI-compatible runtimes are
+    // user-configurable here.
+    let id = local_runtime_config_id(kind).ok_or_else(|| {
+        CommandError::invalid(
+            "only LmStudio and GenericOpenAI local runtimes can be configured here",
+        )
+    })?;
+
+    // (2) Validate the base_url against the Section 9.3 posture before it
+    // reaches the core; a Blocked target errors and persists nothing.
+    let base_url = base_url.trim();
+    validate_nonempty("baseUrl", base_url, MAX_BASE_URL_LEN)?;
+    let warning = check_provider_base_url(base_url)?;
+
+    // Load any existing row up front: it decides insert-vs-update below and,
+    // when this save carries no key, tells us which prior secret to delete so
+    // nothing is orphaned under the stable per-kind handle (keychain hygiene,
+    // Section 9.1).
+    let repo = ProviderRepo::new(state.session_manager.db());
+    let existing = repo
+        .get(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // (3) Store the optional API key as an opaque SecretRef; keyless local
+    // endpoints leave api_key_ref as None. On a keyless save, delete any secret
+    // the previous row stored so it does not linger in the keychain unreferenced
+    // (the store is idempotent, so deleting a missing entry is a no-op).
+    let api_key_ref = match api_key {
+        Some(key) if !key.is_empty() => {
+            if key.len() > MAX_SECRET_LEN {
+                return Err(CommandError::invalid(format!(
+                    "`apiKey` exceeds the maximum length of {MAX_SECRET_LEN} bytes"
+                )));
+            }
+            Some(
+                state
+                    .secret_store
+                    .store(id, key)
+                    .map_err(|e| CommandError::internal(e.to_string()))?,
+            )
+        }
+        _ => {
+            if let Some(prior_ref) = existing.as_ref().and_then(|cfg| cfg.api_key_ref.as_ref()) {
+                state
+                    .secret_store
+                    .delete(prior_ref)
+                    .map_err(|e| CommandError::internal(e.to_string()))?;
+            }
+            None
+        }
+    };
+    let has_api_key = api_key_ref.is_some();
+
+    // (4) Upsert the config by its stable per-kind id (get -> update | insert),
+    // matching ProviderRepo::update's NotFound-on-missing contract.
+    let config = ProviderConfig {
+        id: id.to_string(),
+        kind,
+        base_url: Some(base_url.to_string()),
+        api_key_ref,
+        extra: serde_json::Value::Null,
+    };
+    if existing.is_some() {
+        repo.update(&config)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
+    } else {
+        repo.insert(&config)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
+    }
+
+    Ok(LocalRuntimeConfigView {
+        id: id.to_string(),
+        kind,
+        base_url: base_url.to_string(),
+        has_api_key,
+        warning,
+    })
+}
+
+/// List the currently-configured local runtimes so the webview can rehydrate
+/// its Local Runtimes section from the backend source of truth (not a UI-only
+/// marker). Display-safe: each row carries only id/kind/base_url/hasApiKey and
+/// never the key or a resolved secret.
+#[tauri::command]
+pub async fn list_local_runtimes(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<LocalRuntimeConfigView>, CommandError> {
+    list_local_runtimes_inner(&state).await
+}
+
+/// The full body of [`list_local_runtimes`], factored out for direct testing.
+/// It loads every persisted [`ProviderConfig`], keeps only the two
+/// user-configurable local kinds addressed by their stable per-kind id, and
+/// maps each to a display-safe [`LocalRuntimeConfigView`] (`warning` is `None`
+/// when rehydrating an existing row; `has_api_key` reflects whether the row has
+/// a stored `SecretRef`).
+async fn list_local_runtimes_inner(
+    state: &AppState,
+) -> Result<Vec<LocalRuntimeConfigView>, CommandError> {
+    let configs = ProviderRepo::new(state.session_manager.db())
+        .list()
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let views = configs
+        .into_iter()
+        .filter(|cfg| local_runtime_config_id(cfg.kind) == Some(cfg.id.as_str()))
+        .map(|cfg| LocalRuntimeConfigView {
+            id: cfg.id,
+            kind: cfg.kind,
+            base_url: cfg.base_url.unwrap_or_default(),
+            has_api_key: cfg.api_key_ref.is_some(),
+            warning: None,
+        })
+        .collect();
+    Ok(views)
+}
+
+/// Remove a configured local runtime so the user can clear a previously-saved
+/// LM Studio / generic OpenAI-compatible endpoint. Only the two
+/// user-configurable local kinds are addressable; any other kind is rejected.
+#[tauri::command]
+pub async fn clear_local_runtime(
+    state: tauri::State<'_, AppState>,
+    kind: ProviderKind,
+) -> Result<(), CommandError> {
+    clear_local_runtime_inner(&state, kind).await
+}
+
+/// The full body of [`clear_local_runtime`], factored out for direct testing.
+/// It resolves the stable per-kind id (rejecting non-configurable kinds),
+/// deletes any secret the row stored so no credential material is orphaned in
+/// the keychain (Section 9.1 keychain hygiene), then deletes the row via
+/// [`ProviderRepo`]; deleting a missing secret or row is a no-op.
+async fn clear_local_runtime_inner(
+    state: &AppState,
+    kind: ProviderKind,
+) -> Result<(), CommandError> {
+    let id = local_runtime_config_id(kind).ok_or_else(|| {
+        CommandError::invalid(
+            "only LmStudio and GenericOpenAI local runtimes can be configured here",
+        )
+    })?;
+    let repo = ProviderRepo::new(state.session_manager.db());
+    // Resolve the row's stored SecretRef (if any) and delete the secret before
+    // dropping the row, so clearing a runtime never leaves the key behind under
+    // the stable per-kind handle. The store is idempotent (deleting a missing
+    // entry is not an error).
+    if let Some(config) = repo
+        .get(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?
+    {
+        if let Some(secret_ref) = config.api_key_ref.as_ref() {
+            state
+                .secret_store
+                .delete(secret_ref)
+                .map_err(|e| CommandError::internal(e.to_string()))?;
+        }
+    }
+    repo.delete(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))
 }
 
 // --- Message pipeline (P4.6 / Section 2.2 / 8.1) ---------------------------
@@ -2836,5 +3084,328 @@ mod tests {
         assert!(json.contains("\"registeredCount\":2"));
         assert!(!json.to_lowercase().contains("secret"));
         assert!(!json.to_lowercase().contains("apikey"));
+    }
+
+    /// `set_local_runtime_inner` persists an LM Studio row with the given
+    /// base_url and NO api_key_ref when the key is None, and re-saving the same
+    /// kind with a DIFFERENT base_url UPDATES the same row (the persisted list
+    /// keeps exactly one row whose base_url reflects the latest save). This
+    /// proves the stable-per-kind-id upsert is idempotent (no duplicates).
+    #[tokio::test]
+    async fn set_local_runtime_inner_upserts_by_stable_id() {
+        let state = test_state().await;
+
+        let view = set_local_runtime_inner(
+            &state,
+            ProviderKind::LmStudio,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.id, "lmstudio-local");
+        assert_eq!(view.base_url, "http://localhost:1234/v1");
+        assert!(!view.has_api_key);
+        assert!(view.warning.is_none());
+
+        // Re-save the same kind with a different loopback base_url.
+        set_local_runtime_inner(
+            &state,
+            ProviderKind::LmStudio,
+            "http://127.0.0.1:5000",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let rows: Vec<_> = configs
+            .iter()
+            .filter(|c| c.kind == ProviderKind::LmStudio)
+            .collect();
+        assert_eq!(rows.len(), 1, "re-saving must update, not duplicate");
+        assert_eq!(rows[0].id, "lmstudio-local");
+        assert_eq!(rows[0].base_url.as_deref(), Some("http://127.0.0.1:5000"));
+        assert!(rows[0].api_key_ref.is_none());
+    }
+
+    /// A Blocked base_url (a cloud-metadata / link-local target) is rejected
+    /// with `InvalidArgument` and nothing is persisted.
+    #[tokio::test]
+    async fn set_local_runtime_inner_rejects_blocked_base_url() {
+        let state = test_state().await;
+
+        let err = set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "http://169.254.169.254/v1",
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // Nothing was persisted for the rejected call.
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(configs.is_empty());
+    }
+
+    /// A non-loopback plaintext http base_url is accepted but surfaces a
+    /// display-safe warning recommending TLS.
+    #[tokio::test]
+    async fn set_local_runtime_inner_surfaces_plaintext_warning() {
+        let state = test_state().await;
+
+        let view = set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "http://192.168.1.50:1234/v1",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            view.warning.is_some(),
+            "a non-loopback plaintext endpoint must carry a warning"
+        );
+    }
+
+    /// Storing an API key sets `has_api_key` and persists an opaque
+    /// `SecretRef`, but the plaintext key NEVER appears in the returned view
+    /// (nor its serialized form).
+    #[tokio::test]
+    async fn set_local_runtime_inner_stores_key_without_echo() {
+        let state = test_state().await;
+        let plaintext = "sk-local-do-not-leak-9999";
+
+        let view = set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "http://localhost:8080/v1",
+            Some(plaintext),
+        )
+        .await
+        .unwrap();
+        assert!(view.has_api_key);
+
+        // The view (and its serialized form) never carries the key.
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains(plaintext));
+
+        // The row references the secret by an opaque handle only, and the
+        // plaintext is reachable ONLY via the internal resolve seam.
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let row = configs
+            .iter()
+            .find(|c| c.id == "generic-openai-local")
+            .unwrap();
+        let secret_ref = row.api_key_ref.as_ref().unwrap();
+        assert!(!secret_ref.handle().contains(plaintext));
+        assert_eq!(state.secret_store.resolve(secret_ref).unwrap(), plaintext);
+    }
+
+    /// A non-local kind (e.g. OpenAI) is rejected with `InvalidArgument` and
+    /// nothing is persisted; the same guard applies to `clear_local_runtime`.
+    #[tokio::test]
+    async fn set_local_runtime_inner_rejects_non_local_kind() {
+        let state = test_state().await;
+
+        let err =
+            set_local_runtime_inner(&state, ProviderKind::OpenAI, "http://localhost:1234", None)
+                .await
+                .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        let err = clear_local_runtime_inner(&state, ProviderKind::OpenAI)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(configs.is_empty());
+    }
+
+    /// A persisted GenericOpenAI row with a loopback base_url is classified
+    /// local by `local_provider_ids`, while one pointed at a remote host is
+    /// not. This mirrors `local_provider_ids_classifies_by_kind_and_endpoint`
+    /// but drives the full persisted write path via `set_local_runtime_inner`.
+    #[tokio::test]
+    async fn persisted_generic_runtime_locality_by_endpoint() {
+        // Loopback generic endpoint -> local.
+        let state = test_state().await;
+        set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "http://127.0.0.1:1234/v1",
+            None,
+        )
+        .await
+        .unwrap();
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(local_provider_ids(&configs).contains("generic-openai-local"));
+
+        // Remote generic endpoint (over TLS so it is accepted) -> not local.
+        let state = test_state().await;
+        set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "https://api.example.com/v1",
+            None,
+        )
+        .await
+        .unwrap();
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(!local_provider_ids(&configs).contains("generic-openai-local"));
+    }
+
+    /// `list_local_runtimes_inner` returns the configured LM Studio row after a
+    /// save, mapping it to a display-safe view (and `clear_local_runtime_inner`
+    /// removes it again).
+    #[tokio::test]
+    async fn list_local_runtimes_inner_returns_configured_row() {
+        let state = test_state().await;
+
+        // Empty before any save.
+        assert!(list_local_runtimes_inner(&state).await.unwrap().is_empty());
+
+        set_local_runtime_inner(
+            &state,
+            ProviderKind::LmStudio,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let runtimes = list_local_runtimes_inner(&state).await.unwrap();
+        assert_eq!(runtimes.len(), 1);
+        assert_eq!(runtimes[0].id, "lmstudio-local");
+        assert_eq!(runtimes[0].kind, ProviderKind::LmStudio);
+        assert_eq!(runtimes[0].base_url, "http://localhost:1234/v1");
+        assert!(!runtimes[0].has_api_key);
+        assert!(runtimes[0].warning.is_none());
+
+        // Clearing removes the row.
+        clear_local_runtime_inner(&state, ProviderKind::LmStudio)
+            .await
+            .unwrap();
+        assert!(list_local_runtimes_inner(&state).await.unwrap().is_empty());
+    }
+
+    /// Clearing a runtime deletes the stored secret as well as the config row,
+    /// so no credential material is orphaned in the keychain under the stable
+    /// per-kind handle. After a keyed save the secret is resolvable; after the
+    /// clear the same `SecretRef` must no longer resolve and the row is gone.
+    #[tokio::test]
+    async fn clear_local_runtime_inner_deletes_stored_secret() {
+        let state = test_state().await;
+        let plaintext = "sk-clear-me-do-not-leak";
+
+        set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "http://localhost:8080/v1",
+            Some(plaintext),
+        )
+        .await
+        .unwrap();
+
+        // Capture the SecretRef the save stored and confirm it resolves now.
+        let old_ref = {
+            let configs = ProviderRepo::new(state.session_manager.db())
+                .list()
+                .await
+                .unwrap();
+            let row = configs
+                .iter()
+                .find(|c| c.id == "generic-openai-local")
+                .unwrap();
+            row.api_key_ref.clone().unwrap()
+        };
+        assert_eq!(state.secret_store.resolve(&old_ref).unwrap(), plaintext);
+
+        clear_local_runtime_inner(&state, ProviderKind::GenericOpenAI)
+            .await
+            .unwrap();
+
+        // The config row is removed.
+        assert!(list_local_runtimes_inner(&state).await.unwrap().is_empty());
+        // The secret is no longer resolvable (deleted, not merely dereferenced).
+        assert!(matches!(
+            state.secret_store.resolve(&old_ref),
+            Err(SecretError::NotFound(_))
+        ));
+    }
+
+    /// Re-saving a runtime with NO key deletes the previously stored secret so
+    /// nothing lingers under the stable per-kind handle: after a keyed save
+    /// then a keyless re-save, the prior `SecretRef` no longer resolves and the
+    /// row's `api_key_ref` is `None`.
+    #[tokio::test]
+    async fn keyless_resave_deletes_prior_secret() {
+        let state = test_state().await;
+        let plaintext = "sk-first-key-do-not-leak";
+
+        set_local_runtime_inner(
+            &state,
+            ProviderKind::LmStudio,
+            "http://localhost:1234/v1",
+            Some(plaintext),
+        )
+        .await
+        .unwrap();
+
+        let old_ref = {
+            let configs = ProviderRepo::new(state.session_manager.db())
+                .list()
+                .await
+                .unwrap();
+            let row = configs.iter().find(|c| c.id == "lmstudio-local").unwrap();
+            row.api_key_ref.clone().unwrap()
+        };
+        assert_eq!(state.secret_store.resolve(&old_ref).unwrap(), plaintext);
+
+        // Re-save the same kind without a key.
+        let view = set_local_runtime_inner(
+            &state,
+            ProviderKind::LmStudio,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(!view.has_api_key);
+
+        // The row no longer references a secret.
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let row = configs.iter().find(|c| c.id == "lmstudio-local").unwrap();
+        assert!(row.api_key_ref.is_none());
+
+        // The prior secret is no longer resolvable in the store.
+        assert!(matches!(
+            state.secret_store.resolve(&old_ref),
+            Err(SecretError::NotFound(_))
+        ));
     }
 }
