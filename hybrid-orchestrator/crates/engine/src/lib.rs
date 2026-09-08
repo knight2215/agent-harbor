@@ -180,12 +180,22 @@ impl EngineConfig {
 
 /// The embedded local inference engine (Strategy B).
 ///
-/// Wraps an [`EngineConfig`] registry behind a [`tokio::sync::Mutex`] so that
-/// model selection and, on the native path, one-model-at-a-time load/unload are
-/// serialized. Under default features the inference methods are stubs; the real
-/// llama.cpp-backed bodies compile only under the `llama` feature.
+/// Wraps an [`EngineConfig`] registry behind a [`tokio::sync::Mutex`] taken
+/// only for brief registry reads/writes. On the native path a SEPARATE
+/// `model_slot` mutex serializes one-model-at-a-time decodes without holding the
+/// registry lock across the CPU-bound generation, so `list_models`/import/select
+/// stay responsive during a decode. Under default features the inference methods
+/// are stubs; the real llama.cpp-backed bodies compile only under the `llama`
+/// feature.
 pub struct EmbeddedEngine {
     config: Mutex<EngineConfig>,
+    /// Serializes native decodes so only one model runs at a time, WITHOUT
+    /// holding the registry (`config`) lock across the CPU-bound decode. This is
+    /// a dedicated model-slot lock distinct from the registry lock, so a long
+    /// generation no longer blocks `list_models`/import/select/status (which
+    /// only take `config` briefly). Only used on the native `llama` path.
+    #[cfg(feature = "llama")]
+    model_slot: Mutex<()>,
 }
 
 impl EmbeddedEngine {
@@ -193,6 +203,8 @@ impl EmbeddedEngine {
     pub fn new(config: EngineConfig) -> Self {
         EmbeddedEngine {
             config: Mutex::new(config),
+            #[cfg(feature = "llama")]
+            model_slot: Mutex::new(()),
         }
     }
 
@@ -361,7 +373,12 @@ mod native {
     /// the terminal finish reason. Loads the model, runs a greedy decode loop up
     /// to the requested (or default) token budget, and unloads on drop.
     ///
-    /// Held behind the engine mutex so only one model is resident at a time.
+    /// This is a synchronous, CPU-bound function and MUST be driven off the
+    /// async executor (via `tokio::task::spawn_blocking`) so a long decode never
+    /// blocks the runtime's worker threads. It does NOT take the engine's
+    /// registry (`config`) lock; the caller serializes concurrent decodes with
+    /// the dedicated `model_slot` lock instead, so `list_models`/import/select
+    /// stay responsive during a generation.
     fn generate(
         model_path: &std::path::Path,
         prompt: &str,
@@ -436,9 +453,15 @@ mod native {
         let prompt = build_prompt(&req);
         let max_tokens = req.max_tokens.unwrap_or(0);
         let model = req.model.clone();
-        // Serialize model use: one model resident at a time.
-        let _guard = engine.config.lock().await;
-        let (tokens, finish) = generate(&path, &prompt, max_tokens)?;
+        // Serialize decodes on the dedicated model-slot lock (NOT the registry
+        // `config` lock), and run the CPU-bound decode on a blocking thread so
+        // the async runtime is never blocked and status/list/import stay
+        // responsive during generation.
+        let _slot = engine.model_slot.lock().await;
+        let (tokens, finish) =
+            tokio::task::spawn_blocking(move || generate(&path, &prompt, max_tokens))
+                .await
+                .map_err(|e| ProviderError::Other(format!("decode task join: {e}")))??;
         let text = tokens.concat();
         Ok(ChatResponse {
             choices: vec![ChatChoice {
@@ -462,9 +485,15 @@ mod native {
         let path = resolve_model_path(engine, &req.model).await?;
         let prompt = build_prompt(&req);
         let max_tokens = req.max_tokens.unwrap_or(0);
+        // Serialize decodes on the dedicated model-slot lock (NOT the registry
+        // `config` lock), and run the CPU-bound decode on a blocking thread. The
+        // slot is released as soon as generation finishes, before the collected
+        // deltas are replayed.
         let (tokens, finish) = {
-            let _guard = engine.config.lock().await;
-            generate(&path, &prompt, max_tokens)?
+            let _slot = engine.model_slot.lock().await;
+            tokio::task::spawn_blocking(move || generate(&path, &prompt, max_tokens))
+                .await
+                .map_err(|e| ProviderError::Other(format!("decode task join: {e}")))??
         };
 
         let mut deltas: Vec<Result<ChatDelta, ProviderError>> = tokens

@@ -131,14 +131,19 @@ describe("LocalRuntimesSection embedded engine", () => {
   });
 
   it("renders the embedded engine as an available Local runtime (not coming soon)", async () => {
-    // The mount-time status probe resolves to an empty engine.
-    invoke.mockResolvedValue(status(null, 0));
+    // The mount-time probes resolve to an empty engine (no imports, nothing
+    // selected).
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
+      if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
+      return Promise.resolve(undefined);
+    });
     render(<LocalRuntimesSection />);
 
     expect(screen.getByRole("region", { name: "Embedded inference engine" })).toBeInTheDocument();
-    // The status line reflects nothing loaded initially.
+    // The status line reflects nothing selected initially.
     expect(await screen.findByTestId("embedded-status")).toHaveTextContent(
-      "No embedded model is loaded.",
+      "No embedded model is selected.",
     );
     // The reconciled note lists Ollama + embedded as available and only keeps
     // genuinely-future runtimes as "coming soon".
@@ -148,8 +153,32 @@ describe("LocalRuntimesSection embedded engine", () => {
     expect(note).toHaveTextContent(/Hugging Face/);
   });
 
+  it("hydrates previously-imported models on mount", async () => {
+    // A prior-session import is returned by list_embedded_models; the status
+    // probe reports it as the active model.
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_embedded_models") {
+        return Promise.resolve([view("phi-3-mini", "/models/phi-3-mini.gguf", true)]);
+      }
+      if (cmd === "embedded_model_status") return Promise.resolve(status("phi-3-mini", 1));
+      return Promise.resolve(undefined);
+    });
+    render(<LocalRuntimesSection />);
+
+    // The list is populated from the mount probe (no import action this
+    // session), and the status line reflects the active selection.
+    expect(await screen.findByTestId("embedded-model-list")).toHaveTextContent(
+      "/models/phi-3-mini.gguf",
+    );
+    expect(await screen.findByTestId("embedded-status")).toHaveTextContent(
+      "Active model: phi-3-mini",
+    );
+    expect(invoke).toHaveBeenCalledWith("list_embedded_models");
+  });
+
   it("imports a local .gguf and lists it", async () => {
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
       if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
       if (cmd === "import_embedded_model") {
         return Promise.resolve([view("model.gguf", "/models/model.gguf", false)]);
@@ -177,6 +206,7 @@ describe("LocalRuntimesSection embedded engine", () => {
   it("loads a selected .gguf and reflects the loaded status, then unloads", async () => {
     let loaded = false;
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
       if (cmd === "embedded_model_status") {
         return Promise.resolve(loaded ? status("model.gguf", 1) : status(null, loaded ? 1 : 0));
       }
@@ -202,23 +232,24 @@ describe("LocalRuntimesSection embedded engine", () => {
         path: "/models/model.gguf",
       });
     });
-    // The status line reflects the now-loaded model.
+    // The status line reflects the now-active model.
     expect(await screen.findByTestId("embedded-status")).toHaveTextContent(
-      "Loaded model: model.gguf",
+      "Active model: model.gguf",
     );
 
-    // Unload clears the loaded state.
+    // Clearing the selection resets the active-model state.
     fireEvent.click(screen.getByTestId("embedded-unload"));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("unload_embedded_model");
     });
     expect(await screen.findByTestId("embedded-status")).toHaveTextContent(
-      "No embedded model is loaded.",
+      "No embedded model is selected.",
     );
   });
 
   it("loads an already-imported model by id from the list", async () => {
     invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
       if (cmd === "embedded_model_status") return Promise.resolve(status(null, 1));
       if (cmd === "import_embedded_model") {
         return Promise.resolve([view("model.gguf", "/models/model.gguf", false)]);
@@ -241,7 +272,7 @@ describe("LocalRuntimesSection embedded engine", () => {
       expect(invoke).toHaveBeenCalledWith("load_embedded_model", { modelId: "model.gguf" });
     });
     expect(await screen.findByTestId("embedded-status")).toHaveTextContent(
-      "Loaded model: model.gguf",
+      "Active model: model.gguf",
     );
   });
 });

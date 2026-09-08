@@ -12,7 +12,10 @@
 //     runtime that runs a local `.gguf` file with no separate install. It is a
 //     first-class local provider behind the same ChatProvider contract, wired
 //     here to the embedded model lifecycle commands (list/import/select/load/
-//     unload/status) from ipc/commands.ts.
+//     unload/status) from ipc/commands.ts. Note: select/load record the ACTIVE
+//     model selection (the id routed to); the `.gguf` is read into memory
+//     lazily on the first chat, so the UI says "Active model" / "Select" rather
+//     than implying the file is already resident.
 //
 // Ollama already ships as a Local provider (Phase 8) and the embedded engine
 // ships now, so neither is "coming soon"; the informational note at the bottom
@@ -22,6 +25,7 @@ import { useEffect, useState } from "react";
 import {
   embeddedModelStatus,
   importEmbeddedModel,
+  listEmbeddedModels,
   loadEmbeddedModel,
   selectEmbeddedModel,
   setProviderSecret,
@@ -50,9 +54,14 @@ export function LocalRuntimesSection() {
   const [status, setStatus] = useState<EmbeddedModelStatus | null>(null);
   const [embeddedError, setEmbeddedError] = useState<string | null>(null);
 
-  // Load the current embedded status once on mount so the status line reflects
-  // any model already loaded from a previous session.
+  // On mount, hydrate BOTH the imported-models list and the active-selection
+  // status so models imported in a previous session are listed and the status
+  // line reflects the current active selection (not just imports made this
+  // session).
   useEffect(() => {
+    listEmbeddedModels()
+      .then((next) => setEmbeddedModels(next))
+      .catch(() => setEmbeddedModels([]));
     embeddedModelStatus()
       .then((next) => setStatus(next))
       .catch(() => setStatus(null));
@@ -166,7 +175,9 @@ export function LocalRuntimesSection() {
         <h4 className="settings__section-title">Embedded engine</h4>
         <p className="settings__section-desc">
           Run a local <code>.gguf</code> model in-process with the built-in llama.cpp engine. No
-          separate install is required; the model is treated as a Local provider.
+          separate install is required; the model is treated as a Local provider. Selecting a model
+          marks it active for routing; the file is read into memory on the first chat, so a missing
+          or unreadable file surfaces then.
         </p>
         <div className="settings-form">
           <label>
@@ -195,7 +206,7 @@ export function LocalRuntimesSection() {
               disabled={ggufPath === ""}
               data-testid="embedded-load"
             >
-              Load model
+              Select model
             </button>
             <button
               type="button"
@@ -203,13 +214,13 @@ export function LocalRuntimesSection() {
               disabled={loadedModelId === null}
               data-testid="embedded-unload"
             >
-              Unload model
+              Clear selection
             </button>
           </div>
           <p className="settings__section-desc" data-testid="embedded-status">
             {loadedModelId !== null
-              ? `Loaded model: ${loadedModelId}`
-              : "No embedded model is loaded."}
+              ? `Active model: ${loadedModelId}`
+              : "No embedded model is selected."}
           </p>
           {embeddedError !== null && (
             <p className="settings__section-error" role="alert" data-testid="embedded-error">
@@ -228,7 +239,7 @@ export function LocalRuntimesSection() {
                     onClick={() => loadModel(entry.id)}
                     data-testid={`embedded-load-${entry.id}`}
                   >
-                    Load
+                    Select
                   </button>
                 </li>
               ))}

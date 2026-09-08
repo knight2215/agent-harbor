@@ -475,8 +475,21 @@ async fn list_available_models_inner(
 
     // Build the built-in registry and instantiate the configured providers,
     // resolving each row's api_key_ref through the secret store at build time.
-    let registry = providers::build_registry(configs.iter(), state.secret_store.as_ref())
+    let mut registry = providers::build_registry(configs.iter(), state.secret_store.as_ref())
         .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // Bridge the embedded engine seam (FEAT-002): the lifecycle commands import
+    // `.gguf` models onto the SHARED `AppState.embedded_engine`, but
+    // `build_registry` builds a FRESH, empty `EmbeddedEngine` for the persisted
+    // `ProviderKind::Embedded` row. Replace that throwaway instance with the
+    // shared engine so the models the user imported are the ones enumerated
+    // here (and therefore surface under Local in the picker across routing
+    // modes). Keyed by `ChatProvider::id()` == `EMBEDDED_PROVIDER_ID`, which is
+    // exactly the id the seeded embedded config row carries, so it matches
+    // `list_models`'s per-row `registry.get(&cfg.id)` lookup. No-op when no
+    // embedded row is persisted (nothing imported yet): the shared engine is
+    // registered but has no config row, so `list_models` skips it.
+    registry.insert_instance(state.embedded_engine.clone());
 
     // Enumerate models (may hit the network per provider) and attach
     // capabilities + price.
@@ -1532,6 +1545,44 @@ pub struct EmbeddedModelStatus {
 /// Upper bound on a supplied `.gguf` file path (Section 9.2 "bounds").
 const MAX_MODEL_PATH_LEN: usize = 4_096;
 
+/// The persisted [`ProviderConfig::id`] the embedded engine uses. It equals the
+/// engine's [`ChatProvider::id`] (`engine::EMBEDDED_ENGINE_ID`) so the shared
+/// `AppState.embedded_engine`, inserted into the registry under its
+/// `ChatProvider::id`, matches this row's id in `list_available_models`'s
+/// per-row `registry.get(&cfg.id)` lookup.
+const EMBEDDED_PROVIDER_ID: &str = engine::EMBEDDED_ENGINE_ID;
+
+/// Ensure a persisted [`ProviderKind::Embedded`] provider-config row exists so
+/// imported local models become routable and surface under Local in the model
+/// picker across routing modes (the spec's Phase 9 deliverable). Idempotent:
+/// inserts the row on first import, and is a no-op once it exists.
+///
+/// The row carries no `base_url` (imported paths are absolute/self-contained)
+/// and no `api_key_ref` (the in-process engine needs no key), so it is
+/// display-safe and never touches the secret store. Its `id` is
+/// [`EMBEDDED_PROVIDER_ID`] so it lines up with the shared engine instance the
+/// enumerate path registers.
+async fn ensure_embedded_provider_config(state: &AppState) -> Result<(), CommandError> {
+    let repo = ProviderRepo::new(state.session_manager.db());
+    let existing = repo
+        .get(EMBEDDED_PROVIDER_ID)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    let config = ProviderConfig {
+        id: EMBEDDED_PROVIDER_ID.to_string(),
+        kind: ProviderKind::Embedded,
+        base_url: None,
+        api_key_ref: None,
+        extra: serde_json::Value::Null,
+    };
+    repo.insert(&config)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))
+}
+
 /// Validate a user-supplied local `.gguf` model path: trimmed non-empty, within
 /// bounds, and ending in the `.gguf` extension (case-insensitive). This rejects
 /// obvious mistakes before the path reaches the engine registry; it does NOT
@@ -1592,6 +1643,7 @@ pub async fn import_embedded_model(
     path: String,
 ) -> Result<Vec<EmbeddedModelView>, CommandError> {
     validate_gguf_path(&path)?;
+    ensure_embedded_provider_config(&state).await?;
     state.embedded_engine.register_path(path.trim()).await;
     Ok(embedded_model_views(&state).await)
 }
@@ -1605,6 +1657,7 @@ pub async fn select_embedded_model(
     path: String,
 ) -> Result<Vec<EmbeddedModelView>, CommandError> {
     validate_gguf_path(&path)?;
+    ensure_embedded_provider_config(&state).await?;
     let id = state.embedded_engine.register_path(path.trim()).await;
     *state.embedded_loaded_model.write().await = Some(id);
     Ok(embedded_model_views(&state).await)
@@ -2675,6 +2728,85 @@ mod tests {
         let status = embedded_model_status_inner(&state).await;
         assert_eq!(status.registered_count, 1);
         assert!(status.loaded_model_id.is_none());
+    }
+
+    /// REGRESSION (review issue 1/4): an imported embedded model must surface
+    /// through `list_available_models_inner` as a zero-priced [`AvailableModel`]
+    /// so it groups under Local in the picker across routing modes. This drives
+    /// the real enumerate pipeline end to end (seed the persisted Embedded
+    /// config row + import onto the SHARED `AppState.embedded_engine`, then
+    /// build the registry and enumerate), which is exactly what would have
+    /// caught the split-instance bug: before the fix the enumerate path built a
+    /// fresh, empty engine and returned zero embedded rows.
+    #[tokio::test]
+    async fn imported_embedded_model_surfaces_in_list_available_models() {
+        let state = test_state().await;
+
+        // Before any import there is no embedded provider row, so no embedded
+        // model is enumerated.
+        assert!(list_available_models_inner(&state)
+            .await
+            .unwrap()
+            .iter()
+            .all(|m| m.provider_id != EMBEDDED_PROVIDER_ID));
+
+        // Import a local `.gguf` exactly as `import_embedded_model` does: seed
+        // the persisted Embedded config row, then register the path on the
+        // shared engine.
+        ensure_embedded_provider_config(&state).await.unwrap();
+        state
+            .embedded_engine
+            .register_path("/models/phi-3-mini.gguf")
+            .await;
+
+        // The imported model now appears as a zero-priced AvailableModel under
+        // the embedded provider id, so the picker groups it under Local.
+        let models = list_available_models_inner(&state).await.unwrap();
+        let embedded: Vec<_> = models
+            .iter()
+            .filter(|m| m.provider_id == EMBEDDED_PROVIDER_ID)
+            .collect();
+        assert_eq!(
+            embedded.len(),
+            1,
+            "the imported embedded model must surface"
+        );
+        assert_eq!(embedded[0].model, "phi-3-mini");
+        assert_eq!(
+            embedded[0].price,
+            TokenPrice::ZERO,
+            "embedded models are zero-priced so they group under Local"
+        );
+        // Streaming-text-only capabilities are carried through from the engine.
+        assert!(embedded[0].capabilities.streaming);
+        assert!(!embedded[0].capabilities.tools);
+
+        // The row is also classified provably-local for the routing privacy
+        // gate.
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(local_provider_ids(&configs).contains(EMBEDDED_PROVIDER_ID));
+    }
+
+    /// Seeding the embedded provider-config row is idempotent: a second import
+    /// does not insert a duplicate row (the persisted providers list keeps a
+    /// single embedded entry).
+    #[tokio::test]
+    async fn ensure_embedded_provider_config_is_idempotent() {
+        let state = test_state().await;
+        ensure_embedded_provider_config(&state).await.unwrap();
+        ensure_embedded_provider_config(&state).await.unwrap();
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let embedded_rows = configs
+            .iter()
+            .filter(|c| c.kind == ProviderKind::Embedded)
+            .count();
+        assert_eq!(embedded_rows, 1);
     }
 
     /// The embedded-model DTOs are display-safe camelCase and carry no secret

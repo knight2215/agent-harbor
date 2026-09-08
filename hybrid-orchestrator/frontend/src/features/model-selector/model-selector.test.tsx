@@ -108,9 +108,12 @@ describe("model selector", () => {
 
   it("ProviderModelPicker groups a zero-priced embedded model under Local", async () => {
     // Embedded (in-process llama.cpp) models are seeded to zero price on the
-    // backend, so the zero-price heuristic must surface them under Local. Drive
-    // the models through the providers store (an async state set) and assert
-    // with findBy* after the update.
+    // backend, so the zero-price heuristic must surface them under Local. This
+    // test covers the UI GROUPING contract; that the real backend pipeline
+    // actually emits such a zero-priced embedded AvailableModel is proven by the
+    // Rust test `imported_embedded_model_surfaces_in_list_available_models`
+    // (crates/tauri-app/src/commands.rs). Drive the models through the providers
+    // store (an async state set) and assert with findBy* after the update.
     useProvidersStore.setState({
       models: [
         model("embedded", "local-llama-3.gguf", true),
