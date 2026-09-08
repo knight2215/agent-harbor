@@ -3,10 +3,14 @@
 // Configures locally-hosted runtimes. Two shapes are supported:
 //
 //  1. OpenAI-compatible endpoints (LM Studio and a generic OpenAI-compatible
-//     endpoint). From the frontend's perspective each is just a provider secret
-//     + base URL, so this reuses the existing `set_provider_secret` command
-//     (ipc/commands.ts); the base URL is a display value the user records for
-//     their own configuration.
+//     endpoint). The entered base URL now genuinely configures the provider: it
+//     is persisted into a real ProviderConfig via the `set_local_runtime`
+//     command (ipc/commands.ts), which validates the URL through the base-url
+//     posture (surfacing a block as a rejection and an accepted plaintext
+//     non-loopback URL as a non-blocking warning) and, when a key is supplied,
+//     stores it as an opaque SecretRef. The configured runtime(s) are rehydrated
+//     on mount from `list_local_runtimes` so they persist across navigation, and
+//     can be edited (re-save upserts) or cleared via `clear_local_runtime`.
 //
 //  2. The embedded inference engine (Strategy B): an in-process llama.cpp
 //     runtime that runs a local `.gguf` file with no separate install. It is a
@@ -23,15 +27,17 @@
 
 import { useEffect, useState } from "react";
 import {
+  clearLocalRuntime,
   embeddedModelStatus,
   importEmbeddedModel,
   listEmbeddedModels,
+  listLocalRuntimes,
   loadEmbeddedModel,
   selectEmbeddedModel,
-  setProviderSecret,
+  setLocalRuntime,
   unloadEmbeddedModel,
 } from "../../ipc/commands";
-import type { EmbeddedModelStatus, EmbeddedModelView } from "../../types";
+import type { EmbeddedModelStatus, EmbeddedModelView, LocalRuntimeConfig } from "../../types";
 
 type LocalKind = "lmStudio" | "genericOpenAI";
 
@@ -44,7 +50,13 @@ export function LocalRuntimesSection() {
   const [kind, setKind] = useState<LocalKind>("lmStudio");
   const [baseUrl, setBaseUrl] = useState("http://localhost:1234/v1");
   const [secret, setSecret] = useState("");
-  const [saved, setSaved] = useState(false);
+  // The configured runtimes are the backend source of truth (rehydrated on
+  // mount from `list_local_runtimes`), so they survive unmount/remount instead
+  // of a transient "saved" flag. `warning` holds the last non-blocking base-url
+  // advisory; `error` holds a rejection (e.g. a blocked URL).
+  const [runtimes, setRuntimes] = useState<LocalRuntimeConfig[]>([]);
+  const [warning, setWarning] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   // Embedded engine state. `models` is the imported `.gguf` list; `status`
   // reflects which one (if any) is currently loaded; `error` surfaces the last
@@ -54,11 +66,16 @@ export function LocalRuntimesSection() {
   const [status, setStatus] = useState<EmbeddedModelStatus | null>(null);
   const [embeddedError, setEmbeddedError] = useState<string | null>(null);
 
-  // On mount, hydrate BOTH the imported-models list and the active-selection
-  // status so models imported in a previous session are listed and the status
+  // On mount, hydrate the configured local runtimes from the backend (so a
+  // runtime saved in a previous session / before navigating away is shown), and
+  // hydrate BOTH the imported-models list and the active-selection status so
+  // embedded models imported in a previous session are listed and the status
   // line reflects the current active selection (not just imports made this
   // session).
   useEffect(() => {
+    listLocalRuntimes()
+      .then((next) => setRuntimes(next))
+      .catch(() => setRuntimes([]));
     listEmbeddedModels()
       .then((next) => setEmbeddedModels(next))
       .catch(() => setEmbeddedModels([]));
@@ -67,16 +84,45 @@ export function LocalRuntimesSection() {
       .catch(() => setStatus(null));
   }, []);
 
+  // Merge a freshly-configured runtime into the list, replacing any existing
+  // row for the same kind (the backend upserts by a stable per-kind id).
+  const upsertRuntime = (config: LocalRuntimeConfig) => {
+    setRuntimes((prev) => [...prev.filter((entry) => entry.kind !== config.kind), config]);
+  };
+
   const save = () => {
-    setSaved(false);
-    // Local runtimes often accept any key; store whatever the user provided so
-    // the OpenAI-compatible adapter can authenticate if the endpoint requires it.
-    setProviderSecret(kind, secret === "" ? "local" : secret)
-      .then(() => {
-        setSaved(true);
+    setWarning(null);
+    setError(null);
+    // The entered base URL now genuinely configures the provider: a blocked URL
+    // rejects (shown as an error) and an accepted plaintext non-loopback URL
+    // resolves with a non-blocking warning. Keyless local endpoints send a null
+    // api key; a non-empty key is stored as an opaque SecretRef.
+    setLocalRuntime(kind, baseUrl, secret === "" ? null : secret)
+      .then((config) => {
+        upsertRuntime(config);
         setSecret("");
+        if (config.warning !== null) setWarning(config.warning);
       })
-      .catch(() => setSaved(false));
+      .catch((err: unknown) => setError(String(err)));
+  };
+
+  // Prefill the form from a configured runtime so re-saving edits the same row.
+  const editRuntime = (config: LocalRuntimeConfig) => {
+    setKind(config.kind as LocalKind);
+    setBaseUrl(config.baseUrl);
+    setSecret("");
+    setWarning(null);
+    setError(null);
+  };
+
+  // Remove a configured runtime, then refresh the list from the backend.
+  const clearRuntime = (target: LocalKind) => {
+    setWarning(null);
+    setError(null);
+    clearLocalRuntime(target)
+      .then(() => listLocalRuntimes())
+      .then((next) => setRuntimes(next))
+      .catch((err: unknown) => setError(String(err)));
   };
 
   // Import (register) the entered `.gguf` path with the embedded engine and
@@ -159,10 +205,44 @@ export function LocalRuntimesSection() {
         <button type="button" onClick={save}>
           Save runtime
         </button>
-        {saved && (
-          <p className="settings__section-desc" data-testid="local-runtime-saved">
-            {KIND_LABELS[kind]} runtime saved.
+        {warning !== null && (
+          <p className="settings__section-desc" role="status" data-testid="local-runtime-warning">
+            {warning}
           </p>
+        )}
+        {error !== null && (
+          <p className="settings__section-error" role="alert" data-testid="local-runtime-error">
+            {error}
+          </p>
+        )}
+        {runtimes.length > 0 && (
+          <ul
+            className="settings__list"
+            data-testid="local-runtime-saved"
+            aria-label="Configured local runtimes"
+          >
+            {runtimes.map((entry) => (
+              <li key={entry.id} data-testid={`local-runtime-configured-${entry.kind}`}>
+                <span className="settings__list-label">
+                  {KIND_LABELS[entry.kind as LocalKind]} configured at {entry.baseUrl}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => editRuntime(entry)}
+                  data-testid={`local-runtime-edit-${entry.kind}`}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => clearRuntime(entry.kind as LocalKind)}
+                  data-testid={`local-runtime-clear-${entry.kind}`}
+                >
+                  Clear
+                </button>
+              </li>
+            ))}
+          </ul>
         )}
       </div>
 

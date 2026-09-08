@@ -6,6 +6,7 @@ import type {
   EmbeddedModelStatus,
   EmbeddedModelView,
   ExportFormat,
+  LocalRuntimeConfig,
   ManualRoute,
   McpServerConfig,
   McpServerInput,
@@ -15,6 +16,7 @@ import type {
   PermissionDecision,
   PermissionMode,
   PrivacyTag,
+  ProviderKind,
   RouteExplanation,
   RoutingHint,
   RoutingMode,
@@ -137,6 +139,48 @@ export function listAvailableModels(): Promise<AvailableModel[]> {
  */
 export function setProviderSecret(providerId: string, secret: string): Promise<SecretRef> {
   return invoke<SecretRef>("set_provider_secret", { providerId, secret });
+}
+
+// --- Local runtimes (LM Studio / generic OpenAI-compatible) -----------------
+
+/**
+ * Configure a locally-hosted, OpenAI-compatible runtime (LM Studio or a generic
+ * OpenAI-compatible endpoint) by persisting a real {@link ProviderConfig} with
+ * the entered `baseUrl`. The backend validates `baseUrl` through the Section 9.3
+ * base-url posture (`check_provider_base_url`): a blocked URL REJECTS this call
+ * (surfacing as a validation error), while an accepted plaintext non-loopback
+ * URL resolves with a non-null {@link LocalRuntimeConfig.warning}. Pass
+ * `apiKey = null` for keyless local endpoints; a non-null key is stored as an
+ * opaque {@link SecretRef} and never returned. The config is upserted by a
+ * stable per-kind id, so re-saving the same `kind` edits the one row. Backed by
+ * `set_local_runtime`.
+ */
+export function setLocalRuntime(
+  kind: ProviderKind,
+  baseUrl: string,
+  apiKey: string | null,
+): Promise<LocalRuntimeConfig> {
+  return invoke<LocalRuntimeConfig>("set_local_runtime", { kind, baseUrl, apiKey });
+}
+
+/**
+ * List the currently-configured local runtimes (LM Studio / generic
+ * OpenAI-compatible only) so the Local Runtimes UI can rehydrate from the
+ * backend source of truth instead of a UI-only marker. DISPLAY-SAFE: each row
+ * carries only id/kind/baseUrl/hasApiKey, never the key. Backed by
+ * `list_local_runtimes`.
+ */
+export function listLocalRuntimes(): Promise<LocalRuntimeConfig[]> {
+  return invoke<LocalRuntimeConfig[]>("list_local_runtimes");
+}
+
+/**
+ * Remove the configured local runtime for the given `kind`, clearing a
+ * previously-saved LM Studio / generic OpenAI-compatible endpoint. Deleting a
+ * runtime that is not configured is a no-op. Backed by `clear_local_runtime`.
+ */
+export function clearLocalRuntime(kind: ProviderKind): Promise<void> {
+  return invoke<void>("clear_local_runtime", { kind });
 }
 
 // --- Message pipeline (P4.6 / Section 8.1) ----------------------------------
