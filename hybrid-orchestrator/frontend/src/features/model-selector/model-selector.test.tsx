@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
@@ -82,6 +82,28 @@ describe("model selector", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /openai \/ gpt-4o/ }));
     expect(onChange).toHaveBeenCalledWith({ providerId: "openai", model: "gpt-4o" });
+  });
+
+  it("ProviderModelPicker groups a zero-priced Ollama model under Local", () => {
+    render(
+      <ProviderModelPicker
+        models={[model("ollama-local", "llama3.1:8b", true), model("openai", "gpt-4o", false)]}
+        value={null}
+        onChange={vi.fn()}
+      />,
+    );
+    // The zero-priced Ollama model surfaces under the Local group; the cloud
+    // model under Cloud.
+    const local = screen.getByRole("region", { name: "Local" });
+    const cloud = screen.getByRole("region", { name: "Cloud" });
+    expect(
+      within(local).getByRole("button", { name: /ollama-local \/ llama3\.1:8b/ }),
+    ).toBeInTheDocument();
+    expect(within(cloud).getByRole("button", { name: /openai \/ gpt-4o/ })).toBeInTheDocument();
+    // The Ollama option is not misfiled under Cloud.
+    expect(
+      within(cloud).queryByRole("button", { name: /ollama-local \/ llama3\.1:8b/ }),
+    ).toBeNull();
   });
 
   it("RoutingModeToggle: renders four segmented positions", () => {
