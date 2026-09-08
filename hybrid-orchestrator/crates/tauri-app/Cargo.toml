@@ -42,6 +42,12 @@ tauri = "2"
 # `[workspace] exclude` and has no workspace root to inherit from.
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Embedded-model file picker: the native OS file-open dialog used by the
+# "Browse…" button in the Local Runtimes settings so a `.gguf` can be chosen via
+# Explorer/Finder/GTK/Dolphin instead of typing a path. Concrete literal 2.x
+# version (same major style as the other `tauri-plugin-*` lines) because this
+# crate is under `[workspace] exclude` and has no workspace root to inherit from.
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Async runtime for the DB init (block_on) and the core-event bridge channel.

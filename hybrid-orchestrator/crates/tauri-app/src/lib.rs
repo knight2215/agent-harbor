@@ -41,6 +41,10 @@ pub fn run() {
         // relaunch the in-app flow calls after a successful install.
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        // Native OS file-open dialog for the embedded-model "Browse…" button
+        // (Local Runtimes settings), so a `.gguf` can be picked via the system
+        // file explorer instead of typing an absolute path.
+        .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
         .setup(move |app| {
             // Pump core events to the frontend over CORE_EVENT_CHANNEL. The
