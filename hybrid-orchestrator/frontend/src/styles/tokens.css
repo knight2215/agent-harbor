@@ -1,11 +1,13 @@
 /*
  * Design tokens (Phase 7 UX refactor, FEAT-003).
  *
- * A single CSS custom-property system that drives the whole UI. The LIGHT
- * palette lives on :root; the DARK palette is applied under
- * [data-theme="dark"]. When no explicit choice is stored the theme module
- * leaves data-theme following the OS, and @media (prefers-color-scheme: dark)
- * provides the dark palette as the default until/unless a light choice is set.
+ * A single CSS custom-property system that drives the whole UI. Both themes
+ * share ONE cohesive harbor blue palette and differ only in lightness: the
+ * LIGHT palette (on :root) uses light blue-tinted surfaces, and the DARK
+ * palette (under [data-theme="dark"]) uses deep navy surfaces. When no
+ * explicit choice is stored the theme module leaves data-theme following the
+ * OS, and @media (prefers-color-scheme: dark) provides the dark palette as the
+ * default until/unless a light choice is set.
  *
  * Accent is a modern harbor teal/blue. Only these variables are consumed by
  * app.css; there is NO UI-component library.
@@ -27,15 +29,16 @@
   --ah-accent-contrast: #ffffff;
   --ah-accent-soft: rgba(13, 125, 140, 0.12);
 
-  /* Surfaces + text (light). */
-  --ah-bg: #f5f7f9;
-  --ah-surface: #ffffff;
-  --ah-surface-2: #eef1f4;
-  --ah-surface-hover: #e6ebef;
-  --ah-border: #d5dce2;
-  --ah-text: #16232b;
-  --ah-text-muted: #5a6b76;
-  --ah-text-faint: #8494a0;
+  /* Surfaces + text (light blues). Cool blue hues (~210) at high lightness so
+   * the app reads as a soft light-blue canvas, not plain white. */
+  --ah-bg: #e8eef5;
+  --ah-surface: #f4f8fc;
+  --ah-surface-2: #dde7f1;
+  --ah-surface-hover: #d2deeb;
+  --ah-border: #c4d2e0;
+  --ah-text: #142430;
+  --ah-text-muted: #4d6273;
+  --ah-text-faint: #7d90a0;
 
   /* Status. */
   --ah-danger: #b4232a;
@@ -76,14 +79,15 @@
   --ah-accent-contrast: #062026;
   --ah-accent-soft: rgba(43, 188, 207, 0.16);
 
-  --ah-bg: #0e161b;
-  --ah-surface: #16222a;
-  --ah-surface-2: #1d2c35;
-  --ah-surface-hover: #263843;
-  --ah-border: #2c3d47;
-  --ah-text: #e6eef2;
-  --ah-text-muted: #9fb0bb;
-  --ah-text-faint: #6f828e;
+  /* Deep navy/blue surfaces (same hue family as the light palette, darker). */
+  --ah-bg: #0b1220;
+  --ah-surface: #131f31;
+  --ah-surface-2: #1b2b40;
+  --ah-surface-hover: #24384f;
+  --ah-border: #2b3f57;
+  --ah-text: #e4edf5;
+  --ah-text-muted: #9db2c6;
+  --ah-text-faint: #6c8095;
 
   --ah-danger: #f0666c;
   --ah-focus-ring: rgba(79, 208, 224, 0.6);
@@ -102,14 +106,15 @@
     --ah-accent-contrast: #062026;
     --ah-accent-soft: rgba(43, 188, 207, 0.16);
 
-    --ah-bg: #0e161b;
-    --ah-surface: #16222a;
-    --ah-surface-2: #1d2c35;
-    --ah-surface-hover: #263843;
-    --ah-border: #2c3d47;
-    --ah-text: #e6eef2;
-    --ah-text-muted: #9fb0bb;
-    --ah-text-faint: #6f828e;
+    /* Deep navy/blue surfaces (same hue family as the light palette, darker). */
+    --ah-bg: #0b1220;
+    --ah-surface: #131f31;
+    --ah-surface-2: #1b2b40;
+    --ah-surface-hover: #24384f;
+    --ah-border: #2b3f57;
+    --ah-text: #e4edf5;
+    --ah-text-muted: #9db2c6;
+    --ah-text-faint: #6c8095;
 
     --ah-danger: #f0666c;
     --ah-focus-ring: rgba(79, 208, 224, 0.6);
