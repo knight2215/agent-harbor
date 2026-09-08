@@ -515,8 +515,8 @@ fn pricing_table_from_config(config: &PricingConfig) -> PricingTable {
 /// for the privacy hard constraint (instead of trusting a zero price, which a
 /// misconfigured cloud provider could carry):
 ///
-///   - [`ProviderKind::LmStudio`] runs on the local machine, so it is always
-///     local.
+///   - [`ProviderKind::LmStudio`] and [`ProviderKind::Ollama`] run on the local
+///     machine, so they are always local.
 ///   - [`ProviderKind::GenericOpenAI`] is local ONLY when its endpoint is a
 ///     loopback host (`localhost` / `127.0.0.1` / `[::1]`); a generic endpoint
 ///     pointed at a remote host is treated as cloud.
@@ -526,6 +526,7 @@ fn local_provider_ids(configs: &[ProviderConfig]) -> std::collections::BTreeSet<
         .iter()
         .filter(|cfg| match cfg.kind {
             ProviderKind::LmStudio => true,
+            ProviderKind::Ollama => true,
             ProviderKind::GenericOpenAI => {
                 cfg.base_url.as_deref().is_some_and(is_loopback_endpoint)
             }
@@ -1765,6 +1766,7 @@ mod tests {
 
         let configs = [
             cfg("lm", ProviderKind::LmStudio, None),
+            cfg("ollama", ProviderKind::Ollama, None),
             cfg(
                 "local-generic",
                 ProviderKind::GenericOpenAI,
@@ -1787,6 +1789,8 @@ mod tests {
 
         let local = local_provider_ids(&configs);
         assert!(local.contains("lm"));
+        // Ollama runs on the local machine, so it is always local.
+        assert!(local.contains("ollama"));
         assert!(local.contains("local-generic"));
         assert!(local.contains("localhost-generic"));
         assert!(!local.contains("remote-generic"));

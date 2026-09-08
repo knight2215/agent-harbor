@@ -270,6 +270,38 @@ A hardened build with audited secret handling, a least-privilege IPC surface, sa
 
 ---
 
+## Phase 8: Ollama integration
+
+Goal: integrate [Ollama](https://ollama.com/) as a first-class local provider, reusing the OpenAI-compatible native chat path for chat/streaming at `http://localhost:11434/v1` and adding Ollama's native model discovery (`GET /api/tags`), so installed Ollama models surface as Local models in the picker and route through the existing Auto / Prefer Local / Prefer Quality / Manual modes (Section 4.3).
+
+Dependencies: Phase 2 (the `ChatProvider` contract, shared native adapter, and registry) and Phase 4 (routing consumes the local classification and zero price). Frontend surfacing depends on Phase 5's model selector.
+
+### Tasks
+
+- **P8.1 Provider kind.** Add `ProviderKind::Ollama` to `domain` (serializes to `"ollama"` under the existing `rename_all = "camelCase"`), guarded by the camelCase serde test.
+- **P8.2 Ollama adapter (`providers/src/adapters/ollama.rs`).** Reuse the shared `NativeAdapter` for chat/streaming with `base_url` default `http://localhost:11434/v1` and no key by default. Override `list_models` to call Ollama's native `GET /api/tags` at the server root (derived by stripping a trailing `/v1` from the chat `base_url`), decoding `{"models":[{"name":...}]}` into `ModelInfo` ids.
+- **P8.3 Registry and pricing wiring.** Add `OllamaFactory`, register it in `builtin_registry()`, re-export it from the crate root, and seed `ProviderKind::Ollama` at `TokenPrice::ZERO` in `PricingTable::bundled_defaults()` alongside LM Studio.
+- **P8.4 Local classification.** Classify `ProviderKind::Ollama` as provably-local in the routing privacy gate (`local_provider_ids()` in `tauri-app`), like LM Studio, so `Local-Only` requests may route to it and it is grouped under Local.
+- **P8.5 Frontend surfacing.** Add `"ollama"` to the TypeScript `ProviderKind` union so it mirrors the Rust enum; confirm the zero-priced Ollama models fall under the Local group in the `ProviderModelPicker` (via the existing zero-price heuristic) with no grouping change required.
+
+### Deliverable
+
+A configured Ollama provider that lists its installed models via `/api/tags`, runs streaming and non-streaming chat over the shared native path, is treated as local by the privacy gate and zero-priced by the cost signal, and appears under Local in the model picker across all routing modes.
+
+### Parallelization
+
+- P8.1 first (the kind is the shared dependency). P8.2, P8.3, and P8.4 then proceed in parallel once the kind exists. P8.5 (frontend) depends on P8.1 landing the `"ollama"` serialization.
+
+### Verification / acceptance
+
+- `cargo test` in `providers` covers the adapter with mocked HTTP: `list_models` hits `GET /api/tags` and yields the installed model ids, and chat POSTs to `/chat/completions` with no `Authorization` header (no live network required in CI).
+- A `providers` inline unit test asserts `build_ollama` selects `AuthStrategy::None` when `api_key_ref` is unset; an `#[ignore]`d manual test exercises a real Ollama server on `http://localhost:11434`, excluded from CI.
+- `cargo test` in `domain` asserts `ProviderKind::Ollama` serializes to `"ollama"`; the `providers` registry test asserts an Ollama factory is registered; the `tauri-app` test asserts Ollama is classified local.
+- A `vitest` test asserts a zero-priced Ollama-style model appears under the Local group in the model picker.
+- Whole-workspace per-crate `cargo build`, `cargo test`, `cargo clippy` (with `-D warnings`), and `vitest` are green, and CI passes on all matrix targets.
+
+---
+
 ## Cross-cutting: testing strategy and deferred items
 
 ### Testing strategy

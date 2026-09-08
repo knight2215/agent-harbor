@@ -31,6 +31,7 @@ pub mod adapters {
     pub mod azure_openai;
     pub mod generic_openai;
     pub mod lmstudio;
+    pub mod ollama;
     pub mod openai;
 
     // Translation shims (FEAT-003): each presents [`crate::contract::ChatProvider`]
@@ -70,6 +71,7 @@ pub use builtins::{
 pub use adapters::azure_openai::AzureOpenAiFactory;
 pub use adapters::generic_openai::GenericOpenAiFactory;
 pub use adapters::lmstudio::LmStudioFactory;
+pub use adapters::ollama::OllamaFactory;
 pub use adapters::openai::OpenAiFactory;
 
 // Translation-shim adapter factories (FEAT-003). Registering these on a
