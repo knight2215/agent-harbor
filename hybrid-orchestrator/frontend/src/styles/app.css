@@ -520,7 +520,7 @@ body {
 
 .settings__section-error {
   margin: 0;
-  color: var(--ah-danger, #c0392b);
+  color: var(--ah-danger);
 }
 
 /* --- Appearance / theme toggle -------------------------------------------- */

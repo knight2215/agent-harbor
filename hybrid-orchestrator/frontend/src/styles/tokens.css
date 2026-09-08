@@ -12,6 +12,15 @@
  */
 
 :root {
+  /* Tell the UA to render native form controls, scrollbars, and default
+   * focus rings in the light scheme by default. This is overridden per theme
+   * below so the browser chrome (select arrow/option list, textarea caret,
+   * checkbox/radio, spinners, scrollbars) matches the active palette. The
+   * accent (which flips per theme via --ah-accent) drives native checkboxes,
+   * radios, range inputs, and default focus rings. */
+  color-scheme: light;
+  accent-color: var(--ah-accent);
+
   /* Accent (harbor teal/blue). */
   --ah-accent: #0d7d8c;
   --ah-accent-strong: #0a636f;
@@ -59,6 +68,9 @@
 
 /* Dark palette applied by an explicit choice. */
 [data-theme="dark"] {
+  /* Native controls follow the dark scheme when the toggle selects dark. */
+  color-scheme: dark;
+
   --ah-accent: #2bbccf;
   --ah-accent-strong: #4fd0e0;
   --ah-accent-contrast: #062026;
@@ -82,6 +94,9 @@
 /* System default: when no explicit [data-theme] wins, honor the OS. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
+    /* OS-default dark (no explicit light choice): native controls go dark. */
+    color-scheme: dark;
+
     --ah-accent: #2bbccf;
     --ah-accent-strong: #4fd0e0;
     --ah-accent-contrast: #062026;
