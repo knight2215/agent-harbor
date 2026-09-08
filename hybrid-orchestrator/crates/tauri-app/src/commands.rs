@@ -461,6 +461,14 @@ async fn list_available_models_inner(
 ) -> Result<Vec<AvailableModel>, CommandError> {
     let db = state.session_manager.db();
 
+    // Auto-seed the Ollama provider-config row (idempotent) BEFORE reading the
+    // configs, so a locally-running Ollama's installed models are discovered via
+    // the adapter's native `GET /api/tags` and surface under Local WITHOUT any
+    // user configuration. Safe when Ollama is absent/offline: the enumeration
+    // loop skips a provider whose `list_models` errors, so the seeded row simply
+    // contributes no models instead of breaking the picker.
+    ensure_ollama_provider_config(state).await?;
+
     // Persisted provider instances (only the SecretRef handle is stored).
     let configs: Vec<ProviderConfig> = ProviderRepo::new(db)
         .list()
@@ -1835,6 +1843,46 @@ async fn ensure_embedded_provider_config(state: &AppState) -> Result<(), Command
         .map_err(|e| CommandError::internal(e.to_string()))
 }
 
+/// The persisted [`ProviderConfig::id`] the auto-seeded Ollama provider uses. A
+/// stable, distinct id (like [`EMBEDDED_PROVIDER_ID`]) so the enumerate path's
+/// per-row `registry.get(&cfg.id)` lookup matches the built Ollama instance and
+/// the idempotent seed never duplicates the row.
+const OLLAMA_PROVIDER_ID: &str = "ollama-local";
+
+/// Ensure a persisted [`ProviderKind::Ollama`] provider-config row exists so a
+/// locally-running Ollama's installed models are auto-discovered (via the
+/// adapter's native `GET /api/tags`) and surface under Local in the model picker
+/// WITHOUT the user configuring anything. Idempotent: inserts the row on first
+/// enumeration, and is a no-op once it exists.
+///
+/// The row carries no `base_url` (the Ollama adapter falls back to its own
+/// `DEFAULT_BASE_URL`, `http://localhost:11434/v1`, when `base_url` is None) and
+/// no `api_key_ref` (Ollama is keyless), so it is display-safe and never touches
+/// the secret store. Seeding is safe even when Ollama is not installed or not
+/// running: the enumeration path skips a provider whose `list_models` errors
+/// (logging id + error), so an offline Ollama simply contributes no rows instead
+/// of breaking the picker.
+async fn ensure_ollama_provider_config(state: &AppState) -> Result<(), CommandError> {
+    let repo = ProviderRepo::new(state.session_manager.db());
+    let existing = repo
+        .get(OLLAMA_PROVIDER_ID)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    if existing.is_some() {
+        return Ok(());
+    }
+    let config = ProviderConfig {
+        id: OLLAMA_PROVIDER_ID.to_string(),
+        kind: ProviderKind::Ollama,
+        base_url: None,
+        api_key_ref: None,
+        extra: serde_json::Value::Null,
+    };
+    repo.insert(&config)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))
+}
+
 /// Validate a user-supplied local `.gguf` model path: trimmed non-empty, within
 /// bounds, and ending in the `.gguf` extension (case-insensitive). This rejects
 /// obvious mistakes before the path reaches the engine registry; it does NOT
@@ -2153,10 +2201,12 @@ mod tests {
         assert!(validate_nonempty("providerId", "openai", MAX_PROVIDER_ID_LEN).is_ok());
     }
 
-    /// With no configured providers, the command body returns an empty list
-    /// (no network is touched: there are no instances to enumerate). This drives
-    /// the extracted inner fn end-to-end (load configs + pricing, build the
-    /// registry, enumerate) exactly as the `#[tauri::command]` wrapper does.
+    /// With no user-configured providers, the command body returns an empty
+    /// MODEL list. The enumerate path auto-seeds an Ollama config row, but with
+    /// no Ollama server running its `list_models` errors and the provider is
+    /// skipped, so no models surface. This drives the extracted inner fn
+    /// end-to-end (auto-seed Ollama, load configs + pricing, build the registry,
+    /// enumerate) exactly as the `#[tauri::command]` wrapper does.
     #[tokio::test]
     async fn list_available_models_inner_empty_when_no_providers() {
         let state = test_state().await;
@@ -3059,6 +3109,64 @@ mod tests {
             .filter(|c| c.kind == ProviderKind::Embedded)
             .count();
         assert_eq!(embedded_rows, 1);
+    }
+
+    /// Seeding the Ollama provider-config row is idempotent: calling it twice
+    /// (as repeated `list_available_models` enumerations do) inserts exactly one
+    /// `OLLAMA_PROVIDER_ID` row of kind Ollama with no base_url (the adapter
+    /// falls back to its `DEFAULT_BASE_URL`) and no api_key_ref (Ollama is
+    /// keyless), and never errors or duplicates.
+    #[tokio::test]
+    async fn ensure_ollama_provider_config_is_idempotent() {
+        let state = test_state().await;
+        ensure_ollama_provider_config(&state).await.unwrap();
+        ensure_ollama_provider_config(&state).await.unwrap();
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let ollama_rows: Vec<_> = configs
+            .iter()
+            .filter(|c| c.kind == ProviderKind::Ollama)
+            .collect();
+        assert_eq!(ollama_rows.len(), 1);
+        assert_eq!(ollama_rows[0].id, OLLAMA_PROVIDER_ID);
+        assert_eq!(
+            ollama_rows[0].base_url, None,
+            "seeded Ollama row carries no base_url so the adapter uses its DEFAULT_BASE_URL"
+        );
+        assert_eq!(
+            ollama_rows[0].api_key_ref, None,
+            "Ollama is keyless so the seeded row carries no api_key_ref"
+        );
+        // The seeded row is classified provably-local for the routing privacy
+        // gate, so its discovered models group under Local in the picker.
+        assert!(local_provider_ids(&configs).contains(OLLAMA_PROVIDER_ID));
+    }
+
+    /// `list_available_models_inner` auto-seeds the Ollama config row on first
+    /// enumeration (zero user configuration), so an `OLLAMA_PROVIDER_ID` row of
+    /// kind Ollama exists afterwards even though nothing was imported/saved. The
+    /// seeded row contributes no models here because no Ollama server is running
+    /// in the test (the enumerate path skips the unreachable provider), which is
+    /// exactly the safe offline behavior.
+    #[tokio::test]
+    async fn list_available_models_auto_seeds_ollama_provider_config() {
+        let state = test_state().await;
+        // Enumerate as the picker does; this must not error even with no Ollama.
+        let _ = list_available_models_inner(&state).await.unwrap();
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let ollama_rows = configs
+            .iter()
+            .filter(|c| c.kind == ProviderKind::Ollama)
+            .count();
+        assert_eq!(
+            ollama_rows, 1,
+            "the picker's enumerate path must auto-seed exactly one Ollama row"
+        );
     }
 
     /// The embedded-model DTOs are display-safe camelCase and carry no secret
