@@ -1,0 +1,7 @@
+{
+  "task_id": "task-fix-engine-providers-cycle",
+  "task_description": "Fix the routine build-test CI blocker on PR #25 (branch feat/embedded-inference-engine): `error: cyclic package dependency: package engine depends on itself`. The providers crate depends on engine (EmbeddedFactory wrapping engine::EmbeddedEngine) while engine depends on providers (to impl providers::ChatProvider) - a cargo-rejected cycle. Break it via Direction A: make engine self-contained (drop the providers path dep + the in-crate ChatProvider impl, expose a provider-agnostic inference API) and move the ChatProvider impl into providers/src/adapters/embedded.rs (which already depends on engine, one direction only). Preserve the full Strategy B design: EmbeddedFactory registered/priced-ZERO/always-local in the picker, `llama` default-OFF stub with the native path gated to the engine-native CI job. Sandbox is INTEGRATIONS_ONLY (crates.io 403): verify the cycle break structurally + cargo fmt --check offline; compilation is proven only by CI.",
+  "status": "completed",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null
+}

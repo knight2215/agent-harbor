@@ -1672,8 +1672,8 @@ pub async fn load_embedded_model(
     model_id: String,
 ) -> Result<EmbeddedModelStatus, CommandError> {
     validate_nonempty("modelId", &model_id, MAX_MODEL_PATH_LEN)?;
-    let registered = state.embedded_engine.registered_models().await;
-    if !registered.iter().any(|m| m.id == model_id) {
+    let registered = state.embedded_engine.registered_model_ids().await;
+    if !registered.iter().any(|id| id == &model_id) {
         return Err(CommandError::not_found(format!(
             "no imported embedded model with id: {model_id}"
         )));
@@ -1707,7 +1707,7 @@ pub async fn embedded_model_status(
 /// [`load_embedded_model`], and [`unload_embedded_model`].
 async fn embedded_model_status_inner(state: &AppState) -> EmbeddedModelStatus {
     let loaded_model_id = state.embedded_loaded_model.read().await.clone();
-    let registered_count = state.embedded_engine.registered_models().await.len();
+    let registered_count = state.embedded_engine.registered_model_ids().await.len();
     EmbeddedModelStatus {
         loaded_model_id,
         registered_count,
