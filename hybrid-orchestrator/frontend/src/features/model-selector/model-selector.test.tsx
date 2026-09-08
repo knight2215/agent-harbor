@@ -106,6 +106,39 @@ describe("model selector", () => {
     ).toBeNull();
   });
 
+  it("ProviderModelPicker groups a zero-priced embedded model under Local", async () => {
+    // Embedded (in-process llama.cpp) models are seeded to zero price on the
+    // backend, so the zero-price heuristic must surface them under Local. This
+    // test covers the UI GROUPING contract; that the real backend pipeline
+    // actually emits such a zero-priced embedded AvailableModel is proven by the
+    // Rust test `imported_embedded_model_surfaces_in_list_available_models`
+    // (crates/tauri-app/src/commands.rs). Drive the models through the providers
+    // store (an async state set) and assert with findBy* after the update.
+    useProvidersStore.setState({
+      models: [
+        model("embedded", "local-llama-3.gguf", true),
+        model("anthropic", "claude-3-5-sonnet", false),
+      ],
+    });
+    const models = useProvidersStore.getState().models;
+
+    render(<ProviderModelPicker models={models} value={null} onChange={vi.fn()} />);
+
+    const local = await screen.findByRole("region", { name: "Local" });
+    const cloud = await screen.findByRole("region", { name: "Cloud" });
+    // The embedded model is filed under Local (as a free/local model), not Cloud.
+    expect(
+      within(local).getByRole("button", { name: /embedded \/ local-llama-3\.gguf/ }),
+    ).toBeInTheDocument();
+    expect(
+      within(cloud).queryByRole("button", { name: /embedded \/ local-llama-3\.gguf/ }),
+    ).toBeNull();
+    // Its price hint reads as free (the natural Local signal).
+    expect(
+      within(local).getByRole("button", { name: /embedded \/ local-llama-3\.gguf/ }),
+    ).toHaveTextContent("free");
+  });
+
   it("RoutingModeToggle: renders four segmented positions", () => {
     useConversationsStore.setState({
       conversations: [conversation("c-1")],

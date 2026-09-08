@@ -47,7 +47,15 @@ export type RoutingMode = "auto" | "preferLocal" | "preferQuality" | "manual";
 
 /** The supported provider families. Mirrors Rust `ProviderKind`. */
 export type ProviderKind =
-  "openAI" | "anthropic" | "bedrock" | "gemini" | "azure" | "lmStudio" | "genericOpenAI" | "ollama";
+  | "openAI"
+  | "anthropic"
+  | "bedrock"
+  | "gemini"
+  | "azure"
+  | "lmStudio"
+  | "genericOpenAI"
+  | "ollama"
+  | "embedded";
 
 /** Permission gate applied to an MCP server's tool invocations. Mirrors Rust `PermissionMode`. */
 export type PermissionMode = "ask" | "allow" | "deny";
@@ -242,6 +250,28 @@ export interface AvailableModel {
   model: string;
   capabilities: Capabilities;
   price: TokenPrice;
+}
+
+/**
+ * A display-safe view of one imported embedded (local `.gguf`) model (Strategy
+ * B / FEAT-002). Mirrors Rust `commands::EmbeddedModelView`. Carries only the
+ * model id and its on-disk path; never secret material (the embedded engine
+ * needs no key).
+ */
+export interface EmbeddedModelView {
+  id: string;
+  path: string;
+  loaded: boolean;
+}
+
+/**
+ * The embedded engine's lifecycle status (Strategy B / FEAT-002). Mirrors Rust
+ * `commands::EmbeddedModelStatus`: which model (if any) is selected/loaded and
+ * how many local models are imported.
+ */
+export interface EmbeddedModelStatus {
+  loadedModelId: string | null;
+  registeredCount: number;
 }
 
 /**

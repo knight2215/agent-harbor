@@ -302,6 +302,40 @@ A configured Ollama provider that lists its installed models via `/api/tags`, ru
 
 ---
 
+## Phase 9: Embedded local inference engine (Strategy B)
+
+Goal: build the zero-install embedded local inference engine so the app can run local GGUF models in-process via the llama.cpp family, with no separate Ollama or LM Studio install required. The engine implements the same `ChatProvider` contract as every HTTP adapter (emitting OpenAI-shaped `ChatDelta`s), is registered as a first-class local provider (`ProviderKind::Embedded`), routes through the existing Auto / Prefer Local / Prefer Quality / Manual modes, and surfaces imported `.gguf` models under Local in the model picker with a settings surface to import/select/load a local model (Section 4.3).
+
+Dependencies: Phase 2 (the `ChatProvider` contract and registry) and Phase 4 (routing consumes the local classification and zero price). Frontend surfacing depends on Phase 5's model selector and settings surfaces. The heavy native llama.cpp binding is isolated behind a default-off cargo feature so the routine build never needs a C++ toolchain or network.
+
+### Tasks
+
+- **P9.1 Engine crate (`crates/engine`).** Scaffold a new `[workspace] exclude`d crate hosting `EmbeddedEngine`, which implements `ChatProvider` (id `"embedded"`; capabilities streaming-only: tools/vision/json_mode off; a conservative `max_context`). The native llama.cpp binding (`llama-cpp-2`) is an OPTIONAL dependency gated behind a cargo feature `llama` that is DEFAULT OFF. Under default features the crate is a dependency-light stub whose `chat`/`chat_stream` return a clear "not compiled with llama" error; the real llama.cpp-backed path (GGUF load, greedy decode, token-to-`ChatDelta` mapping, terminal finish reason, one model resident at a time) lives entirely behind `#[cfg(feature = "llama")]`. A local `.gguf` model registry (import/select/list) is unit-testable without the native lib; downloading/catalog is deferred.
+- **P9.2 Provider kind.** Add `ProviderKind::Embedded` to `domain` (serializes to `"embedded"` under the existing `rename_all = "camelCase"`), guarded by the camelCase serde test.
+- **P9.3 Factory + registry + pricing wiring.** Add `EmbeddedFactory` (`providers/src/adapters/embedded.rs`) building `engine::EmbeddedEngine` from a `ProviderConfig` (no key needed), register it in `builtin_registry()`, re-export it from the crate root, and seed `ProviderKind::Embedded` at `TokenPrice::ZERO` in `PricingTable::bundled_defaults()`. `providers` gains a path dep on `engine` WITHOUT enabling `llama` by default, plus a `llama` passthrough feature.
+- **P9.4 Local classification.** Classify `ProviderKind::Embedded` as provably-local in the routing privacy gate (`local_provider_ids()` in `tauri-app`) — the engine runs in-process, so it is always local — so `Local-Only` requests may route to it and it is grouped under Local.
+- **P9.5 Lifecycle commands.** Add `#[tauri::command]` handlers for the embedded model lifecycle (list/import/select/load/unload/status of a local `.gguf`), returning display-safe camelCase DTOs (never secret material), registered in `generate_handler!`. Add TS mirrors in `ipc/commands.ts` and DTO types in `types/index.ts`.
+- **P9.6 Frontend surfacing.** Add `"embedded"` to the TypeScript `ProviderKind` union so it mirrors the Rust enum; confirm zero-priced embedded models fall under the Local group in the `ProviderModelPicker` (via the existing zero-price heuristic, with explicit test coverage). Add a first-class embedded-engine surface to `LocalRuntimesSection` (a `.gguf` path input, Import / Load / Unload controls, a per-model Load action in the imported-model list, and a status line showing which model is loaded), wired to the FEAT-002 lifecycle commands (`list`/`import`/`select`/`load`/`unload`/`status`) in `ipc/commands.ts`, keeping the LM Studio + generic OpenAI form intact. Reconcile the stale "coming soon" empty-state: Ollama (shipped in Phase 8) and the embedded engine are presented as available Local providers, and only genuinely-future runtimes (Hugging Face) remain in the informational note, preserving its `role`/`aria-label` and stable test id.
+- **P9.7 CI.** Extend the routine per-crate `build` job to fmt/build/clippy/test `crates/engine` (default features) before `providers`. Add a NEW gated `engine-native` job (gated like `tauri-bundle`: `workflow_dispatch` or `v*` tags) on ubuntu + windows that installs the C/C++ toolchain the llama.cpp binding needs (cmake + C++ compiler + libclang) and runs `cargo build --manifest-path crates/engine/Cargo.toml --features llama`. This is the ONLY native-compile site.
+
+### Deliverable
+
+A zero-install embedded engine that imports/selects a local `.gguf`, runs streaming and non-streaming chat in-process via llama.cpp, implements the `ChatProvider` contract uniformly, is treated as local by the privacy gate and zero-priced by the cost signal, appears under Local in the model picker across all routing modes, and has a settings surface to manage the local model. The native path is isolated behind the default-off `llama` feature and proven by a dedicated gated CI job.
+
+### Parallelization
+
+- P9.1 and P9.2 first (the crate and the shared kind). P9.3, P9.4, and P9.5 then proceed once the crate + kind exist. P9.6 (frontend) depends on P9.2 landing the `"embedded"` serialization and P9.5 landing the commands. P9.7 (CI) lands with the backend wiring; the workflow change is routed through a PR.
+
+### Verification / acceptance
+
+- `cargo test` in `engine` (default features) covers the stub `chat`/`chat_stream` "not compiled" error, the model registry (register/select/list, relative/absolute path resolution), and `capabilities()`/`id()`; an `#[ignore]`d manual test under `--features llama` exercises a real `.gguf`, excluded from CI.
+- `cargo test` in `domain` asserts `ProviderKind::Embedded` serializes to `"embedded"`; the `providers` registry test asserts an Embedded factory is registered (nine kinds total); the `tauri-app` test asserts Embedded is classified local and the embedded-model lifecycle helpers register/select/unload correctly.
+- The gated `engine-native` CI job compiles `cargo build --manifest-path crates/engine/Cargo.toml --features llama` on ubuntu + windows; this is the only place the native llama.cpp path is exercised.
+- A `vitest` test asserts a zero-priced embedded-style model appears under the Local group in the model picker and the settings surface drives the import/select/load commands.
+- Whole-workspace per-crate `cargo build`, `cargo test`, `cargo clippy` (with `-D warnings`), and `vitest` are green, and CI passes on all matrix targets.
+
+---
+
 ## Cross-cutting: testing strategy and deferred items
 
 ### Testing strategy

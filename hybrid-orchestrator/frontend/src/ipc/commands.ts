@@ -3,6 +3,8 @@ import type {
   AgentPersona,
   AvailableModel,
   Conversation,
+  EmbeddedModelStatus,
+  EmbeddedModelView,
   ExportFormat,
   ManualRoute,
   McpServerConfig,
@@ -294,4 +296,61 @@ export function resolvePermission(
   decision: PermissionDecision,
 ): Promise<boolean> {
   return invoke<boolean>("resolve_permission", { requestId, decision });
+}
+
+// --- Embedded local inference engine (Strategy B / FEAT-002) ----------------
+
+/**
+ * List the imported embedded (local `.gguf`) models (architecture.md Section 4,
+ * Strategy B). DISPLAY-SAFE: the rows carry only id/path/loaded, never secret
+ * material. Backed by `list_embedded_models`. The picker / LocalRuntimes UI that
+ * calls this lands in FEAT-003.
+ */
+export function listEmbeddedModels(): Promise<EmbeddedModelView[]> {
+  return invoke<EmbeddedModelView[]>("list_embedded_models");
+}
+
+/**
+ * Import a local `.gguf` model by path, registering it with the embedded engine
+ * (architecture.md Section 4, Strategy B). Returns the refreshed model list.
+ * Backed by `import_embedded_model`.
+ */
+export function importEmbeddedModel(path: string): Promise<EmbeddedModelView[]> {
+  return invoke<EmbeddedModelView[]>("import_embedded_model", { path });
+}
+
+/**
+ * Select (import if needed, then mark active) a local `.gguf` model by path
+ * (architecture.md Section 4, Strategy B). Returns the refreshed model list.
+ * Backed by `select_embedded_model`.
+ */
+export function selectEmbeddedModel(path: string): Promise<EmbeddedModelView[]> {
+  return invoke<EmbeddedModelView[]>("select_embedded_model", { path });
+}
+
+/**
+ * Load (make active) an already-imported embedded model by id (architecture.md
+ * Section 4, Strategy B). Returns the engine status. Backed by
+ * `load_embedded_model`.
+ */
+export function loadEmbeddedModel(modelId: string): Promise<EmbeddedModelStatus> {
+  return invoke<EmbeddedModelStatus>("load_embedded_model", { modelId });
+}
+
+/**
+ * Unload the currently selected/loaded embedded model (architecture.md Section
+ * 4, Strategy B), clearing the active-model state. Returns the engine status.
+ * Backed by `unload_embedded_model`.
+ */
+export function unloadEmbeddedModel(): Promise<EmbeddedModelStatus> {
+  return invoke<EmbeddedModelStatus>("unload_embedded_model");
+}
+
+/**
+ * Report the embedded engine's lifecycle status (architecture.md Section 4,
+ * Strategy B): which model (if any) is selected/loaded and how many are
+ * imported. Backed by `embedded_model_status`.
+ */
+export function embeddedModelStatus(): Promise<EmbeddedModelStatus> {
+  return invoke<EmbeddedModelStatus>("embedded_model_status");
 }

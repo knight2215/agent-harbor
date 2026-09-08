@@ -343,7 +343,7 @@ body {
   color: var(--ah-text-muted);
 }
 
-/* Empty-state placeholder (e.g. future Ollama / Hugging Face runtimes). */
+/* Informational note for genuinely-future local runtimes (e.g. Hugging Face). */
 .settings__empty-state {
   padding: var(--ah-space-5);
   border: 1px dashed var(--ah-border);
@@ -393,6 +393,59 @@ body {
 
 .settings-form button:hover {
   background: var(--ah-accent-strong);
+}
+
+/* --- Embedded engine runtime surface -------------------------------------- */
+
+/* A grouped sub-panel inside Local Runtimes (the embedded engine controls). */
+.settings__subpanel {
+  margin: var(--ah-space-5) 0;
+  padding: var(--ah-space-5);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface-2);
+}
+
+/* A horizontal row of action buttons (Import / Load / Unload). */
+.settings-form__actions {
+  display: flex;
+  gap: var(--ah-space-2);
+  flex-wrap: wrap;
+}
+
+.settings-form__actions button {
+  align-self: auto;
+}
+
+.settings-form__actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* The imported embedded-model list. */
+.settings__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+}
+
+.settings__list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ah-space-3);
+}
+
+.settings__list-label {
+  color: var(--ah-text-muted);
+}
+
+.settings__section-error {
+  margin: 0;
+  color: var(--ah-danger, #c0392b);
 }
 
 /* --- Appearance / theme toggle -------------------------------------------- */
