@@ -87,7 +87,8 @@ body {
 }
 
 .app[data-collapsed="true"] .app__brand-text,
-.app[data-collapsed="true"] .app__nav-label {
+.app[data-collapsed="true"] .app__nav-label,
+.app[data-collapsed="true"] .app__sidebar-history {
   display: none;
 }
 
@@ -169,6 +170,18 @@ body {
 
 .app[data-collapsed="true"] .app__collapse {
   align-self: center;
+}
+
+/*
+ * Tighten the rail's horizontal padding so the centered icon boxes fit the
+ * narrow collapsed width without spilling over and triggering a scrollbar
+ * (the sidebar itself clips overflow, but trimming the padding keeps the
+ * glyphs comfortably inside the rail rather than butting against the edge).
+ */
+.app[data-collapsed="true"] .app__sidebar {
+  padding-left: var(--ah-space-2);
+  padding-right: var(--ah-space-2);
+  align-items: stretch;
 }
 
 .app__sidebar-history {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup } from "@testing-library/react";
 
 const invoke = vi.fn();
 vi.mock("@tauri-apps/api/core", () => ({
@@ -27,6 +27,7 @@ describe("Settings", () => {
   beforeEach(() => {
     invoke.mockReset();
     invoke.mockResolvedValue([]);
+    window.localStorage.clear();
   });
 
   it("renders the sub-navigation and each section by accessible name", async () => {
@@ -74,8 +75,32 @@ describe("Settings", () => {
       providerId: "openai",
       secret: "sk-test",
     });
+    // The "configured" indication shows the provider and its opaque ref.
+    expect(await screen.findByTestId("provider-key-configured-openai")).toBeInTheDocument();
     // The plaintext key is cleared from the field after saving.
-    expect(await screen.findByTestId("provider-key-saved")).toBeInTheDocument();
     expect((screen.getByLabelText("API key") as HTMLInputElement).value).toBe("");
+  });
+
+  it("keeps the configured-key indication after navigating away and back", async () => {
+    invoke.mockResolvedValue("secret-ref://openai");
+    render(<Settings />);
+
+    fireEvent.change(screen.getByLabelText("Provider id"), { target: { value: "openai" } });
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-test" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+
+    expect(await screen.findByTestId("provider-key-configured-openai")).toBeInTheDocument();
+
+    // Simulate navigating to another destination and back: unmount, then mount
+    // a fresh Settings tree (which resets in-component state to defaults).
+    cleanup();
+    render(<Settings />);
+
+    // The indication is rehydrated from the persisted non-secret marker.
+    expect(await screen.findByTestId("provider-key-configured-openai")).toBeInTheDocument();
+    // The plaintext key is never persisted; only the opaque ref is shown.
+    const marker = window.localStorage.getItem("ah-configured-providers");
+    expect(marker).not.toBeNull();
+    expect(marker).not.toContain("sk-test");
   });
 });
