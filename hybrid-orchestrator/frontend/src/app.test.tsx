@@ -248,12 +248,20 @@ describe("<App />", () => {
     expect(listen).toHaveBeenCalledTimes(1);
     expect(unlisten).not.toHaveBeenCalled();
 
+    // Beyond the startup load, opening Settings above mounted ProviderKeysSection
+    // (the default "Providers & Keys" section), whose own mount effect calls the
+    // providers store's load() once. That mount-load is orthogonal to the event
+    // fan-out under test, so capture the current count right before dispatching
+    // the event rather than hardcoding a total; the test then asserts purely
+    // that the providersChanged event drives EXACTLY ONE additional refetch.
+    const before = load.mock.calls.length;
+
     // The registered handler dispatches to every store; a providersChanged
-    // event drives the providers store to refetch its models (a SECOND load
-    // beyond the startup one).
+    // event drives the providers store to refetch its models (one more load
+    // beyond whatever startup + navigation already triggered).
     const handler = listen.mock.calls[0][1] as (event: { payload: unknown }) => void;
     handler({ payload: { type: "providersChanged" } });
-    expect(load).toHaveBeenCalledTimes(2);
+    expect(load).toHaveBeenCalledTimes(before + 1);
   });
 
   it("tears down the subscription on unmount", async () => {
