@@ -373,6 +373,41 @@ These arose while closing this phase and are recorded as deferred and explicitly
 
 ---
 
+## Phase 11: Model picker startup population and refresh-on-change
+
+Goal: close the remaining "I filled in a model and API key and it persists, but nothing reflects in the conversation and the chat picker still says 'No models available yet ...'" gap. Phase 10 made enumeration observable and made cloud keys persist real `ProviderConfig` rows, but two wiring gaps kept the CHAT picker empty: (bug A) the providers store's `load()` was only ever called from the Providers & Keys settings surface, so the chat picker never fetched models at startup or on its own mount; and (bug B) no backend command emitted `CoreEvent::ProvidersChanged`, so even saving a key or starting a runtime never triggered a refetch. This phase loads the store once at startup, emits `ProvidersChanged` after every successful provider-config mutation, and adds an always-available "Refresh models" affordance so failures are never silent. This is frontend wiring plus a fire-and-forget backend emit only; the routing engine, the provider contract, the enumeration shape, the Ollama adapter, and the embedded engine are all untouched. Explicitly OUT OF SCOPE (recorded here so the intent is not lost): embedding or bundling Ollama in-process (Ollama is already integrated and a reachable Ollama showed nothing for the SAME frontend reason, so bundling it would not fix the picker), the embedded-engine folder-scan / gguf-selector rework, any embedded feature-flag or release-bundle change, and the previously-considered HTML5 rewrite (the app stays on Tauri).
+
+Dependencies: Phase 5 (the shell's single `onCoreEvent` fan-out effect and the model-selector / settings surfaces), Phase 10 (the `AvailableModelsResult { models, errors }` shape, the `ProviderEnumerationErrors` component, and the `set_cloud_provider` command family). Section 9.1/9.2 secret-hygiene invariants constrain the diagnostics: only display-safe `models`/`errors` are rendered, never a resolved secret.
+
+### Tasks
+
+- **P11.1 Startup load of the providers store (bug A).** In the shell's single root `useEffect` (empty deps, the one `onCoreEvent` subscription), also trigger `useProvidersStore.getState().load()` once at startup, so the chat model picker is populated on launch without the user first opening Settings. Keep EXACTLY ONE `onCoreEvent` subscription (opened once, torn down once) and the fan-out to every store's `applyCoreEvent` unchanged; do not add effect deps that re-run it. Verification: `vitest` in `frontend/` asserts mounting `<App/>` calls the providers store `load()` once at startup and that the single-subscription invariant still holds (listen called once; a `providersChanged` event drives a second load).
+- **P11.2 Emit `CoreEvent::ProvidersChanged` after successful provider-config mutations (bug B).** In `crates/tauri-app/src/commands.rs`, after each SUCCESSFUL mutation, emit `CoreEvent::ProvidersChanged` through `AppState.core_events` (fire-and-forget, mirroring the existing `McpStateChanged` sends; a dropped UI event must not fail the command). Wire it for `set_cloud_provider`, `clear_cloud_provider`, `set_local_runtime`, `clear_local_runtime`, `import_embedded_model`, `select_embedded_model`, `load_embedded_model`, and `unload_embedded_model`. Emit in the thin `#[tauri::command]` wrapper AFTER the `_inner` body returns `Ok`, so a validation/persist error emits nothing and the existing `_inner` unit tests are unchanged. Remove the now-obsolete `#[allow(dead_code)]` and "no emitter wired yet" comment on `CoreEvent::ProvidersChanged` in `crates/orchestrator-core/src/events.rs`, keeping the other still-unemitted variants' allows and the exhaustive secret-hygiene test compiling. Verification: `cargo test --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml` drains the core-event receiver (`AppState::new` returns `(Self, rx)`) and asserts each mutation emits `ProvidersChanged`, and that a rejected mutation emits nothing; `cargo test --manifest-path hybrid-orchestrator/crates/orchestrator-core/Cargo.toml` keeps the `no_core_event_variant_carries_secret_material` test green.
+- **P11.3 Visible errors near the chat picker plus a Refresh affordance.** With the startup `load()` now running in the chat context, the already-placed `ProviderEnumerationErrors` (inside `PerMessageOverrideControl` in the composer) surfaces "Couldn't load models from &lt;providerId&gt;: &lt;reason&gt;" when a provider fails, without a duplicate stacked error list in the same pane. Add a lightweight, always-available, `aria-label`led "Refresh models" button near the chat picker that calls the providers store `load()` for on-demand re-enumeration. Diagnostics are built ONLY from the display-safe `models`/`errors`; no resolved secret is ever rendered. Verification: `vitest` in `frontend/` asserts the Refresh control calls `load()` / re-runs `list_available_models`, and that `store.errors` render near the chat picker.
+
+### Deliverable
+
+The chat model picker is populated on launch without opening Settings; saving or clearing a cloud key or local runtime (and the embedded-model import/select/load/unload) emits `CoreEvent::ProvidersChanged` so the picker refetches; a failing provider surfaces a display-safe "Couldn't load models from ..." line near the chat picker instead of a silently empty picker; and an always-available "Refresh models" affordance lets the user re-enumerate on demand.
+
+### Parallelization
+
+- P11.1 (frontend startup load) and P11.2 (backend emit) touch disjoint seams (`app.tsx` versus `commands.rs`/`events.rs`) and can proceed in parallel. P11.3 (visible errors plus Refresh affordance) builds on P11.1's startup load running in the chat context, so land P11.1 first or together with it.
+
+### Verification / acceptance
+
+- `cargo fmt --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml --check` and `... crates/orchestrator-core/Cargo.toml --check` pass (offline).
+- `cargo test --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml` covers the `ProvidersChanged` emit on each mutation (draining the receiver) and no emit on a rejected mutation.
+- `cargo test --manifest-path hybrid-orchestrator/crates/orchestrator-core/Cargo.toml` keeps the secret-hygiene exhaustiveness test green after removing the `ProvidersChanged` `#[allow(dead_code)]`.
+- `vitest` in `frontend/` asserts the startup `load()`, the preserved single-subscription invariant, the Refresh affordance calling `load()`, and errors rendering near the chat picker.
+- Per-crate `cargo build`, `cargo test`, `cargo clippy` (with `-D warnings`), `vitest`, eslint, prettier, and `tauri build` are green, and CI passes on all matrix targets.
+
+### Future work / considered alternatives
+
+- **Bundling Ollama in-process.** Considered and explicitly rejected for this phase: Ollama is already integrated (`ensure_ollama_provider_config` seeds it and enumeration goes through `GET /api/tags`), and a reachable Ollama showed nothing for the SAME frontend reason this phase fixes (the picker store was never loaded), so bundling Ollama would not have fixed the picker. Out of scope.
+- **HTML5 rewrite.** Considered and rejected: the app stays on Tauri (the desktop shell, keychain-backed `SecretStore`, and native embedded engine are core constraints). No action taken.
+
+---
+
 ## Cross-cutting: testing strategy and deferred items
 
 ### Testing strategy

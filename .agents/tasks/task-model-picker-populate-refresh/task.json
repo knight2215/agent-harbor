@@ -1,0 +1,7 @@
+{
+  "task_id": "task-model-picker-populate-refresh",
+  "task_description": "Fix the real root cause behind 'the model picker shows nothing' (neither a reachable Ollama's models nor a cloud provider after adding a Kiro/Gemini key, with no visible error). Two bugs, one net effect: (A) frontend/src/state/providers.ts load() is never called on app startup or on chat-picker mount (only Settings > Providers & Keys calls it), so the chat picker store starts empty and stays empty; and (B) the backend never emits CoreEvent::ProvidersChanged, so saving a key/runtime never refetches. Fix: load the providers store once at app startup in app.tsx's existing top-level effect (mirroring how other surfaces load on mount), emit CoreEvent::ProvidersChanged via AppState.core_events after the provider-config mutation commands (route a - the sender is already available and used for MCP events), surface enumeration errors near the chat picker, and add an always-available Refresh affordance so failures are never silent (the user's build is the only live test rig). Stay on Tauri (no HTML5 rewrite). Do NOT touch embedded engine feature-flagging/release bundle or the embedded folder-scan rework. Update the spec. Do NOT push/tag/PR.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002"],
+  "blocked_reason": null
+}

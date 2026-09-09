@@ -19,6 +19,7 @@ export function PerMessageOverrideControl() {
   const setPendingOverride = useConversationsStore((s) => s.setPendingOverride);
   const models = useProvidersStore((s) => s.models);
   const errors = useProvidersStore((s) => s.errors);
+  const load = useProvidersStore((s) => s.load);
 
   const choose = (route: ManualRoute) => {
     setPendingOverride(route);
@@ -26,6 +27,14 @@ export function PerMessageOverrideControl() {
 
   const clear = () => {
     setPendingOverride(null);
+  };
+
+  // Always-available manual re-enumeration: re-run `list_available_models` so a
+  // user who just started a local runtime or fixed a key can pull models in
+  // without restarting or reopening Settings. Fire-and-forget; failures surface
+  // via the store's `errors` (rendered by ProviderEnumerationErrors below).
+  const refresh = () => {
+    void load();
   };
 
   return (
@@ -42,6 +51,15 @@ export function PerMessageOverrideControl() {
             </button>
           </>
         )}
+        <button
+          type="button"
+          className="per-message-override__refresh"
+          aria-label="Refresh models"
+          data-testid="refresh-models"
+          onClick={refresh}
+        >
+          ↻ Refresh models
+        </button>
       </div>
       {/* Surface why any provider failed to enumerate, near the picker, so a
           misconfigured/unreachable provider is diagnosable. Rendered alongside

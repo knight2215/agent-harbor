@@ -1,0 +1,67 @@
+{
+  "id": "FEAT-001",
+  "type": "chore",
+  "description": "Establish the offline verification baseline and confirm the root-cause diagnosis in code before changing anything. INTEGRATIONS_ONLY sandbox: crates.io + npm are 403, no Tauri CLI, no live Ollama/cloud endpoint - real gates (cargo build/clippy/test, eslint/tsc/vitest, tauri build) run in GitHub CI after push, and behavioral proof is the user's built release. This feature does NOT modify product behavior; it records exactly which offline checks are runnable here and re-verifies the diagnosis so FEAT-002 edits are grounded.",
+  "status": "completed",
+  "steps": [
+    "Confirm the working tree is on branch fix/model-picker-populate-refresh-diagnostics and clean (git status).",
+    "Determine which offline tools are available WITHOUT network: run `cargo --version`, `node --version`, `npx --version`; check whether hybrid-orchestrator/frontend/node_modules exists (glob) and whether a cargo registry cache is present. Record findings in FEAT-001.findings. Do NOT attempt `npm install` or `cargo build` (they will 403).",
+    "If (and only if) cargo is present, run per-crate format checks that need no registry: `cargo fmt --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml --check` and `... crates/orchestrator-core/Cargo.toml --check`. Record pass/fail. Do NOT run `cargo fmt --all`.",
+    "If node_modules is present, from hybrid-orchestrator/frontend run `NODE_OPTIONS= npx prettier --check .` and record the result. If absent, note that prettier/eslint/tsc/vitest can only be validated in CI and that manual review will substitute.",
+    "Re-confirm the diagnosis by reading: frontend/src/state/providers.ts (load() defined, refetch on 'providersChanged'), frontend/src/app.tsx (top-level useEffect subscribes to onCoreEvent and calls each store's applyCoreEvent but NEVER calls providers load()), the chat picker components (features/model-selector/PerMessageOverrideControl.tsx, RoutingModeToggle.tsx; features/agent-editor/DefaultRoutePicker.tsx) which only READ s.models, and crates/orchestrator-core/src/events.rs (CoreEvent::ProvidersChanged carries #[allow(dead_code)] 'no emitter wired yet'). Grep crates/tauri-app/src/commands.rs for `ProvidersChanged` to confirm it is NOT emitted anywhere, and for `core_events.send` to confirm the sender IS available to commands (McpStateChanged/McpError already use it). Write a short confirmation into FEAT-001.findings.",
+    "Enumerate every test that will need updated IPC mocks or new coverage for FEAT-002: grep frontend/src for test files that mount <App/> (app.test.tsx) or a picker/settings surface, and note which already mock list_available_models -> { models, errors } (app.test.tsx does) and which set the store via setState only. Record this inventory in FEAT-001.findings so FEAT-002 updates every affected mock."
+  ],
+  "acceptance_criteria": [
+    "FEAT-001.findings records exactly which offline checks are runnable in this sandbox (cargo present?, node_modules present?, prettier/fmt runnable?) and their results, plus the explicit statement that build/clippy/test/eslint/tsc/vitest/tauri-build are CI-only here.",
+    "FEAT-001.findings contains a written confirmation of the root cause: load() is never called on startup or on chat-picker mount (only ProviderKeysSection calls it), and CoreEvent::ProvidersChanged is never emitted by the backend, with the AppState.core_events sender confirmed available to command handlers.",
+    "FEAT-001.findings lists the test files whose IPC mocks or coverage FEAT-002 must touch.",
+    "No product source files (Rust or TS) are modified in this feature."
+  ],
+  "verification": [
+    "Run the available offline checks recorded above (per-crate `cargo fmt --check` and/or frontend `npx prettier --check .`) and confirm they pass on the unmodified tree, establishing a clean baseline. If neither tool is runnable offline, record that explicitly.",
+    "git status shows no modifications to source files (only the .agents task state may change)."
+  ],
+  "blocked_reason": null,
+  "findings": {
+    "branch_and_tree": "On branch fix/model-picker-populate-refresh-diagnostics. Working tree clean of source changes; only untracked .agents/tasks/task-model-picker-populate-refresh/ task state present. git log HEAD = 60f58a7 (Merge PR #35, chore: bump v0.7.1).",
+    "offline_tooling": {
+      "cargo": "PRESENT - cargo 1.92.0 (344c4567c 2025-10-21). Cargo registry cache present at ~/.cargo/registry (index.crates.io-...). Per-crate `cargo fmt --check` runs offline (no registry download needed).",
+      "node": "PRESENT - node v22.23.2. npx v11.4.2 usable but ONLY with NODE_OPTIONS= (the default NODE_OPTIONS points at a missing /opt/amazon/kiro-agent/proxy-bootstrap.js preload that makes bare `npx` fail).",
+      "frontend_node_modules": "ABSENT - hybrid-orchestrator/frontend/node_modules does not exist (npm ci/install would 403 in this INTEGRATIONS_ONLY sandbox). Therefore prettier, eslint, tsc, and vitest CANNOT run offline here.",
+      "ci_only_gates": "EXPLICIT: cargo build, cargo clippy -D warnings, cargo test, eslint (npm run lint), prettier (npm run format:check), tsc, vitest (npm run test), and tauri build are ALL CI-ONLY in this sandbox (crates.io + npm 403, no Tauri CLI, no live Ollama/cloud endpoint). Behavioral proof is the user's built release."
+    },
+    "offline_checks_run": {
+      "cargo_fmt_tauri_app": "PASS - `cargo fmt --manifest-path crates/tauri-app/Cargo.toml --check` (cwd hybrid-orchestrator) exit 0 on the unmodified tree.",
+      "cargo_fmt_orchestrator_core": "PASS - `cargo fmt --manifest-path crates/orchestrator-core/Cargo.toml --check` (cwd hybrid-orchestrator) exit 0 on the unmodified tree.",
+      "prettier": "NOT RUNNABLE - node_modules absent, so `NODE_OPTIONS= npx prettier --check .` cannot run offline. Prettier/eslint/tsc/vitest will be validated in CI; exhaustive manual review substitutes here.",
+      "note_on_fmt_all": "Did NOT run `cargo fmt --all` (workspace is memberless and it breaks). Only per-manifest fmt --check was used, which is the correct/safe path."
+    },
+    "root_cause_confirmation": {
+      "frontend_load_never_called_on_startup": "CONFIRMED. frontend/src/state/providers.ts defines load() -> listAvailableModels() setting { models: result.models ?? [], errors: result.errors ?? [] }, initial state models:[], errors:[]. applyCoreEvent refetches ONLY when event.type === 'providersChanged'. frontend/src/app.tsx's single top-level useEffect (empty deps) subscribes via onCoreEvent and fans each CoreEvent into every store's applyCoreEvent (conversations/providers/tools/personas) - it NEVER calls useProvidersStore.getState().load(). So the chat-picker store starts empty and nothing fills it at startup.",
+      "only_settings_calls_load": "CONFIRMED. The ONLY non-test caller of the providers store load() is features/settings/ProviderKeysSection.tsx (const loadProviders = useProvidersStore((s)=>s.load); called in a mount useEffect L85-86, and after set/clear cloud at L116 and L137). The chat picker components only READ s.models: RoutingModeToggle.tsx (L43), PerMessageOverrideControl.tsx (L20 models, L21 errors), agent-editor/DefaultRoutePicker.tsx (L21). None trigger a fetch. This is why opening Settings > Providers & Keys DOES populate the chat picker (same singleton store) while the chat surface alone never does.",
+      "backend_never_emits_providerschanged": "CONFIRMED. `grep -rn ProvidersChanged crates/` returns matches ONLY in orchestrator-core/src/events.rs (module doc L23, the variant definition L120 carrying #[allow(dead_code)] with comment 'no emitter wired yet (provider/model selector surface)', and two test references L143/L245/L266). It is NEVER emitted from crates/tauri-app/src/commands.rs or anywhere else. So saving a cloud key / local runtime / embedded model never triggers a refetch.",
+      "core_events_sender_available_to_commands": "CONFIRMED. crates/tauri-app/src/state.rs L137 `pub core_events: UnboundedSender<CoreEvent>`, and AppState::new (L209) / test ctor (L246) build it via tokio unbounded_channel returning (core_events, rx) so tests can drain rx to assert an emit. commands.rs already uses the fire-and-forget pattern `let _ = state.core_events.send(orchestrator_core::CoreEvent::McpStateChanged{..})` and `..::McpError{..}` (e.g. refresh_mcp_tools ~L1755/1780/1788, disable path ~L1755). FEAT-002 can mirror this exact pattern to emit CoreEvent::ProvidersChanged after successful provider-config mutations.",
+      "net_effect": "This single wiring gap (no startup load + no ProvidersChanged emitter) explains BOTH 'Ollama shows nothing' AND 'adding a Kiro/Gemini cloud key does nothing', and why no error surfaced (load() never ran in the chat context, so there was no failed call to populate the display-safe errors list). ProviderEnumerationErrors is already placed in the composer/settings but stayed empty because load() never ran there."
+    },
+    "test_inventory_for_feat_002": {
+      "renders_full_App": [
+        "src/app.test.tsx - Mocks @tauri-apps/api/core invoke via routeInvoke(); ALREADY returns list_available_models -> { models: [], errors: [] } and also list_conversations/list_personas/list_mcp_servers -> [], list_cloud_providers/list_local_runtimes/list_embedded_models -> [], embedded_model_status -> {loadedModelId:null,registeredCount:0}. Has a 'SINGLE core-event subscription' test that does useProvidersStore.setState({ load: spy }) and asserts the spy is called ONLY after a providersChanged event. ACTION for FEAT-002: adding a startup load() will call that spy once at mount - update that test's expectation (and/or add explicit coverage asserting startup triggers load()). The invoke mock already has the needed shape.",
+        "src/state/theme.test.tsx - Renders <App/> but its core mock is invoke: vi.fn().mockResolvedValue(undefined) for ALL commands (no per-command routing). A startup load() will call list_available_models and receive undefined; providers.ts guards with (result.models ?? []) so it won't throw, but FEAT-002 should VERIFY this test stays green (or give it a proper list_available_models shape) after wiring startup load()."
+      ],
+      "mount_picker_or_editor_surfaces_setState_only": [
+        "src/features/model-selector/model-selector.test.tsx - Mocks @tauri core invoke (L4-6) but seeds the store via useProvidersStore.setState({ models, errors }) (L68,129,175,232,256,279) and calls getState().load()/applyCoreEvent directly (L302,319,338). invoke.mockResolvedValue(undefined) default. ACTION: if FEAT-002 adds a 'Refresh models' affordance that calls load(), add a test + ensure invoke returns a well-formed { models, errors } for list_available_models when the button is clicked.",
+        "src/features/agent-editor/agent-editor.test.tsx - Mocks @tauri core (L5), seeds providers via setState (L67,80,140). ACTION: if DefaultRoutePicker gains a refresh or App-driven startup load path is exercised, ensure list_available_models mock shape is provided.",
+        "src/features/chat/chat.test.tsx - Mocks @tauri core (L6) and references useProvidersStore. ACTION: verify any load() triggered through the chat composer/Refresh has a mocked list_available_models -> { models, errors }.",
+        "src/features/settings/settings.test.tsx - Mocks @tauri core (L5). ProviderKeysSection already calls load() on mount + after set/clear; if FEAT-002 adds a per-provider diagnostics line, extend coverage. Ensure list_available_models mock shape present."
+      ],
+      "store_unit_test": [
+        "src/state/providers.test.ts - Mocks @tauri core invoke (L4-5); asserts load() calls invoke('list_available_models') and sets models/errors (L41-66). ACTION: extend for any NEW refresh action FEAT-002 adds to the store shape."
+      ],
+      "backend_test": [
+        "crates/tauri-app/src/commands.rs unit tests + crates/tauri-app/src/state.rs (AppState::new returns (Self, rx)) - FEAT-002 should add/adjust tauri-app tests that drain the core_events rx to assert CoreEvent::ProvidersChanged is emitted after set_cloud_provider / clear_cloud_provider / set_local_runtime / clear_local_runtime / import_embedded_model / select_embedded_model (and consider load_embedded_model / unload_embedded_model).",
+        "crates/orchestrator-core/src/events.rs - The exhaustive no_core_event_variant_carries_secret_material test and the camelCase serialize test already cover ProvidersChanged; FEAT-002 must keep those match arms compiling and, when the emitter is wired, remove the #[allow(dead_code)] on ProvidersChanged (L119) so intent stays honest (verify no other dead_code use remains)."
+      ]
+    },
+    "no_source_modified": "Confirmed: no Rust or TS product source files were modified in FEAT-001. Only .agents task state (this FEAT-001.json) changed."
+  }
+}
