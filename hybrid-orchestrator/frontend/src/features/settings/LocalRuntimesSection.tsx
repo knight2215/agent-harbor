@@ -226,6 +226,7 @@ export function LocalRuntimesSection() {
             type="text"
             value={baseUrl}
             placeholder="http://localhost:1234/v1"
+            aria-label="Base URL"
             onChange={(event) => setBaseUrl(event.target.value)}
           />
           <span className="settings__field-help" data-testid="local-base-url-help">
