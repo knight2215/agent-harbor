@@ -28,6 +28,7 @@ import { ProviderEnumerationErrors } from "../model-selector/ProviderEnumeration
 import { clearCloudProvider, listCloudProviders, setCloudProvider } from "../../ipc/commands";
 import { useProvidersStore } from "../../state/providers";
 import type { CloudProviderConfig } from "../../types";
+import { adviseGenericOpenAiBaseUrl } from "./baseUrlAdvisory";
 
 /** The cloud provider kinds configurable here, in dropdown order. */
 type CloudKind = "openAI" | "anthropic" | "gemini" | "bedrock" | "azure" | "genericOpenAI";
@@ -67,6 +68,18 @@ export function ProviderKeysSection() {
   // Kiro (genericOpenAI) has no default endpoint, so its base URL is required
   // and shown; the other cloud kinds default it in the adapter (field hidden).
   const requiresBaseUrl = kind === "genericOpenAI";
+
+  // A live, NON-BLOCKING client advisory for the entered base URL (genericOpenAI
+  // only): steers the user away from pasting a web/session or model endpoint URL
+  // before they save. This never blocks the save (the backend remains the
+  // enforcement point and also attaches its own advisory); it is guidance shown
+  // as they type.
+  const baseUrlAdvisory = requiresBaseUrl
+    ? adviseGenericOpenAiBaseUrl(
+        baseUrl,
+        "Enter the API root (e.g. https://host/v1) so models can be enumerated.",
+      )
+    : null;
 
   // Surface per-provider enumeration failures from the providers store so a user
   // who just added a key sees WHY a provider still contributed no models
@@ -162,11 +175,24 @@ export function ProviderKeysSection() {
             <input
               type="text"
               value={baseUrl}
-              placeholder="https://your-kiro-endpoint/v1"
+              placeholder="https://host/v1"
               aria-label="Base URL"
               onChange={(event) => setBaseUrl(event.target.value)}
             />
+            <span className="settings__field-help" data-testid="cloud-base-url-help">
+              Enter the OpenAI-compatible API base URL, e.g. https://host/v1 - not a web or session
+              URL.
+            </span>
           </label>
+        )}
+        {baseUrlAdvisory !== null && (
+          <p
+            className="settings__section-desc"
+            role="status"
+            data-testid="cloud-provider-base-url-advisory"
+          >
+            {baseUrlAdvisory}
+          </p>
         )}
         <label>
           API key

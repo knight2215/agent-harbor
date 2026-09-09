@@ -261,6 +261,16 @@ where
 /// why. The recorded message is a static, display-safe string (no secret
 /// material).
 ///
+/// This is the thin, backwards-compatible entry point: it delegates to
+/// [`list_available_models_with_build_errors`] with an EMPTY build-error map, so
+/// every existing caller (and the external
+/// `crates/providers/tests/demo_provider_extension.rs`) keeps its 3-argument
+/// signature and its behavior (an unbuilt row falls back to the static generic
+/// message). Callers that captured the real per-row build error at build time
+/// (the tauri-app diagnostics and picker) should call
+/// [`list_available_models_with_build_errors`] instead so the REAL cause is
+/// surfaced.
+///
 /// Because it drives the trait method, tests inject a fake [`ChatProvider`]
 /// whose `list_models` returns a fixed list, so no live network is required.
 pub async fn list_available_models(
@@ -268,20 +278,54 @@ pub async fn list_available_models(
     configs: &[ProviderConfig],
     pricing: &PricingTable,
 ) -> Result<AvailableModelsResult, ProviderError> {
+    list_available_models_with_build_errors(registry, configs, pricing, &BTreeMap::new()).await
+}
+
+/// The full enumeration, parameterised by a map of per-row build errors captured
+/// by the caller when it built the registry (keyed by `ProviderConfig::id`, value
+/// = the display-safe `ProviderError` Display string).
+///
+/// It behaves exactly like [`list_available_models`] EXCEPT for the unbuilt-row
+/// branch: when `registry.get(&cfg.id)` is `None`, it prefers a real captured
+/// build error from `build_errors` over the static generic message. That is the
+/// fix for the "provider is configured but no instance was built" diagnosis being
+/// unhelpfully generic: the tauri-app callers used to discard the
+/// `Err(ProviderError)` from `build_from_config` (via `let _ =`), so the only
+/// thing left to report was the generic string. By threading the captured error
+/// through here, a Gemini/generic build failure surfaces its REAL cause (a bad
+/// key ref, a missing base_url, an auth resolve failure) in the picker's
+/// enumeration errors and the diagnostics panel.
+///
+/// DISPLAY-SAFE: `build_errors` values are `ProviderError` Display strings, which
+/// carry only a reason (never resolved key material); this function copies them
+/// verbatim into [`ProviderEnumerationError::message`].
+pub async fn list_available_models_with_build_errors(
+    registry: &ProviderRegistry,
+    configs: &[ProviderConfig],
+    pricing: &PricingTable,
+    build_errors: &BTreeMap<String, String>,
+) -> Result<AvailableModelsResult, ProviderError> {
     let mut models_out = Vec::new();
     let mut errors_out = Vec::new();
     for cfg in configs {
         let Some(instance) = registry.get(&cfg.id) else {
             // No live instance for this config row: its factory build failed or
-            // was skipped. Record it as a display-safe enumeration error instead
-            // of silently continuing, so a configured-but-unbuilt provider is
-            // diagnosable rather than an invisible clean-empty cause. The message
-            // is a static string and carries no secret material.
+            // was skipped. Prefer the REAL build error the caller captured for
+            // this row (the discarded `Err(ProviderError)` from
+            // `build_from_config`), falling back to a static, display-safe
+            // generic string only when the caller supplied none. Either way the
+            // row is recorded rather than silently dropped, so a
+            // configured-but-unbuilt provider is diagnosable instead of an
+            // invisible clean-empty cause, and neither message carries secret
+            // material.
+            let message = build_errors.get(&cfg.id).cloned().unwrap_or_else(|| {
+                "provider is configured but no instance was built \
+                 (build failed or was skipped); it cannot be enumerated"
+                    .to_string()
+            });
             errors_out.push(ProviderEnumerationError {
                 provider_id: cfg.id.clone(),
-                message: "provider is configured but no instance was built \
-                          (build failed or was skipped); it cannot be enumerated"
-                    .to_string(),
+                message,
             });
             continue;
         };
@@ -612,6 +656,46 @@ mod tests {
         assert!(json.contains("\"message\""));
         assert!(!json.contains("apiKey"));
         assert!(!json.contains("secret"));
+    }
+
+    /// `list_available_models_with_build_errors` prefers a caller-supplied real
+    /// build error over the static generic "no instance was built" message for an
+    /// unbuilt row, and the 3-arg `list_available_models` delegation (empty map)
+    /// still yields the generic message. This pins the FEAT-001 fix: the tauri-app
+    /// callers now capture the discarded `Err(ProviderError)` from
+    /// `build_from_config` and thread it through here so the picker/diagnostics
+    /// surface the REAL cause.
+    #[tokio::test]
+    async fn build_errors_are_preferred_over_the_generic_message() {
+        // An empty registry has no instances, so the configured row is unbuilt.
+        let registry = builtin_registry();
+        let configs = vec![config("gemini-cloud", ProviderKind::Gemini)];
+        let pricing = PricingTable::new();
+
+        // With a captured build error for the row, the recorded enumeration error
+        // is EXACTLY that real message (not the generic string).
+        let real = "auth error: no secret found for handle 'gemini-cloud'".to_string();
+        let mut build_errors = BTreeMap::new();
+        build_errors.insert("gemini-cloud".to_string(), real.clone());
+        let result =
+            list_available_models_with_build_errors(&registry, &configs, &pricing, &build_errors)
+                .await
+                .unwrap();
+        assert!(result.models.is_empty());
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].provider_id, "gemini-cloud");
+        assert_eq!(result.errors[0].message, real);
+        // The generic fallback string is NOT used when a real error is supplied.
+        assert!(!result.errors[0].message.contains("no instance was built"));
+
+        // The empty-map delegation path (what the 3-arg fn uses) still falls back
+        // to the static generic message, preserving the pre-fix behavior for
+        // callers that captured no build error.
+        let generic = list_available_models(&registry, &configs, &pricing)
+            .await
+            .unwrap();
+        assert_eq!(generic.errors.len(), 1);
+        assert!(generic.errors[0].message.contains("no instance was built"));
     }
 
     #[test]

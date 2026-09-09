@@ -23,7 +23,9 @@ use orchestrator_core::{
 use persistence::config::{AppConfig, PricingConfig};
 use persistence::{McpServerRepo, ProviderRepo};
 use providers::{
-    list_available_models as list_models, AvailableModelsResult, PricingTable, TokenPrice,
+    list_available_models as list_models,
+    list_available_models_with_build_errors as list_models_with_build_errors,
+    AvailableModelsResult, PricingTable, TokenPrice,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -504,12 +506,20 @@ async fn list_available_models_inner(
     // build surfaces it as a per-provider error instead of a whole-list abort,
     // preserving per-provider isolation.
     let mut registry = providers::builtin_registry();
+    // Capture each per-row build failure (keyed by cfg.id) instead of discarding
+    // it. A per-row build failure (missing factory, secret resolution error, bad
+    // config) is STILL isolated: the row is simply left un-built so the other
+    // rows still build (preserving the v0.7.3 non-fatal behavior), but the real
+    // ProviderError Display is threaded into the shared enumeration below so the
+    // picker's enumeration error carries the REAL cause instead of the generic
+    // "no instance was built" message. DISPLAY-SAFE: err.to_string() is a
+    // ProviderError Display, which carries only a reason (never key material).
+    let mut build_errors: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for cfg in &configs {
-        // A per-row build failure (missing factory, secret resolution error,
-        // bad config) is isolated: the row is simply left un-built so the
-        // enumeration path reports it per-provider, and the other rows still
-        // build. DISPLAY-SAFE: no secret material is logged or surfaced here.
-        let _ = registry.build_from_config(cfg, state.secret_store.as_ref());
+        if let Err(err) = registry.build_from_config(cfg, state.secret_store.as_ref()) {
+            build_errors.insert(cfg.id.clone(), err.to_string());
+        }
     }
 
     // Bridge the embedded engine seam (FEAT-002): the lifecycle commands import
@@ -530,8 +540,9 @@ async fn list_available_models_inner(
     ));
 
     // Enumerate models (may hit the network per provider) and attach
-    // capabilities + price.
-    list_models(&registry, &configs, &pricing)
+    // capabilities + price. Feed the captured per-row build errors so an unbuilt
+    // row surfaces its REAL build-failure cause instead of the generic message.
+    list_models_with_build_errors(&registry, &configs, &pricing, &build_errors)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))
 }
@@ -671,8 +682,19 @@ async fn provider_diagnostics_inner(
     // simply left un-built so the diagnostic reports instance_built == false with
     // a display-safe error.
     let mut registry = providers::builtin_registry();
+    // Capture each per-row build failure (keyed by cfg.id) EXACTLY as
+    // list_available_models_inner does, rather than discarding it. The per-row
+    // failure is still non-fatal (the row is left un-built, instance_built ==
+    // false), but the real ProviderError Display is threaded into the shared
+    // enumeration below so the ProviderDiagnostic.error field carries the REAL
+    // cause instead of the generic "no instance was built" message. DISPLAY-SAFE:
+    // err.to_string() is a ProviderError Display (a reason, never key material).
+    let mut build_errors: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for cfg in &configs {
-        let _ = registry.build_from_config(cfg, state.secret_store.as_ref());
+        if let Err(err) = registry.build_from_config(cfg, state.secret_store.as_ref()) {
+            build_errors.insert(cfg.id.clone(), err.to_string());
+        }
     }
 
     // Bridge the embedded engine seam exactly as list_available_models_inner
@@ -682,25 +704,30 @@ async fn provider_diagnostics_inner(
         providers::EmbeddedProvider::from_shared(state.embedded_engine.clone()),
     ));
 
-    // Run the SAME shared enumeration the picker runs (the `list_models` alias
-    // for `providers::list_available_models`) exactly ONCE, then DERIVE the
-    // per-provider report from its result. This is deliberately NOT a second
+    // Run the SAME shared enumeration the picker runs (the
+    // `list_models_with_build_errors` alias for
+    // `providers::list_available_models_with_build_errors`, fed the same captured
+    // per-row build errors) exactly ONCE, then DERIVE the per-provider report
+    // from its result. This is deliberately NOT a second
     // inline get/list_models/count-or-error loop: re-implementing the picker's
     // per-row logic here (including its "no instance was built" message) would
     // let the two silently drift, which would make the diagnostics misleading
     // (the exact failure this diagnostics surface exists to prevent). Consuming
     // the shared result makes the mirror structural: the model_count and error
     // of each row are, by construction, whatever the picker saw.
-    let AvailableModelsResult { models, errors } = list_models(&registry, &configs, &pricing)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let AvailableModelsResult { models, errors } =
+        list_models_with_build_errors(&registry, &configs, &pricing, &build_errors)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
 
     // Derive each row's diagnostic from the shared enumeration result plus the
     // configs. `model_count` is how many of the enumerated models the shared fn
     // attributed to this row's id; `error` is the display-safe message of any
     // enumeration error the shared fn recorded for this row (an unreachable
-    // endpoint OR the "configured but no instance built" invisible-skip case,
-    // which the shared fn now records under the same provider_id).
+    // endpoint OR the unbuilt-row case, which now carries the REAL captured
+    // build-failure cause when one was captured, falling back to the generic
+    // "configured but no instance built" string otherwise, under the same
+    // provider_id).
     let mut diagnostics = Vec::with_capacity(configs.len());
     let mut provider_count_with_models = 0usize;
     for cfg in &configs {
@@ -939,6 +966,63 @@ fn check_provider_base_url(url: &str) -> Result<Option<String>, CommandError> {
     }
 }
 
+/// An ADVISORY (non-blocking) shape check for a GenericOpenAI `base_url`
+/// (Kiro / generic OpenAI-compatible). It returns a display-safe advisory
+/// string when the entered URL clearly is NOT an OpenAI-compatible API root but
+/// a web/session URL or a full model endpoint - the two real-world mistakes
+/// users hit: pasting a Kiro session URL (`.../session/<uuid>`) or a Gemini
+/// `...:generateContent` model URL into the generic OpenAI-compatible field.
+///
+/// This is guidance ONLY: it NEVER blocks the save (link-local/metadata IPs
+/// remain the sole blocked case, enforced by [`validate_base_url`]); the
+/// backend enumeration surfaces the concrete failure (a 404 / HTML-not-JSON
+/// decode error) once the row is built. It is intentionally narrow (the two
+/// unambiguous path shapes plus a bare `generativelanguage.googleapis.com`
+/// host, for parity with the client advisory) so a legitimate API root like
+/// `https://host/v1` is never flagged. The returned message is host/path-shape
+/// based and carries no secret material. Returns `None` for a URL that looks
+/// like an API root.
+fn advise_generic_openai_base_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    // Compare against the path/host shape only; strip any query/fragment so a
+    // `?foo=:generateContent` style tail cannot false-positive.
+    let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
+    let path_and_host = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    let looks_like_session = path_and_host.contains("/session/");
+    let looks_like_generate = path_and_host.ends_with(":generateContent");
+    // A bare Gemini host root (e.g. `https://generativelanguage.googleapis.com/
+    // v1beta/models`) is not `:generateContent` yet is still not an
+    // OpenAI-compatible API root, so flag it by host for parity with the client
+    // advisory. Reuse the single shared [`extract_host`] parser (lowercases and
+    // strips scheme/credentials/port) rather than re-parsing here.
+    let is_gemini_host = extract_host(path_and_host) == "generativelanguage.googleapis.com";
+    if looks_like_session || looks_like_generate || is_gemini_host {
+        return Some(format!(
+            "base_url {trimmed:?} looks like a web/session or model endpoint URL, not an \
+             OpenAI-compatible API base URL; enter the API root (e.g. https://host/v1) so \
+             models can be enumerated"
+        ));
+    }
+    None
+}
+
+/// Merge two optional advisory strings into the single `warning` field carried
+/// by the cloud/local config views. When both a base-url posture warning (e.g.
+/// plaintext-TLS) and a GenericOpenAI shape advisory are present, they are
+/// concatenated with a single space so the user sees both; otherwise whichever
+/// is present (or `None`) is returned unchanged.
+fn merge_warnings(primary: Option<String>, secondary: Option<String>) -> Option<String> {
+    match (primary, secondary) {
+        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 // --- Local runtime configuration (Section 9.3 write path) ------------------
 
 /// Upper bound on a user-supplied provider `base_url` (Section 9.2 "bounds").
@@ -1066,7 +1150,14 @@ async fn set_local_runtime_inner(
     // reaches the core; a Blocked target errors and persists nothing.
     let base_url = base_url.trim();
     validate_nonempty("baseUrl", base_url, MAX_BASE_URL_LEN)?;
-    let warning = check_provider_base_url(base_url)?;
+    let mut warning = check_provider_base_url(base_url)?;
+    // ADVISORY (non-blocking) shape check for the generic OpenAI-compatible
+    // kind: warn (but never block) when the URL looks like a web/session or
+    // `:generateContent` endpoint rather than an API root. Merged with any
+    // plaintext-TLS advisory above into the single `warning` field.
+    if kind == ProviderKind::GenericOpenAI {
+        warning = merge_warnings(warning, advise_generic_openai_base_url(base_url));
+    }
 
     // Load any existing row up front: it decides insert-vs-update below and,
     // when this save carries no key, tells us which prior secret to delete so
@@ -1373,6 +1464,13 @@ async fn set_cloud_provider_inner(
         Some(url) if !url.is_empty() => {
             validate_nonempty("baseUrl", url, MAX_BASE_URL_LEN)?;
             warning = check_provider_base_url(url)?;
+            // ADVISORY (non-blocking) shape check for GenericOpenAI (Kiro):
+            // warn when the URL looks like a web/session or `:generateContent`
+            // endpoint rather than an API root. Merged with any plaintext-TLS
+            // advisory into the single `warning` field.
+            if kind == ProviderKind::GenericOpenAI {
+                warning = merge_warnings(warning, advise_generic_openai_base_url(url));
+            }
             Some(url.to_string())
         }
         _ => {
@@ -3879,13 +3977,136 @@ mod tests {
             .error
             .as_ref()
             .expect("an unbuilt row must carry a display-safe reason");
-        assert!(!err.is_empty());
+        // FEAT-001: the row must now surface the REAL build error captured from
+        // `build_from_config` (the GenericOpenAI factory rejects a missing
+        // base_url with a message mentioning `base_url`), NOT the generic
+        // "no instance was built" fallback that hid the true cause. This asserts
+        // the discarded `Err(ProviderError)` is threaded through the shared
+        // enumeration; reverting the fix (restoring `let _ =`) would fail here.
+        assert!(
+            err.contains("base_url"),
+            "the unbuildable GenericOpenAI row must surface the REAL base_url \
+             build error, got: {err}"
+        );
+        assert!(
+            !err.contains("no instance was built"),
+            "the real build error must replace the generic fallback, got: {err}"
+        );
 
         // The report still includes the other rows (per-provider isolation).
         assert!(report.configured_count >= 2);
 
         // DISPLAY-SAFE: no secret material in the serialized report.
         let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.to_lowercase().contains("apikey"));
+        assert!(!json.to_lowercase().contains("secretref"));
+    }
+
+    /// FEAT-001: a Gemini row whose `api_key_ref` points at a handle with NO
+    /// stored secret cannot build (its factory resolves the secret and fails with
+    /// a `ProviderError::Auth`). The diagnostics must report that row as
+    /// `instanceBuilt == false` with the REAL Auth reason surfaced (the
+    /// `SecretError::NotFound` message contains "no secret found"), NOT the
+    /// generic "no instance was built" fallback. This proves an Auth build failure
+    /// (the likely real cause the user hit, previously hidden by the discarded
+    /// `Err`) is now diagnosable, and stays display-safe (no key material).
+    #[tokio::test]
+    async fn provider_diagnostics_inner_surfaces_gemini_auth_failure() {
+        let state = test_state().await;
+
+        // Persist a Gemini row whose api_key_ref points at a handle that has NO
+        // stored secret, so `build_gemini`'s `secrets.resolve` fails with Auth.
+        let cfg = ProviderConfig {
+            id: "gemini-cloud".to_string(),
+            kind: ProviderKind::Gemini,
+            base_url: None,
+            api_key_ref: Some(SecretRef::new("gemini-cloud")),
+            extra: serde_json::Value::Null,
+        };
+        ProviderRepo::new(state.session_manager.db())
+            .insert(&cfg)
+            .await
+            .unwrap();
+
+        let report = provider_diagnostics_inner(&state).await.unwrap();
+        let gemini = report
+            .providers
+            .iter()
+            .find(|p| p.id == "gemini-cloud")
+            .expect("the Gemini row must appear in the diagnostics report");
+        assert!(
+            !gemini.instance_built,
+            "a Gemini row whose secret cannot be resolved must not build"
+        );
+        assert_eq!(gemini.model_count, 0);
+        let err = gemini
+            .error
+            .as_ref()
+            .expect("the Auth build failure must carry a display-safe reason");
+        // The REAL Auth reason is surfaced (SecretError::NotFound Display), not
+        // the generic fallback.
+        assert!(
+            err.contains("no secret found"),
+            "the Gemini row must surface the real Auth reason, got: {err}"
+        );
+        assert!(
+            !err.contains("no instance was built"),
+            "the real Auth error must replace the generic fallback, got: {err}"
+        );
+
+        // DISPLAY-SAFE: no secret material in the serialized report.
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.to_lowercase().contains("apikey"));
+        assert!(!json.to_lowercase().contains("secretref"));
+    }
+
+    /// FEAT-001: a Gemini row WITH a stored key builds an instance at the default
+    /// base_url (base_url None -> the adapter's built-in default). The
+    /// diagnostics must report `instanceBuilt == true`. Its `list_models` errors
+    /// offline (no live Gemini endpoint in the sandbox), which is expected and
+    /// fine: the point is that a plain Gemini key at default BUILDS. This pins the
+    /// traced Gemini-by-key wiring (`set_cloud_provider` stores the key under the
+    /// config id 'gemini-cloud'; `build_gemini` resolves that same handle).
+    #[tokio::test]
+    async fn provider_diagnostics_inner_builds_keyed_gemini_row() {
+        let state = test_state().await;
+
+        // Store a key under the 'gemini-cloud' handle, exactly as
+        // `set_cloud_provider_inner` does, then persist a keyed Gemini row that
+        // references it (base_url None => adapter default).
+        let key_ref = state
+            .secret_store
+            .store("gemini-cloud", "AIza-test-key-do-not-leak")
+            .unwrap();
+        let cfg = ProviderConfig {
+            id: "gemini-cloud".to_string(),
+            kind: ProviderKind::Gemini,
+            base_url: None,
+            api_key_ref: Some(key_ref),
+            extra: serde_json::Value::Null,
+        };
+        ProviderRepo::new(state.session_manager.db())
+            .insert(&cfg)
+            .await
+            .unwrap();
+
+        let report = provider_diagnostics_inner(&state).await.unwrap();
+        let gemini = report
+            .providers
+            .iter()
+            .find(|p| p.id == "gemini-cloud")
+            .expect("the Gemini row must appear in the diagnostics report");
+        assert!(
+            gemini.instance_built,
+            "a keyed Gemini row at default base_url MUST build an instance"
+        );
+        // list_models errors offline, so no models and (typically) a transport
+        // error; the built distinction is what this test pins.
+        assert_eq!(gemini.model_count, 0);
+
+        // DISPLAY-SAFE: the stored key never crosses the report boundary.
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("AIza-test-key-do-not-leak"));
         assert!(!json.to_lowercase().contains("apikey"));
         assert!(!json.to_lowercase().contains("secretref"));
     }
@@ -4439,6 +4660,114 @@ mod tests {
         .await
         .unwrap();
         assert!(tls.warning.is_none());
+    }
+
+    /// A GenericOpenAI (Kiro) cloud provider configured with a Kiro-style
+    /// web/session URL is accepted and PERSISTED (not blocked), but the returned
+    /// view carries a display-safe advisory pointing out it looks like a
+    /// web/session URL rather than an API base. A normal `https://host/v1` API
+    /// root carries no such advisory. This is the FEAT-002 guidance: the row is
+    /// still built so the surfaced enumeration error explains the unusable
+    /// endpoint (link-local/metadata IPs remain the only blocked case).
+    #[tokio::test]
+    async fn set_cloud_provider_inner_advises_session_style_base_url() {
+        let state = test_state().await;
+
+        // A `.../session/<id>` URL is accepted (row persisted) with an advisory.
+        let view = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "sk-kiro",
+            Some("https://app.kiro.dev/session/6c461916-88db-47e1-9627-5fd670748e9d"),
+        )
+        .await
+        .unwrap();
+        let warning = view
+            .warning
+            .as_deref()
+            .expect("a session-style base_url must carry a display-safe advisory");
+        assert!(warning.contains("web/session"));
+        // The row is persisted (not blocked).
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(configs.iter().any(|c| c.id == "generic-openai-cloud"));
+
+        // A normal OpenAI-compatible API root carries no session/generate
+        // advisory (a plain https URL only ever yields the TLS-clean None).
+        let ok = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "sk-kiro",
+            Some("https://host/v1"),
+        )
+        .await
+        .unwrap();
+        assert!(ok.warning.is_none());
+    }
+
+    /// A generic OpenAI-compatible LOCAL runtime configured with a Gemini
+    /// `:generateContent` model URL is accepted and PERSISTED (not blocked),
+    /// with a display-safe advisory that it is not an API base URL. A normal
+    /// `http://localhost:1234/v1` carries no such advisory. Covers the second
+    /// helper call site (`set_local_runtime_inner`).
+    #[tokio::test]
+    async fn set_local_runtime_inner_advises_generate_content_base_url() {
+        let state = test_state().await;
+
+        // A `...:generateContent` model URL is accepted with an advisory.
+        let view = set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent",
+            None,
+        )
+        .await
+        .unwrap();
+        let warning = view
+            .warning
+            .as_deref()
+            .expect("a :generateContent base_url must carry a display-safe advisory");
+        assert!(warning.contains("API base URL"));
+        // The row is persisted (not blocked).
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(configs.iter().any(|c| c.id == "generic-openai-local"));
+
+        // A normal loopback API root carries no session/generate advisory.
+        let ok = set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(ok.warning.is_none());
+    }
+
+    /// The advisory helper is narrow: it flags only the two unambiguous
+    /// non-API-root shapes and leaves a legitimate API root (or a plain host)
+    /// unflagged, so it never false-positives on `https://host/v1`.
+    #[test]
+    fn advise_generic_openai_base_url_flags_only_non_api_shapes() {
+        assert!(advise_generic_openai_base_url("https://app.kiro.dev/session/abc").is_some());
+        assert!(advise_generic_openai_base_url(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
+        )
+        .is_some());
+        // A bare Gemini host root (no `:generateContent`) is flagged by host, so
+        // the persisted backend advisory corroborates the client advisory.
+        assert!(advise_generic_openai_base_url(
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        )
+        .is_some());
+        assert!(advise_generic_openai_base_url("https://host/v1").is_none());
+        assert!(advise_generic_openai_base_url("http://localhost:1234/v1").is_none());
+        assert!(advise_generic_openai_base_url("https://kiro.example.com/v1").is_none());
     }
 
     /// `list_cloud_providers_inner` returns the configured cloud rows after a

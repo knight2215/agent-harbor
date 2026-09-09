@@ -39,6 +39,7 @@ import {
   unloadEmbeddedModel,
 } from "../../ipc/commands";
 import type { EmbeddedModelStatus, EmbeddedModelView, LocalRuntimeConfig } from "../../types";
+import { adviseGenericOpenAiBaseUrl } from "./baseUrlAdvisory";
 
 type LocalKind = "lmStudio" | "genericOpenAI";
 
@@ -192,6 +193,18 @@ export function LocalRuntimesSection() {
 
   const loadedModelId = status?.loadedModelId ?? null;
 
+  // A live, NON-BLOCKING advisory for the entered base URL, shown only for the
+  // generic OpenAI-compatible runtime (LM Studio's default is a plain API root).
+  // Guidance only; it never blocks the save (the backend attaches its own
+  // advisory and remains the enforcement point).
+  const baseUrlAdvisory =
+    kind === "genericOpenAI"
+      ? adviseGenericOpenAiBaseUrl(
+          baseUrl,
+          "Enter the API root (e.g. http://localhost:1234/v1). For Gemini, use the Gemini kind under Providers & Keys instead of the generic OpenAI-compatible runtime.",
+        )
+      : null;
+
   return (
     <section className="settings__panel" role="region" aria-label="Local Runtimes">
       <h3 className="settings__section-title">Local Runtimes</h3>
@@ -213,9 +226,23 @@ export function LocalRuntimesSection() {
             type="text"
             value={baseUrl}
             placeholder="http://localhost:1234/v1"
+            aria-label="Base URL"
             onChange={(event) => setBaseUrl(event.target.value)}
           />
+          <span className="settings__field-help" data-testid="local-base-url-help">
+            OpenAI-compatible API base URL, e.g. http://localhost:1234/v1 - not a full
+            model/generateContent URL. For Gemini, use the Gemini kind under Providers &amp; Keys.
+          </span>
         </label>
+        {baseUrlAdvisory !== null && (
+          <p
+            className="settings__section-desc"
+            role="status"
+            data-testid="local-runtime-base-url-advisory"
+          >
+            {baseUrlAdvisory}
+          </p>
+        )}
         <label>
           API key (optional)
           <input

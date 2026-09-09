@@ -268,6 +268,54 @@ describe("Settings", () => {
     expect(await screen.findByTestId("provider-key-configured-genericOpenAI")).toBeInTheDocument();
   });
 
+  it("shows a non-blocking advisory for a session-style Kiro base URL and still saves", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_cloud_providers") return Promise.resolve([]);
+      if (cmd === "list_available_models") return Promise.resolve({ models: [], errors: [] });
+      if (cmd === "set_cloud_provider") {
+        return Promise.resolve({
+          id: "generic-openai-cloud",
+          kind: "genericOpenAI",
+          baseUrl: "https://app.kiro.dev/session/abc",
+          hasApiKey: true,
+          warning:
+            'base_url "https://app.kiro.dev/session/abc" looks like a web/session or model endpoint URL, not an OpenAI-compatible API base URL; enter the API root (e.g. https://host/v1) so models can be enumerated',
+        });
+      }
+      return Promise.resolve([]);
+    });
+    render(<Settings />);
+
+    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "genericOpenAI" } });
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-kiro" } });
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://app.kiro.dev/session/abc" },
+    });
+
+    // The live client advisory (role="status", distinct from the blocking error
+    // region) appears as soon as the session-style URL is entered, before save.
+    const advisory = await screen.findByTestId("cloud-provider-base-url-advisory");
+    expect(advisory).toHaveTextContent(/web\/session/i);
+    expect(advisory).toHaveAttribute("role", "status");
+    // The inline help steers toward an API base URL.
+    expect(screen.getByTestId("cloud-base-url-help")).toHaveTextContent(
+      /OpenAI-compatible API base URL/i,
+    );
+
+    // Saving is NOT blocked by the advisory: the backend is still invoked and
+    // its own advisory surfaces in the warning region.
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_cloud_provider", {
+        kind: "genericOpenAI",
+        apiKey: "sk-kiro",
+        baseUrl: "https://app.kiro.dev/session/abc",
+      });
+    });
+    expect(await screen.findByTestId("provider-key-configured-genericOpenAI")).toBeInTheDocument();
+    expect(await screen.findByTestId("cloud-provider-warning")).toHaveTextContent(/web\/session/i);
+  });
+
   it("rehydrates configured cloud providers on mount and persists across unmount/remount", async () => {
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "list_cloud_providers") {
@@ -593,6 +641,53 @@ describe("LocalRuntimesSection OpenAI-compatible runtimes", () => {
       "This endpoint uses plaintext http over a non-loopback address.",
     );
     expect(await screen.findByTestId("local-runtime-configured-genericOpenAI")).toBeInTheDocument();
+  });
+
+  it("shows a non-blocking advisory for a :generateContent local base URL and still saves", async () => {
+    const url =
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent";
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_local_runtimes") return Promise.resolve([]);
+      if (cmd === "list_embedded_models") return Promise.resolve([]);
+      if (cmd === "embedded_model_status") return Promise.resolve(status(null, 0));
+      if (cmd === "set_local_runtime") {
+        return Promise.resolve(
+          runtime(
+            "genericOpenAI",
+            url,
+            "base_url looks like a web/session or model endpoint URL, not an OpenAI-compatible API base URL; enter the API root (e.g. https://host/v1) so models can be enumerated",
+          ),
+        );
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<LocalRuntimesSection />);
+
+    fireEvent.change(screen.getByLabelText("Runtime"), { target: { value: "genericOpenAI" } });
+    fireEvent.change(screen.getByLabelText("Base URL"), { target: { value: url } });
+
+    // The live client advisory (role="status") appears for the Gemini
+    // generateContent URL, with a gentle hint to use the Gemini kind, before save.
+    const advisory = await screen.findByTestId("local-runtime-base-url-advisory");
+    expect(advisory).toHaveTextContent(/API base URL/i);
+    expect(advisory).toHaveTextContent(/Gemini kind/i);
+    expect(advisory).toHaveAttribute("role", "status");
+    // The inline help is present for the generic runtime field.
+    expect(screen.getByTestId("local-base-url-help")).toHaveTextContent(
+      /OpenAI-compatible API base URL/i,
+    );
+
+    // Saving is NOT blocked: the backend is invoked and its advisory surfaces.
+    fireEvent.click(screen.getByRole("button", { name: "Save runtime" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_local_runtime", {
+        kind: "genericOpenAI",
+        baseUrl: url,
+        apiKey: null,
+      });
+    });
+    expect(await screen.findByTestId("local-runtime-configured-genericOpenAI")).toBeInTheDocument();
+    expect(await screen.findByTestId("local-runtime-warning")).toHaveTextContent(/API base URL/i);
   });
 
   it("shows an error and persists nothing when the base URL is blocked", async () => {

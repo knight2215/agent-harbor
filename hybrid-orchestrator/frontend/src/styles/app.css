@@ -418,6 +418,14 @@ body {
   color: var(--ah-text-muted);
 }
 
+/* Inline helper text under a form field (e.g. the base-url guidance). */
+.settings__field-help {
+  display: block;
+  margin-top: var(--ah-space-1);
+  font-size: 12px;
+  color: var(--ah-text-muted);
+}
+
 /* Informational note for genuinely-future local runtimes (e.g. Hugging Face). */
 .settings__empty-state {
   padding: var(--ah-space-5);

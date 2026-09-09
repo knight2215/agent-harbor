@@ -1,0 +1,14 @@
+{
+  "task_id": "task-surface-provider-build-errors",
+  "task_description": "Fix the diagnostics/picker so they surface the REAL per-row provider build error (captured from ProviderRegistry::build_from_config, currently discarded via `let _ =`) instead of the generic 'configured but no instance was built' message; confirm/fix the Gemini-by-key build path so a plain Gemini key at default builds and enumerates; and improve cloud/local provider base_url UX with clearer guidance plus advisory (non-blocking) validation so users stop pasting web/session URLs. Rust core (providers + tauri-app) + React/TS webview + spec. Offline sandbox is INTEGRATIONS_ONLY; CI is the authoritative build/test/clippy gate.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
+  "blocked_reason": null,
+  "verification": {
+    "build": "skipped",
+    "tests": "skipped",
+    "test_quality": "pass",
+    "docker_build": "skipped",
+    "summary": "INTEGRATIONS_ONLY sandbox cannot run cargo build/test/clippy (crates.io 403) or npm/vitest/tsc/eslint (npm 403); no Dockerfile-based build applicable and no live endpoints. OFFLINE-VERIFIED: `cargo fmt --check` clean for providers + tauri-app; `prettier --check` clean for frontend src. TEST QUALITY reviewed and confirmed meaningful (would fail on revert): builtins build-error-preference test asserts the exact real message and !contains('no instance was built'); strengthened provider_diagnostics_inner_reports_unbuildable_row asserts the real base_url message not the generic one; new Gemini auth-failure (instance_built false + real reason) and keyed-Gemini (instance_built true) diagnostics tests; contract.rs Auth-Display display-safety test; advise_generic_openai_base_url narrow-match test (incl. bare Gemini host parity); vitest advisory cases assert role=status advisory shows AND save still fires with well-formed mocks for every command the mounted tree calls. Semantic review pass v1 verdict APPROVED; both non-blocking review issues (Rust/TS advisory host parity; duplicated TS helper) were then fixed. FULL cargo build/test/clippy -D warnings + eslint/tsc/vitest are deferred to GitHub Actions CI (authoritative)."
+  }
+}
