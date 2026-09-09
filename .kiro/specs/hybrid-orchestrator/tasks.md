@@ -336,6 +336,43 @@ A zero-install embedded engine that imports/selects a local `.gguf`, runs stream
 
 ---
 
+## Phase 10: Provider visibility diagnostics, cloud-key registration, and Ollama hardening
+
+Goal: close the "I added a key (or started Ollama) but nothing shows up in the picker" gap by making provider enumeration observable and by making the Providers & Keys and local-provider write paths actually persist enumerable `ProviderConfig` rows. Three concrete threads: surface per-provider enumeration errors instead of swallowing them, register cloud provider keys as real `ProviderConfig` rows so their models enumerate under Cloud, and harden Ollama's `GET /api/tags` discovery so a running local Ollama surfaces its installed models. This phase is diagnostics and wiring only; the routing engine, the provider contract, and the embedded engine are untouched.
+
+Dependencies: Phase 2 (the `ChatProvider` contract, registry, and `list_available_models`), Phase 5 (the model selector and settings surfaces that consume the results), and Phase 8 (the Ollama adapter and its `/api/tags` discovery). Section 9.1/9.2 secret-hygiene invariants constrain every new command and error path.
+
+### Tasks
+
+- **P10.1 Structured enumeration result surfaced to the UI.** Change `providers::list_available_models` to return a structured `AvailableModelsResult { models, errors }` instead of swallowing per-provider `list_models()` failures to stderr. Each failing provider is captured as a display-safe `ProviderEnumerationError { providerId, message }` while healthy providers still populate the list, so graceful degradation is preserved. Thread the new shape through the `list_available_models` Tauri command; `send_message` routing candidates consume only `result.models` so routing behavior is unchanged. Add the frontend `AvailableModelsResult` / `ProviderEnumerationError` types, update the IPC wrapper and the providers store (`errors: []` default), and render the errors near the model picker and under Providers & Keys via a `ProviderEnumerationErrors` component without blanking the picker. Verification: `cargo test --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml` covers a mixed run where one adapter errors and others still return models; `cargo test --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml` covers the command returning both models and errors; `vitest` in `frontend/` asserts models and an enumeration error render together.
+- **P10.2 Cloud provider key registration (`set_cloud_provider` family).** Add a `set_cloud_provider` / `list_cloud_providers` / `clear_cloud_provider` command family that persists a real `ProviderConfig` row (correct `ProviderKind`, stable per-kind id, `api_key_ref` = the stored `SecretRef`, optional `base_url`), mirroring the `set_local_runtime` pattern (get then update or insert, store the optional key via the `SecretStore` keeping only the opaque `SecretRef`, validate input, return a display-safe `_inner`-testable view). Register the commands in `generate_handler!` and add frontend IPC wrappers. Rework `ProviderKeysSection` to pick a provider KIND from a dropdown and rehydrate configured providers from the backend on mount instead of the dead-end `set_provider_secret` plus a `localStorage` marker, so cloud providers (OpenAI, Anthropic, Gemini, Bedrock, Azure, and Kiro) are enumerated and their models surface under Cloud. Verification: `cargo test --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml` drives the `_inner` fns to assert an inserted row carries the right kind and a `SecretRef` (never raw key material) and that `list_`/`clear_` round-trip; `vitest` in `frontend/` asserts selecting a kind and saving a key calls `set_cloud_provider` and rehydrates from `list_cloud_providers`.
+- **P10.3 Ollama `/api/tags` hardening.** Harden the Ollama discovery override so a running local Ollama actually surfaces its models: default the base URL to the IPv4 loopback literal `http://127.0.0.1:11434/v1` (see the IPv4-vs-IPv6 tradeoff in Section 4.3), send an explicit `Accept: application/json` header on the `GET /api/tags` request, and prove the decode with a test using the exact rich `/api/tags` payload (models with `details`/`capabilities`) so serde leniency over `TagsResponse` (no `deny_unknown_fields`) is guaranteed to keep tolerating it. Verification: `cargo test --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml` covers the wiremock `/api/tags` contract test asserting the `Accept` header and the decode of the exact payload into the installed model ids, plus the inline `DEFAULT_BASE_URL` / `tags_root` unit tests; the real-server exercise stays an `#[ignore]`d manual test excluded from CI.
+
+### Deliverable
+
+Provider enumeration is observable end to end: `list_available_models` returns healthy models plus display-safe per-provider enumeration errors that the picker and Providers & Keys surface without blanking the list; cloud provider keys entered under Providers & Keys persist a real `ProviderConfig` so their models enumerate under Cloud; and a running local Ollama surfaces its installed models via a hardened `GET /api/tags` discovery (IPv4 loopback default, explicit `Accept` header, decode proven against the exact payload).
+
+### Parallelization
+
+- P10.1, P10.2, and P10.3 touch mostly distinct seams (the enumeration return shape, the cloud-provider command family, and the Ollama adapter) and can proceed in parallel. P10.1 lands the `AvailableModelsResult` shape that the picker consumes, so coordinate the frontend rendering of P10.1's errors with P10.2's Providers & Keys rework since both render in that settings surface.
+
+### Verification / acceptance
+
+- `cargo test --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml` covers the mixed healthy/errored enumeration run and the Ollama `/api/tags` contract and decode tests.
+- `cargo test --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml` covers the `list_available_models` command returning `{ models, errors }` and the `set_cloud_provider` / `list_cloud_providers` / `clear_cloud_provider` `_inner` round-trip with no raw key material in any returned view.
+- `vitest` in `frontend/` asserts models plus an enumeration error render together, and that Providers & Keys persists via `set_cloud_provider` and rehydrates from `list_cloud_providers`.
+- Per-crate `cargo build`, `cargo test`, `cargo clippy` (with `-D warnings`), and `vitest` are green, and CI passes on all matrix targets.
+
+### Future work / considered alternatives
+
+These arose while closing this phase and are recorded as deferred and explicitly out of scope here so the intent is not lost:
+
+- **OAuth "connect / login" for cloud providers.** An alternative to pasting an API key: let a user connect or log in to a provider and have the app obtain a token, rather than entering a raw key under Providers & Keys. Deferred. The tradeoff is a substantially larger effort: per-provider OAuth clients, token storage plus refresh, and Tauri redirect handling, whereas the current `SecretStore` plus `api_key_ref` contract (Section 9.1) is key-based and satisfies the "no secret material outside the keychain" invariant as-is. Not implemented in this phase, which only makes the existing key-based path persist a real `ProviderConfig`.
+- **Folder-scan browse mode for the embedded engine.** A usability improvement over selecting a single `.gguf` file: let the embedded-engine "Browse" control select a FOLDER and have Agent Harbor scan it directly for local `.gguf` models. Deferred and out of scope here; the embedded engine (Phase 9) is untouched by this phase, and this concerns the Local Runtimes browse UX rather than provider visibility.
+- **LAN host mode.** A future networking feature where one Agent Harbor instance runs an agent as a host and another device on the same local network connects to it and utilizes its language models. Deferred and out of scope here as a substantial future feature: it needs host and discovery, authentication, and transport design of its own, none of which this diagnostics-and-wiring phase introduces.
+
+---
+
 ## Cross-cutting: testing strategy and deferred items
 
 ### Testing strategy
