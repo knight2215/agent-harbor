@@ -47,6 +47,35 @@ const KIND_LABELS: Record<LocalKind, string> = {
   genericOpenAI: "Generic OpenAI-compatible",
 };
 
+/**
+ * A NON-BLOCKING client advisory for the generic OpenAI-compatible LOCAL runtime
+ * base URL: the entered value looks like a web/session URL or a full model
+ * endpoint (a `.../session/<id>` URL, a `...:generateContent` URL, or a
+ * generativelanguage.googleapis.com host) rather than an OpenAI-compatible API
+ * root. Returns guidance text (including a gentle hint that Gemini belongs under
+ * the Gemini KIND in Providers & Keys), or `null` when the URL looks like an API
+ * root. This never blocks saving (the backend remains the enforcement point); it
+ * just steers the user before they paste the wrong thing.
+ */
+function adviseGenericOpenAiBaseUrl(url: string): string | null {
+  const trimmed = url.trim();
+  if (trimmed === "") return null;
+  const pathAndHost = trimmed.split("#")[0].split("?")[0];
+  const looksLikeSession = pathAndHost.includes("/session/");
+  const looksLikeGenerate = pathAndHost.endsWith(":generateContent");
+  let host = "";
+  try {
+    host = new URL(trimmed).hostname.toLowerCase();
+  } catch {
+    host = "";
+  }
+  const isGeminiHost = host === "generativelanguage.googleapis.com";
+  if (looksLikeSession || looksLikeGenerate || isGeminiHost) {
+    return "This looks like a web/session or model endpoint URL, not an OpenAI-compatible API base URL. Enter the API root (e.g. http://localhost:1234/v1). For Gemini, use the Gemini kind under Providers & Keys instead of the generic OpenAI-compatible runtime.";
+  }
+  return null;
+}
+
 export function LocalRuntimesSection() {
   const [kind, setKind] = useState<LocalKind>("lmStudio");
   const [baseUrl, setBaseUrl] = useState("http://localhost:1234/v1");
@@ -192,6 +221,12 @@ export function LocalRuntimesSection() {
 
   const loadedModelId = status?.loadedModelId ?? null;
 
+  // A live, NON-BLOCKING advisory for the entered base URL, shown only for the
+  // generic OpenAI-compatible runtime (LM Studio's default is a plain API root).
+  // Guidance only; it never blocks the save (the backend attaches its own
+  // advisory and remains the enforcement point).
+  const baseUrlAdvisory = kind === "genericOpenAI" ? adviseGenericOpenAiBaseUrl(baseUrl) : null;
+
   return (
     <section className="settings__panel" role="region" aria-label="Local Runtimes">
       <h3 className="settings__section-title">Local Runtimes</h3>
@@ -215,7 +250,20 @@ export function LocalRuntimesSection() {
             placeholder="http://localhost:1234/v1"
             onChange={(event) => setBaseUrl(event.target.value)}
           />
+          <span className="settings__field-help" data-testid="local-base-url-help">
+            OpenAI-compatible API base URL, e.g. http://localhost:1234/v1 - not a full
+            model/generateContent URL. For Gemini, use the Gemini kind under Providers &amp; Keys.
+          </span>
         </label>
+        {baseUrlAdvisory !== null && (
+          <p
+            className="settings__section-desc"
+            role="status"
+            data-testid="local-runtime-base-url-advisory"
+          >
+            {baseUrlAdvisory}
+          </p>
+        )}
         <label>
           API key (optional)
           <input

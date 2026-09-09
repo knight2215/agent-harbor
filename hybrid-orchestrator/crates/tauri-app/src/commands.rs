@@ -966,6 +966,55 @@ fn check_provider_base_url(url: &str) -> Result<Option<String>, CommandError> {
     }
 }
 
+/// An ADVISORY (non-blocking) shape check for a GenericOpenAI `base_url`
+/// (Kiro / generic OpenAI-compatible). It returns a display-safe advisory
+/// string when the entered URL clearly is NOT an OpenAI-compatible API root but
+/// a web/session URL or a full model endpoint - the two real-world mistakes
+/// users hit: pasting a Kiro session URL (`.../session/<uuid>`) or a Gemini
+/// `...:generateContent` model URL into the generic OpenAI-compatible field.
+///
+/// This is guidance ONLY: it NEVER blocks the save (link-local/metadata IPs
+/// remain the sole blocked case, enforced by [`validate_base_url`]); the
+/// backend enumeration surfaces the concrete failure (a 404 / HTML-not-JSON
+/// decode error) once the row is built. It is intentionally narrow (only the
+/// two unambiguous shapes) so a legitimate API root like `https://host/v1` is
+/// never flagged. The returned message is host/path-shape based and carries no
+/// secret material. Returns `None` for a URL that looks like an API root.
+fn advise_generic_openai_base_url(url: &str) -> Option<String> {
+    let trimmed = url.trim();
+    // Compare against the path/host shape only; strip any query/fragment so a
+    // `?foo=:generateContent` style tail cannot false-positive.
+    let without_fragment = trimmed.split('#').next().unwrap_or(trimmed);
+    let path_and_host = without_fragment
+        .split('?')
+        .next()
+        .unwrap_or(without_fragment);
+    let looks_like_session = path_and_host.contains("/session/");
+    let looks_like_generate = path_and_host.ends_with(":generateContent");
+    if looks_like_session || looks_like_generate {
+        return Some(format!(
+            "base_url {trimmed:?} looks like a web/session or model endpoint URL, not an \
+             OpenAI-compatible API base URL; enter the API root (e.g. https://host/v1) so \
+             models can be enumerated"
+        ));
+    }
+    None
+}
+
+/// Merge two optional advisory strings into the single `warning` field carried
+/// by the cloud/local config views. When both a base-url posture warning (e.g.
+/// plaintext-TLS) and a GenericOpenAI shape advisory are present, they are
+/// concatenated with a single space so the user sees both; otherwise whichever
+/// is present (or `None`) is returned unchanged.
+fn merge_warnings(primary: Option<String>, secondary: Option<String>) -> Option<String> {
+    match (primary, secondary) {
+        (Some(a), Some(b)) => Some(format!("{a} {b}")),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
 // --- Local runtime configuration (Section 9.3 write path) ------------------
 
 /// Upper bound on a user-supplied provider `base_url` (Section 9.2 "bounds").
@@ -1093,7 +1142,14 @@ async fn set_local_runtime_inner(
     // reaches the core; a Blocked target errors and persists nothing.
     let base_url = base_url.trim();
     validate_nonempty("baseUrl", base_url, MAX_BASE_URL_LEN)?;
-    let warning = check_provider_base_url(base_url)?;
+    let mut warning = check_provider_base_url(base_url)?;
+    // ADVISORY (non-blocking) shape check for the generic OpenAI-compatible
+    // kind: warn (but never block) when the URL looks like a web/session or
+    // `:generateContent` endpoint rather than an API root. Merged with any
+    // plaintext-TLS advisory above into the single `warning` field.
+    if kind == ProviderKind::GenericOpenAI {
+        warning = merge_warnings(warning, advise_generic_openai_base_url(base_url));
+    }
 
     // Load any existing row up front: it decides insert-vs-update below and,
     // when this save carries no key, tells us which prior secret to delete so
@@ -1400,6 +1456,13 @@ async fn set_cloud_provider_inner(
         Some(url) if !url.is_empty() => {
             validate_nonempty("baseUrl", url, MAX_BASE_URL_LEN)?;
             warning = check_provider_base_url(url)?;
+            // ADVISORY (non-blocking) shape check for GenericOpenAI (Kiro):
+            // warn when the URL looks like a web/session or `:generateContent`
+            // endpoint rather than an API root. Merged with any plaintext-TLS
+            // advisory into the single `warning` field.
+            if kind == ProviderKind::GenericOpenAI {
+                warning = merge_warnings(warning, advise_generic_openai_base_url(url));
+            }
             Some(url.to_string())
         }
         _ => {
@@ -4589,6 +4652,108 @@ mod tests {
         .await
         .unwrap();
         assert!(tls.warning.is_none());
+    }
+
+    /// A GenericOpenAI (Kiro) cloud provider configured with a Kiro-style
+    /// web/session URL is accepted and PERSISTED (not blocked), but the returned
+    /// view carries a display-safe advisory pointing out it looks like a
+    /// web/session URL rather than an API base. A normal `https://host/v1` API
+    /// root carries no such advisory. This is the FEAT-002 guidance: the row is
+    /// still built so the surfaced enumeration error explains the unusable
+    /// endpoint (link-local/metadata IPs remain the only blocked case).
+    #[tokio::test]
+    async fn set_cloud_provider_inner_advises_session_style_base_url() {
+        let state = test_state().await;
+
+        // A `.../session/<id>` URL is accepted (row persisted) with an advisory.
+        let view = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "sk-kiro",
+            Some("https://app.kiro.dev/session/6c461916-88db-47e1-9627-5fd670748e9d"),
+        )
+        .await
+        .unwrap();
+        let warning = view
+            .warning
+            .as_deref()
+            .expect("a session-style base_url must carry a display-safe advisory");
+        assert!(warning.contains("web/session"));
+        // The row is persisted (not blocked).
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(configs.iter().any(|c| c.id == "generic-openai-cloud"));
+
+        // A normal OpenAI-compatible API root carries no session/generate
+        // advisory (a plain https URL only ever yields the TLS-clean None).
+        let ok = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "sk-kiro",
+            Some("https://host/v1"),
+        )
+        .await
+        .unwrap();
+        assert!(ok.warning.is_none());
+    }
+
+    /// A generic OpenAI-compatible LOCAL runtime configured with a Gemini
+    /// `:generateContent` model URL is accepted and PERSISTED (not blocked),
+    /// with a display-safe advisory that it is not an API base URL. A normal
+    /// `http://localhost:1234/v1` carries no such advisory. Covers the second
+    /// helper call site (`set_local_runtime_inner`).
+    #[tokio::test]
+    async fn set_local_runtime_inner_advises_generate_content_base_url() {
+        let state = test_state().await;
+
+        // A `...:generateContent` model URL is accepted with an advisory.
+        let view = set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent",
+            None,
+        )
+        .await
+        .unwrap();
+        let warning = view
+            .warning
+            .as_deref()
+            .expect("a :generateContent base_url must carry a display-safe advisory");
+        assert!(warning.contains("API base URL"));
+        // The row is persisted (not blocked).
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(configs.iter().any(|c| c.id == "generic-openai-local"));
+
+        // A normal loopback API root carries no session/generate advisory.
+        let ok = set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(ok.warning.is_none());
+    }
+
+    /// The advisory helper is narrow: it flags only the two unambiguous
+    /// non-API-root shapes and leaves a legitimate API root (or a plain host)
+    /// unflagged, so it never false-positives on `https://host/v1`.
+    #[test]
+    fn advise_generic_openai_base_url_flags_only_non_api_shapes() {
+        assert!(advise_generic_openai_base_url("https://app.kiro.dev/session/abc").is_some());
+        assert!(advise_generic_openai_base_url(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
+        )
+        .is_some());
+        assert!(advise_generic_openai_base_url("https://host/v1").is_none());
+        assert!(advise_generic_openai_base_url("http://localhost:1234/v1").is_none());
+        assert!(advise_generic_openai_base_url("https://kiro.example.com/v1").is_none());
     }
 
     /// `list_cloud_providers_inner` returns the configured cloud rows after a
