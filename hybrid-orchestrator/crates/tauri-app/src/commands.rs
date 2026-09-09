@@ -2303,6 +2303,7 @@ mod tests {
     use super::*;
     use orchestrator_core::SessionManager;
     use persistence::Db;
+    use providers::AvailableModel;
     use secrets::{InMemorySecretStore, SecretError};
 
     async fn test_state() -> AppState {
@@ -2840,7 +2841,7 @@ mod tests {
     /// crate boundary so a regression in the mode plumbing is caught here too.
     #[tokio::test]
     async fn routing_mode_and_manual_pin_cannot_override_local_only() {
-        use providers::{AvailableModel, Capabilities, ChatMessage, MessageRole, TokenPrice};
+        use providers::{Capabilities, ChatMessage, MessageRole, TokenPrice};
         use routing::{
             AutoDefaultPolicy, ManualOverrideResolver, ManualRoute as RoutingManualRoute,
             RoutingError, RoutingPolicy, RoutingRequest,
