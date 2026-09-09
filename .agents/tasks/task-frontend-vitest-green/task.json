@@ -1,0 +1,7 @@
+{
+  "task_id": "task-frontend-vitest-green",
+  "task_description": "Drive the frontend vitest suite to GREEN on branch feat/provider-visibility-diagnostics by fixing the ProviderKeysSection '.length on undefined' crash (listCloudProviders() resolving undefined) and its cascade into app.test's Settings-navigation test, hardening every undefined-array read in the reworked provider/model-selector UI at the source, and aligning the app.test IPC mock with the new command shapes. No push/PR (orchestrator handles).",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001"],
+  "blocked_reason": null
+}

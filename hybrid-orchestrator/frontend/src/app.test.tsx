@@ -35,6 +35,12 @@ function routeInvoke(command: string): unknown {
       return [];
     case "list_available_models":
       return { models: [], errors: [] };
+    case "list_cloud_providers":
+    case "list_local_runtimes":
+    case "list_embedded_models":
+      return [];
+    case "embedded_model_status":
+      return { loadedModelId: null, registeredCount: 0 };
     default:
       return undefined;
   }

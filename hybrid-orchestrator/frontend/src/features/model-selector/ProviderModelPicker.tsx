@@ -66,12 +66,15 @@ interface GroupProps {
 }
 
 function ModelGroup({ label, models, value, onChange }: GroupProps) {
-  if (models.length === 0) return null;
+  // Normalize defensively so an undefined/non-array `models` cannot crash the
+  // `.length`/`.map` reads below.
+  const list = Array.isArray(models) ? models : [];
+  if (list.length === 0) return null;
   return (
     <section className="model-group" aria-label={label}>
       <h4 className="model-group__label">{label}</h4>
       <ul className="model-group__list">
-        {models.map((model) => {
+        {list.map((model) => {
           const selected = sameRoute(value, model);
           return (
             <li key={`${model.providerId}:${model.model}`}>
@@ -103,10 +106,13 @@ export function ProviderModelPicker({
   onChange,
   isLocal = isFreeModel,
 }: ProviderModelPickerProps) {
-  const local = models.filter((m) => isLocal(m));
-  const cloud = models.filter((m) => !isLocal(m));
+  // Normalize defensively so an undefined/non-array `models` prop cannot crash
+  // the `.filter`/`.length` reads below.
+  const list = Array.isArray(models) ? models : [];
+  const local = list.filter((m) => isLocal(m));
+  const cloud = list.filter((m) => !isLocal(m));
 
-  if (models.length === 0) {
+  if (list.length === 0) {
     return <NoModelsEmptyState />;
   }
 

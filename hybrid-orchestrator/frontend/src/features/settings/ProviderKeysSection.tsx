@@ -80,7 +80,7 @@ export function ProviderKeysSection() {
   // re-enumerate so any enumeration error surfaces.
   useEffect(() => {
     listCloudProviders()
-      .then((next) => setProviders(next))
+      .then((next) => setProviders(Array.isArray(next) ? next : []))
       .catch(() => setProviders([]));
     void loadProviders();
   }, [loadProviders]);
@@ -133,7 +133,7 @@ export function ProviderKeysSection() {
     setError(null);
     clearCloudProvider(target)
       .then(() => listCloudProviders())
-      .then((next) => setProviders(next))
+      .then((next) => setProviders(Array.isArray(next) ? next : []))
       .then(() => loadProviders())
       .catch((err: unknown) => setError(String(err)));
   };

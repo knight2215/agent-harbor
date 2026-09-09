@@ -19,14 +19,18 @@ export interface ProviderEnumerationErrorsProps {
 
 /** Render the per-provider enumeration errors, or nothing when the list is empty. */
 export function ProviderEnumerationErrors({ errors }: ProviderEnumerationErrorsProps) {
-  if (errors.length === 0) return null;
+  // Normalize defensively: an undefined/non-array `errors` (e.g. a store or IPC
+  // shape that resolved without the field) must not crash the `.length`/`.map`
+  // reads below.
+  const items = Array.isArray(errors) ? errors : [];
+  if (items.length === 0) return null;
   return (
     <ul
       className="provider-enumeration-errors"
       data-testid="provider-enumeration-errors"
       aria-label="Provider errors"
     >
-      {errors.map((error) => (
+      {items.map((error) => (
         <li key={error.providerId} className="provider-enumeration-errors__item">
           Couldn&apos;t load models from <strong>{error.providerId}</strong>: {error.message}
         </li>
