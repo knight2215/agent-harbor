@@ -27,7 +27,7 @@ import { useEffect, useState } from "react";
 import { ProviderEnumerationErrors } from "../model-selector/ProviderEnumerationErrors";
 import { clearCloudProvider, listCloudProviders, setCloudProvider } from "../../ipc/commands";
 import { useProvidersStore } from "../../state/providers";
-import type { CloudProviderConfig, ProviderKind } from "../../types";
+import type { CloudProviderConfig } from "../../types";
 
 /** The cloud provider kinds configurable here, in dropdown order. */
 type CloudKind = "openAI" | "anthropic" | "gemini" | "bedrock" | "azure" | "genericOpenAI";
