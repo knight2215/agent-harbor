@@ -36,6 +36,19 @@ describe("Settings", () => {
   });
 
   it("renders the sub-navigation and each section by accessible name", async () => {
+    // The Diagnostics section calls provider_diagnostics on mount; return a
+    // well-formed report so navigating to it never resolves undefined.
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "provider_diagnostics") {
+        return Promise.resolve({
+          configuredCount: 0,
+          totalModelCount: 0,
+          providerCountWithModels: 0,
+          providers: [],
+        });
+      }
+      return Promise.resolve([]);
+    });
     render(<Settings />);
 
     const nav = screen.getByRole("navigation", { name: "Settings sections" });
@@ -72,8 +85,81 @@ describe("Settings", () => {
     fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
     expect(await screen.findByRole("region", { name: "Appearance" })).toBeInTheDocument();
 
+    fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
+    expect(await screen.findByRole("region", { name: "Diagnostics" })).toBeInTheDocument();
+
     fireEvent.click(screen.getByRole("button", { name: "About / Updates" }));
     expect(await screen.findByRole("region", { name: "About / Updates" })).toBeInTheDocument();
+  });
+
+  it("renders the Diagnostics section with a summary from provider_diagnostics", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "provider_diagnostics") {
+        return Promise.resolve({
+          configuredCount: 2,
+          totalModelCount: 3,
+          providerCountWithModels: 1,
+          providers: [
+            {
+              id: "ollama-local",
+              kind: "ollama",
+              baseUrl: null,
+              instanceBuilt: true,
+              modelCount: 0,
+              error: "transport error: connection refused",
+            },
+            {
+              id: "openai-cloud",
+              kind: "openAI",
+              baseUrl: "https://api.openai.com/v1",
+              instanceBuilt: true,
+              modelCount: 3,
+              error: null,
+            },
+          ],
+        });
+      }
+      return Promise.resolve([]);
+    });
+    render(<Settings />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
+    const region = await screen.findByRole("region", { name: "Diagnostics" });
+    expect(region).toBeInTheDocument();
+
+    // The summary line reflects the well-formed report.
+    expect(await screen.findByTestId("diagnostics-summary")).toHaveTextContent(
+      "loaded: 3 models from 1 of 2 configured providers",
+    );
+    // The per-provider list shows display-safe fields (baseUrl only, "default"
+    // when null, instance-built yes/no, model counts, and any error).
+    const list = await screen.findByTestId("diagnostics-providers");
+    expect(list).toHaveTextContent("ollama-local");
+    expect(list).toHaveTextContent("default");
+    expect(list).toHaveTextContent("transport error: connection refused");
+    expect(list).toHaveTextContent("https://api.openai.com/v1");
+    // A Run diagnostics / Refresh button re-invokes the command.
+    invoke.mockClear();
+    fireEvent.click(screen.getByTestId("diagnostics-refresh"));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("provider_diagnostics");
+    });
+  });
+
+  it("shows 'failed: <error>' rather than a blank Diagnostics panel when the IPC throws", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "provider_diagnostics") {
+        return Promise.reject(new Error("provider registry build failed"));
+      }
+      return Promise.resolve([]);
+    });
+    render(<Settings />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
+    expect(await screen.findByRole("region", { name: "Diagnostics" })).toBeInTheDocument();
+    expect(await screen.findByTestId("diagnostics-summary")).toHaveTextContent(
+      "failed: provider registry build failed",
+    );
   });
 
   it("registers a cloud provider via set_cloud_provider without retaining plaintext", async () => {

@@ -19,6 +19,8 @@ export function PerMessageOverrideControl() {
   const setPendingOverride = useConversationsStore((s) => s.setPendingOverride);
   const models = useProvidersStore((s) => s.models);
   const errors = useProvidersStore((s) => s.errors);
+  const loadState = useProvidersStore((s) => s.loadState);
+  const lastError = useProvidersStore((s) => s.lastError);
   const load = useProvidersStore((s) => s.load);
 
   const choose = (route: ManualRoute) => {
@@ -36,6 +38,20 @@ export function PerMessageOverrideControl() {
   const refresh = () => {
     void load();
   };
+
+  // A prominent, copyable status line reporting the outcome of the last model
+  // load, so a user who sees no models can read WHY (loading / how many loaded /
+  // the load failure message) instead of an unexplained empty picker. Defensive
+  // against undefined/empty arrays (mirrors the Array.isArray guard in
+  // ProviderEnumerationErrors).
+  const modelItems = Array.isArray(models) ? models : [];
+  const providerCount = new Set(modelItems.map((m) => m.providerId)).size;
+  const loadStatusText =
+    loadState === "loading"
+      ? "loading…"
+      : loadState === "failed"
+        ? `failed: ${lastError ?? "unknown error"}`
+        : `loaded ${modelItems.length} models from ${providerCount} providers`;
 
   return (
     <div className="per-message-override" aria-label="One-off model override">
@@ -61,6 +77,12 @@ export function PerMessageOverrideControl() {
           ↻ Refresh models
         </button>
       </div>
+      {/* Prominent, copyable status line: reports the outcome of the last model
+          load (loading / how many models loaded / the failure message) so an
+          empty picker is always explained. Placed above the per-provider errors. */}
+      <p className="per-message-override__load-status" data-testid="model-load-status">
+        {loadStatusText}
+      </p>
       {/* Surface why any provider failed to enumerate, near the picker, so a
           misconfigured/unreachable provider is diagnosable. Rendered alongside
           the picker so healthy providers' models are never blanked by an error. */}

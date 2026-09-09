@@ -13,13 +13,21 @@ import { AgentEditor } from "../agent-editor/AgentEditor";
 import { ToolManager } from "../tool-manager/ToolManager";
 import { AboutUpdatesSection } from "./AboutUpdatesSection";
 import { AppearanceSection } from "./AppearanceSection";
+import { DiagnosticsSection } from "./DiagnosticsSection";
 import { LocalRuntimesSection } from "./LocalRuntimesSection";
 import { ProviderKeysSection } from "./ProviderKeysSection";
 import { RoutingSection } from "./RoutingSection";
 
 /** The Settings sub-sections, in display order. */
 type SettingsSection =
-  "providers" | "localRuntimes" | "tools" | "agents" | "routing" | "appearance" | "about";
+  | "providers"
+  | "localRuntimes"
+  | "tools"
+  | "agents"
+  | "routing"
+  | "appearance"
+  | "diagnostics"
+  | "about";
 
 const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string }> = [
   { id: "providers", label: "Providers & Keys" },
@@ -28,6 +36,7 @@ const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string }> = [
   { id: "agents", label: "Agents" },
   { id: "routing", label: "Routing" },
   { id: "appearance", label: "Appearance" },
+  { id: "diagnostics", label: "Diagnostics" },
   { id: "about", label: "About / Updates" },
 ];
 
@@ -56,6 +65,7 @@ export function Settings() {
       {section === "agents" && <AgentEditor />}
       {section === "routing" && <RoutingSection />}
       {section === "appearance" && <AppearanceSection />}
+      {section === "diagnostics" && <DiagnosticsSection />}
       {section === "about" && <AboutUpdatesSection />}
     </div>
   );

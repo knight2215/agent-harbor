@@ -319,6 +319,42 @@ export interface AvailableModelsResult {
 }
 
 /**
+ * A display-safe diagnostic for one configured provider row, surfaced by the
+ * `provider_diagnostics` command so the app can self-report exactly what
+ * happened during model enumeration (kind, endpoint, whether an instance was
+ * built, how many models it produced, and any enumeration error). Mirrors Rust
+ * `commands::ProviderDiagnostic` (`#[serde(rename_all = "camelCase")]`).
+ *
+ * DISPLAY-SAFE: `baseUrl` is the persisted display endpoint (or `null` for the
+ * adapter default) and `error` is a provider error's message; NEITHER carries
+ * secret/key material or a resolved SecretRef (Section 9.1 / 9.2).
+ */
+export interface ProviderDiagnostic {
+  id: string;
+  kind: ProviderKind;
+  baseUrl: string | null;
+  instanceBuilt: boolean;
+  modelCount: number;
+  error: string | null;
+}
+
+/**
+ * The full per-provider diagnostics readout returned by `provider_diagnostics`:
+ * one {@link ProviderDiagnostic} per configured provider row plus summary
+ * counts. Mirrors Rust `commands::ProviderDiagnosticsReport`
+ * (`#[serde(rename_all = "camelCase")]`).
+ *
+ * DISPLAY-SAFE: every field is a count or a display-safe {@link ProviderDiagnostic};
+ * never secret material (Section 9.1 / 9.2).
+ */
+export interface ProviderDiagnosticsReport {
+  configuredCount: number;
+  totalModelCount: number;
+  providerCountWithModels: number;
+  providers: ProviderDiagnostic[];
+}
+
+/**
  * A display-safe view of one imported embedded (local `.gguf`) model (Strategy
  * B / FEAT-002). Mirrors Rust `commands::EmbeddedModelView`. Carries only the
  * model id and its on-disk path; never secret material (the embedded engine

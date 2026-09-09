@@ -34,7 +34,7 @@ describe("providers store", () => {
   beforeEach(() => {
     invoke.mockReset();
     invoke.mockResolvedValue(result([]));
-    useProvidersStore.setState({ models: [], errors: [] });
+    useProvidersStore.setState({ models: [], errors: [], loadState: "idle", lastError: null });
   });
 
   it("load fetches available models from the core", async () => {
@@ -58,6 +58,23 @@ describe("providers store", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0].providerId).toBe("ollama-local");
     expect(errors[0].message).toContain("transport error");
+  });
+
+  it("load marks loadState 'loaded' on success", async () => {
+    invoke.mockResolvedValue(result([model("openai", "gpt-4o")]));
+    await useProvidersStore.getState().load();
+    expect(useProvidersStore.getState().loadState).toBe("loaded");
+    expect(useProvidersStore.getState().lastError).toBeNull();
+  });
+
+  it("load captures an IPC rejection into loadState 'failed' + lastError (does not throw)", async () => {
+    // The clean-empty cause A: a rejected `list_available_models` must NOT
+    // escape (it would be swallowed by app.tsx's `void ...load()`), and must NOT
+    // leave models:[]/errors:[] with no signal. Instead it records the failure.
+    invoke.mockRejectedValue(new Error("provider registry build failed"));
+    await expect(useProvidersStore.getState().load()).resolves.toBeUndefined();
+    expect(useProvidersStore.getState().loadState).toBe("failed");
+    expect(useProvidersStore.getState().lastError).toBe("provider registry build failed");
   });
 
   it("providersChanged invalidates + refetches", () => {
