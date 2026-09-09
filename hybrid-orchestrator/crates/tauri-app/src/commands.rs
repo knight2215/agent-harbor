@@ -654,14 +654,16 @@ async fn provider_diagnostics_inner(
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
 
-    // Load pricing to mirror list_available_models_inner's setup exactly (the
-    // diagnostics only surface counts, so the resolved table is not consulted
-    // per model here, but loading it keeps the seeding + build sequence identical
-    // to the picker so a divergence in one path is caught by the other).
+    // Load pricing to mirror list_available_models_inner's setup exactly and to
+    // feed the SAME shared enumeration the picker runs (below). The diagnostics
+    // only surface counts, so the resolved prices are not read per model here,
+    // but the shared `list_available_models` signature takes `&pricing`, and
+    // keeping the seeding + build + enumeration sequence identical to the picker
+    // is exactly what guarantees the two cannot diverge.
     let app_config = AppConfig::load(db)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
-    let _pricing = pricing_table_from_config(&app_config.pricing);
+    let pricing = pricing_table_from_config(&app_config.pricing);
 
     // Build the registry resiliently, EXACTLY as list_available_models_inner
     // does: start from the built-in factories and build each configured row
@@ -680,34 +682,34 @@ async fn provider_diagnostics_inner(
         providers::EmbeddedProvider::from_shared(state.embedded_engine.clone()),
     ));
 
-    // Build the per-provider report by running the same per-row enumeration the
-    // picker uses: resolve the built instance and drive its list_models.
+    // Run the SAME shared enumeration the picker runs (the `list_models` alias
+    // for `providers::list_available_models`) exactly ONCE, then DERIVE the
+    // per-provider report from its result. This is deliberately NOT a second
+    // inline get/list_models/count-or-error loop: re-implementing the picker's
+    // per-row logic here (including its "no instance was built" message) would
+    // let the two silently drift, which would make the diagnostics misleading
+    // (the exact failure this diagnostics surface exists to prevent). Consuming
+    // the shared result makes the mirror structural: the model_count and error
+    // of each row are, by construction, whatever the picker saw.
+    let AvailableModelsResult { models, errors } = list_models(&registry, &configs, &pricing)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // Derive each row's diagnostic from the shared enumeration result plus the
+    // configs. `model_count` is how many of the enumerated models the shared fn
+    // attributed to this row's id; `error` is the display-safe message of any
+    // enumeration error the shared fn recorded for this row (an unreachable
+    // endpoint OR the "configured but no instance built" invisible-skip case,
+    // which the shared fn now records under the same provider_id).
     let mut diagnostics = Vec::with_capacity(configs.len());
-    let mut total_model_count = 0usize;
     let mut provider_count_with_models = 0usize;
     for cfg in &configs {
-        let (instance_built, model_count, error) = match registry.get(&cfg.id) {
-            Some(instance) => match instance.list_models().await {
-                Ok(models) => (true, models.len(), None),
-                // DISPLAY-SAFE: only the ProviderError Display string is kept,
-                // never any resolved secret or key material.
-                Err(err) => (true, 0usize, Some(err.to_string())),
-            },
-            // No live instance: the row's build failed or was skipped. Report it
-            // with a static, display-safe reason rather than silently dropping it
-            // (the invisible clean-empty cause this task exists to fix).
-            None => (
-                false,
-                0usize,
-                Some(
-                    "provider is configured but no instance was built \
-                     (build failed or was skipped); it cannot be enumerated"
-                        .to_string(),
-                ),
-            ),
-        };
+        let model_count = models.iter().filter(|m| m.provider_id == cfg.id).count();
+        let error = errors
+            .iter()
+            .find(|e| e.provider_id == cfg.id)
+            .map(|e| e.message.clone());
 
-        total_model_count += model_count;
         if model_count > 0 {
             provider_count_with_models += 1;
         }
@@ -716,7 +718,10 @@ async fn provider_diagnostics_inner(
             id: cfg.id.clone(),
             kind: cfg.kind,
             base_url: cfg.base_url.clone(),
-            instance_built,
+            // Whether a live instance was built for this row (its factory build
+            // succeeded), read directly from the SAME registry the shared
+            // enumeration consulted.
+            instance_built: registry.get(&cfg.id).is_some(),
             model_count,
             error,
         });
@@ -724,7 +729,7 @@ async fn provider_diagnostics_inner(
 
     Ok(ProviderDiagnosticsReport {
         configured_count: configs.len(),
-        total_model_count,
+        total_model_count: models.len(),
         provider_count_with_models,
         providers: diagnostics,
     })
