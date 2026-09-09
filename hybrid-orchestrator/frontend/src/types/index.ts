@@ -226,6 +226,22 @@ export interface LocalRuntimeConfig {
 }
 
 /**
+ * A display-safe view of one configured cloud provider (OpenAI / Anthropic /
+ * Gemini / Bedrock / Azure / a generic OpenAI-compatible endpoint used for
+ * "Kiro"), returned by the `set_cloud_provider` / `list_cloud_providers`
+ * commands. Mirrors Rust `commands::CloudProviderConfigView`. `hasApiKey`
+ * reports only WHETHER a key is stored (as an opaque {@link SecretRef}), never
+ * the key itself; `baseUrl` is the persisted endpoint override (null when the
+ * adapter's default is used, always present for the Kiro/genericOpenAI kind).
+ */
+export interface CloudProviderConfig {
+  id: string;
+  kind: ProviderKind;
+  baseUrl: string | null;
+  hasApiKey: boolean;
+}
+
+/**
  * Per-model capability descriptor. Mirrors Rust `providers::Capabilities`
  * (architecture.md Section 4.1). Rust uses `#[serde(rename_all = "camelCase")]`,
  * so `json_mode` -> `jsonMode` and `max_context` -> `maxContext`.
