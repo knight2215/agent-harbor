@@ -1,0 +1,7 @@
+{
+  "task_id": "task-surface-provider-build-errors",
+  "task_description": "Fix the diagnostics/picker so they surface the REAL per-row provider build error (captured from ProviderRegistry::build_from_config, currently discarded via `let _ =`) instead of the generic 'configured but no instance was built' message; confirm/fix the Gemini-by-key build path so a plain Gemini key at default builds and enumerates; and improve cloud/local provider base_url UX with clearer guidance plus advisory (non-blocking) validation so users stop pasting web/session URLs. Rust core (providers + tauri-app) + React/TS webview + spec. Offline sandbox is INTEGRATIONS_ONLY; CI is the authoritative build/test/clippy gate.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
+  "blocked_reason": null
+}

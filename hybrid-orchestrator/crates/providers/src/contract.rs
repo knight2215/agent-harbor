@@ -374,6 +374,28 @@ mod tests {
     }
 
     #[test]
+    fn provider_error_auth_display_carries_reason_not_key_material() {
+        // The Auth variant's Display is `auth error: {0}`, where {0} is a REASON
+        // string sourced from SecretError (NotFound(handle)/Backend(reason)) or an
+        // adapter's own reason. It must surface the reason so a keyring resolve
+        // failure is diagnosable, and it must NOT carry resolved key material. The
+        // handle name (e.g. 'gemini-cloud') is a config id, not a secret.
+        let err = ProviderError::Auth("no secret found for handle 'gemini-cloud'".to_string());
+        let display = err.to_string();
+        assert_eq!(
+            display,
+            "auth error: no secret found for handle 'gemini-cloud'"
+        );
+        // The reason is present so the UI can explain the failure.
+        assert!(display.contains("no secret found"));
+        assert!(display.contains("gemini-cloud"));
+        // No key-shaped material leaks: the Display is exactly the reason, so a
+        // hypothetical resolved key like an "sk-"/"AIza" token is never present.
+        assert!(!display.contains("sk-"));
+        assert!(!display.contains("AIza"));
+    }
+
+    #[test]
     fn tool_call_defaults_type_to_function() {
         // A tool_call missing the "type" field decodes with kind = "function".
         let value = json!({

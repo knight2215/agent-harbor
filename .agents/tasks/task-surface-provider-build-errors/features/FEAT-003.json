@@ -1,0 +1,22 @@
+{
+  "id": "FEAT-003",
+  "type": "docs",
+  "description": "Update the hybrid-orchestrator spec to document the new error-surfacing behavior and the base_url UX/advisory guidance. Depends on FEAT-001 and FEAT-002 being implemented so the spec reflects what shipped.",
+  "status": "pending",
+  "steps": [
+    "In .kiro/specs/hybrid-orchestrator/architecture.md: in the Section 8.2 (model selector / diagnostics) discussion, document that per-provider diagnostics and the picker's enumeration errors now surface the REAL provider build error (the ProviderError Display captured from ProviderRegistry::build_from_config) for a configured-but-unbuilt row, in preference to the generic 'no instance was built' fallback, and note the display-safe invariant (no key material in any ProviderError variant Display). Reference the new providers::list_available_models_with_build_errors seam and that both list_available_models_inner and provider_diagnostics_inner feed it the captured per-row build errors so the two cannot drift.",
+    "In .kiro/specs/hybrid-orchestrator/architecture.md Section 9.3 (base_url posture): document the new ADVISORY (non-blocking) guidance for GenericOpenAI base URLs that clearly are not API roots ('/session/' or ':generateContent'), distinct from the BLOCKING link-local/metadata-IP rule; and note the UX guidance (Kiro is a generic OpenAI-compatible endpoint expecting an API base URL like https://host/v1, and Gemini should be configured via the Gemini kind not the generic runtime).",
+    "In .kiro/specs/hybrid-orchestrator/tasks.md: add a short completed-work entry describing this fix (surface real per-row provider build errors; confirm Gemini-by-key builds at default; advisory base_url UX) so the task ledger stays current, matching the style of existing entries.",
+    "Keep edits concise and consistent with the existing spec voice; no em dashes."
+  ],
+  "acceptance_criteria": [
+    "architecture.md documents the real-build-error surfacing (Section 8.2) and the advisory base_url guidance (Section 9.3), including the display-safe invariant and the shared-enumeration-no-drift design.",
+    "tasks.md has a concise entry recording this fix.",
+    "No em dashes; spec voice preserved."
+  ],
+  "verification": [
+    "Read the edited spec sections and confirm they accurately describe the shipped FEAT-001/FEAT-002 behavior and reference the actual new symbol names."
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

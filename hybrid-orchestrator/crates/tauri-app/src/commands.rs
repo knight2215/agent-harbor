@@ -23,7 +23,9 @@ use orchestrator_core::{
 use persistence::config::{AppConfig, PricingConfig};
 use persistence::{McpServerRepo, ProviderRepo};
 use providers::{
-    list_available_models as list_models, AvailableModelsResult, PricingTable, TokenPrice,
+    list_available_models as list_models,
+    list_available_models_with_build_errors as list_models_with_build_errors,
+    AvailableModelsResult, PricingTable, TokenPrice,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -504,12 +506,20 @@ async fn list_available_models_inner(
     // build surfaces it as a per-provider error instead of a whole-list abort,
     // preserving per-provider isolation.
     let mut registry = providers::builtin_registry();
+    // Capture each per-row build failure (keyed by cfg.id) instead of discarding
+    // it. A per-row build failure (missing factory, secret resolution error, bad
+    // config) is STILL isolated: the row is simply left un-built so the other
+    // rows still build (preserving the v0.7.3 non-fatal behavior), but the real
+    // ProviderError Display is threaded into the shared enumeration below so the
+    // picker's enumeration error carries the REAL cause instead of the generic
+    // "no instance was built" message. DISPLAY-SAFE: err.to_string() is a
+    // ProviderError Display, which carries only a reason (never key material).
+    let mut build_errors: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for cfg in &configs {
-        // A per-row build failure (missing factory, secret resolution error,
-        // bad config) is isolated: the row is simply left un-built so the
-        // enumeration path reports it per-provider, and the other rows still
-        // build. DISPLAY-SAFE: no secret material is logged or surfaced here.
-        let _ = registry.build_from_config(cfg, state.secret_store.as_ref());
+        if let Err(err) = registry.build_from_config(cfg, state.secret_store.as_ref()) {
+            build_errors.insert(cfg.id.clone(), err.to_string());
+        }
     }
 
     // Bridge the embedded engine seam (FEAT-002): the lifecycle commands import
@@ -530,8 +540,9 @@ async fn list_available_models_inner(
     ));
 
     // Enumerate models (may hit the network per provider) and attach
-    // capabilities + price.
-    list_models(&registry, &configs, &pricing)
+    // capabilities + price. Feed the captured per-row build errors so an unbuilt
+    // row surfaces its REAL build-failure cause instead of the generic message.
+    list_models_with_build_errors(&registry, &configs, &pricing, &build_errors)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))
 }
@@ -671,8 +682,19 @@ async fn provider_diagnostics_inner(
     // simply left un-built so the diagnostic reports instance_built == false with
     // a display-safe error.
     let mut registry = providers::builtin_registry();
+    // Capture each per-row build failure (keyed by cfg.id) EXACTLY as
+    // list_available_models_inner does, rather than discarding it. The per-row
+    // failure is still non-fatal (the row is left un-built, instance_built ==
+    // false), but the real ProviderError Display is threaded into the shared
+    // enumeration below so the ProviderDiagnostic.error field carries the REAL
+    // cause instead of the generic "no instance was built" message. DISPLAY-SAFE:
+    // err.to_string() is a ProviderError Display (a reason, never key material).
+    let mut build_errors: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for cfg in &configs {
-        let _ = registry.build_from_config(cfg, state.secret_store.as_ref());
+        if let Err(err) = registry.build_from_config(cfg, state.secret_store.as_ref()) {
+            build_errors.insert(cfg.id.clone(), err.to_string());
+        }
     }
 
     // Bridge the embedded engine seam exactly as list_available_models_inner
@@ -682,25 +704,30 @@ async fn provider_diagnostics_inner(
         providers::EmbeddedProvider::from_shared(state.embedded_engine.clone()),
     ));
 
-    // Run the SAME shared enumeration the picker runs (the `list_models` alias
-    // for `providers::list_available_models`) exactly ONCE, then DERIVE the
-    // per-provider report from its result. This is deliberately NOT a second
+    // Run the SAME shared enumeration the picker runs (the
+    // `list_models_with_build_errors` alias for
+    // `providers::list_available_models_with_build_errors`, fed the same captured
+    // per-row build errors) exactly ONCE, then DERIVE the per-provider report
+    // from its result. This is deliberately NOT a second
     // inline get/list_models/count-or-error loop: re-implementing the picker's
     // per-row logic here (including its "no instance was built" message) would
     // let the two silently drift, which would make the diagnostics misleading
     // (the exact failure this diagnostics surface exists to prevent). Consuming
     // the shared result makes the mirror structural: the model_count and error
     // of each row are, by construction, whatever the picker saw.
-    let AvailableModelsResult { models, errors } = list_models(&registry, &configs, &pricing)
-        .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let AvailableModelsResult { models, errors } =
+        list_models_with_build_errors(&registry, &configs, &pricing, &build_errors)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
 
     // Derive each row's diagnostic from the shared enumeration result plus the
     // configs. `model_count` is how many of the enumerated models the shared fn
     // attributed to this row's id; `error` is the display-safe message of any
     // enumeration error the shared fn recorded for this row (an unreachable
-    // endpoint OR the "configured but no instance built" invisible-skip case,
-    // which the shared fn now records under the same provider_id).
+    // endpoint OR the unbuilt-row case, which now carries the REAL captured
+    // build-failure cause when one was captured, falling back to the generic
+    // "configured but no instance built" string otherwise, under the same
+    // provider_id).
     let mut diagnostics = Vec::with_capacity(configs.len());
     let mut provider_count_with_models = 0usize;
     for cfg in &configs {
@@ -3879,13 +3906,136 @@ mod tests {
             .error
             .as_ref()
             .expect("an unbuilt row must carry a display-safe reason");
-        assert!(!err.is_empty());
+        // FEAT-001: the row must now surface the REAL build error captured from
+        // `build_from_config` (the GenericOpenAI factory rejects a missing
+        // base_url with a message mentioning `base_url`), NOT the generic
+        // "no instance was built" fallback that hid the true cause. This asserts
+        // the discarded `Err(ProviderError)` is threaded through the shared
+        // enumeration; reverting the fix (restoring `let _ =`) would fail here.
+        assert!(
+            err.contains("base_url"),
+            "the unbuildable GenericOpenAI row must surface the REAL base_url \
+             build error, got: {err}"
+        );
+        assert!(
+            !err.contains("no instance was built"),
+            "the real build error must replace the generic fallback, got: {err}"
+        );
 
         // The report still includes the other rows (per-provider isolation).
         assert!(report.configured_count >= 2);
 
         // DISPLAY-SAFE: no secret material in the serialized report.
         let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.to_lowercase().contains("apikey"));
+        assert!(!json.to_lowercase().contains("secretref"));
+    }
+
+    /// FEAT-001: a Gemini row whose `api_key_ref` points at a handle with NO
+    /// stored secret cannot build (its factory resolves the secret and fails with
+    /// a `ProviderError::Auth`). The diagnostics must report that row as
+    /// `instanceBuilt == false` with the REAL Auth reason surfaced (the
+    /// `SecretError::NotFound` message contains "no secret found"), NOT the
+    /// generic "no instance was built" fallback. This proves an Auth build failure
+    /// (the likely real cause the user hit, previously hidden by the discarded
+    /// `Err`) is now diagnosable, and stays display-safe (no key material).
+    #[tokio::test]
+    async fn provider_diagnostics_inner_surfaces_gemini_auth_failure() {
+        let state = test_state().await;
+
+        // Persist a Gemini row whose api_key_ref points at a handle that has NO
+        // stored secret, so `build_gemini`'s `secrets.resolve` fails with Auth.
+        let cfg = ProviderConfig {
+            id: "gemini-cloud".to_string(),
+            kind: ProviderKind::Gemini,
+            base_url: None,
+            api_key_ref: Some(SecretRef::new("gemini-cloud")),
+            extra: serde_json::Value::Null,
+        };
+        ProviderRepo::new(state.session_manager.db())
+            .insert(&cfg)
+            .await
+            .unwrap();
+
+        let report = provider_diagnostics_inner(&state).await.unwrap();
+        let gemini = report
+            .providers
+            .iter()
+            .find(|p| p.id == "gemini-cloud")
+            .expect("the Gemini row must appear in the diagnostics report");
+        assert!(
+            !gemini.instance_built,
+            "a Gemini row whose secret cannot be resolved must not build"
+        );
+        assert_eq!(gemini.model_count, 0);
+        let err = gemini
+            .error
+            .as_ref()
+            .expect("the Auth build failure must carry a display-safe reason");
+        // The REAL Auth reason is surfaced (SecretError::NotFound Display), not
+        // the generic fallback.
+        assert!(
+            err.contains("no secret found"),
+            "the Gemini row must surface the real Auth reason, got: {err}"
+        );
+        assert!(
+            !err.contains("no instance was built"),
+            "the real Auth error must replace the generic fallback, got: {err}"
+        );
+
+        // DISPLAY-SAFE: no secret material in the serialized report.
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.to_lowercase().contains("apikey"));
+        assert!(!json.to_lowercase().contains("secretref"));
+    }
+
+    /// FEAT-001: a Gemini row WITH a stored key builds an instance at the default
+    /// base_url (base_url None -> the adapter's built-in default). The
+    /// diagnostics must report `instanceBuilt == true`. Its `list_models` errors
+    /// offline (no live Gemini endpoint in the sandbox), which is expected and
+    /// fine: the point is that a plain Gemini key at default BUILDS. This pins the
+    /// traced Gemini-by-key wiring (`set_cloud_provider` stores the key under the
+    /// config id 'gemini-cloud'; `build_gemini` resolves that same handle).
+    #[tokio::test]
+    async fn provider_diagnostics_inner_builds_keyed_gemini_row() {
+        let state = test_state().await;
+
+        // Store a key under the 'gemini-cloud' handle, exactly as
+        // `set_cloud_provider_inner` does, then persist a keyed Gemini row that
+        // references it (base_url None => adapter default).
+        let key_ref = state
+            .secret_store
+            .store("gemini-cloud", "AIza-test-key-do-not-leak")
+            .unwrap();
+        let cfg = ProviderConfig {
+            id: "gemini-cloud".to_string(),
+            kind: ProviderKind::Gemini,
+            base_url: None,
+            api_key_ref: Some(key_ref),
+            extra: serde_json::Value::Null,
+        };
+        ProviderRepo::new(state.session_manager.db())
+            .insert(&cfg)
+            .await
+            .unwrap();
+
+        let report = provider_diagnostics_inner(&state).await.unwrap();
+        let gemini = report
+            .providers
+            .iter()
+            .find(|p| p.id == "gemini-cloud")
+            .expect("the Gemini row must appear in the diagnostics report");
+        assert!(
+            gemini.instance_built,
+            "a keyed Gemini row at default base_url MUST build an instance"
+        );
+        // list_models errors offline, so no models and (typically) a transport
+        // error; the built distinction is what this test pins.
+        assert_eq!(gemini.model_count, 0);
+
+        // DISPLAY-SAFE: the stored key never crosses the report boundary.
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.contains("AIza-test-key-do-not-leak"));
         assert!(!json.to_lowercase().contains("apikey"));
         assert!(!json.to_lowercase().contains("secretref"));
     }
