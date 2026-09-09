@@ -437,6 +437,35 @@ The built app self-reports the model-picker load outcome: the chat area shows a 
 
 ---
 
+## Phase 13: Surface the real provider build error and base_url UX
+
+Goal: finish the "nothing tells me why" story from Phase 12. Phase 12 made a configured-but-unbuilt row visible, but it always showed the STATIC "no instance was built" text because both commands discarded the build error via `let _ = registry.build_from_config(...)`. This phase captures that real `ProviderError` and surfaces it in both the picker and diagnostics, confirms the Gemini-by-key build path works at default, and adds non-blocking base_url UX so users stop pasting web/session or Gemini model URLs into a generic OpenAI-compatible runtime. Diagnostics stays DERIVED from the shared enumeration so it cannot drift from the picker; secret hygiene (Section 9.1/9.2) is preserved throughout.
+
+Dependencies: Phase 12 (the `AvailableModelsResult { models, errors }` shape, the invisible-skip branch, and `provider_diagnostics`). Section 9.1/9.2 constrain every surfaced string to `ProviderError` `Display` (failure class only, never key material).
+
+### Tasks
+
+- **P13.1 Capture and surface the real build error.** In `crates/providers/src/builtins.rs`, add `list_available_models_with_build_errors(registry, configs, pricing, build_errors: &BTreeMap<String, String>)`; keep the three-argument `list_available_models` as a delegate that passes an empty map so external callers are unchanged. In the `registry.get(&cfg.id)` None branch, prefer a captured `build_errors` entry keyed by `cfg.id` over the static generic message. In `crates/tauri-app/src/commands.rs`, stop discarding the per-row `build_from_config` `Err` in `list_available_models_inner` and `provider_diagnostics_inner`: capture each failing row's `ProviderError` `Display` into a `BTreeMap<String, String>` keyed by `cfg.id` and pass it to the new seam, so the picker's enumeration errors and the Diagnostics `error` field both show the real cause and cannot drift. Verification: `cargo test` per changed crate proves an unbuilt row surfaces its captured build error (falling back to the static text only when none was recorded) and that the auto-seeded `ollama-local` row still builds and enumerates.
+- **P13.2 Confirm Gemini-by-key at default.** Confirm (no code change needed) that `set_cloud_provider` stores the key under config id `gemini-cloud` and `build_gemini` resolves that same handle and defaults `base_url` to `https://generativelanguage.googleapis.com`, so a plain Gemini key at default builds and enumerates; the reported failure was a keyring resolve failure, now surfaced via P13.1 as `ProviderError::Auth`.
+- **P13.3 Advisory base_url UX (non-blocking).** In `crates/tauri-app/src/commands.rs`, add `advise_generic_openai_base_url` plus `merge_warnings`, wired into `set_cloud_provider_inner` and `set_local_runtime_inner`, that warns (in the returned view's `warning` field) when a `GenericOpenAI` base URL looks like a web/session URL (`/session/`) or a model endpoint (`:generateContent`) rather than an API root, WITHOUT blocking the save; link-local/metadata IPs remain the ONLY blocked case. Update `ProviderKeysSection.tsx` and `LocalRuntimesSection.tsx` with clearer placeholders/inline help, matching non-blocking client advisories, and a hint to configure Gemini via the Gemini kind rather than the generic OpenAI-compatible runtime. Verification: `cargo test` per changed crate covers the advisory (non-blocking warning, save still persists) and that link-local/metadata still blocks; `vitest` covers the client advisories.
+
+### Deliverable
+
+The picker and the Diagnostics panel show the REAL per-row provider build error (for example a Gemini keyring resolve failure or a generic-OpenAI missing/invalid base_url) instead of the generic fallback, a plain Gemini key at default builds and enumerates, and the settings surfaces steer users toward an API base URL (like `https://host/v1`) and the Gemini kind with non-blocking advisories, all while preserving the v0.7.3 non-fatal behavior (one failing provider never blanks the list) and secret hygiene.
+
+### Parallelization
+
+- P13.1 (backend capture plus the new seam) is the foundation and lands first. P13.2 is a confirmation that rides along with P13.1's error surfacing. P13.3 (advisory plus frontend UX) touches disjoint seams and can proceed in parallel once P13.1 is in.
+
+### Verification / acceptance
+
+- `cargo fmt --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml --check` and `... crates/tauri-app/Cargo.toml --check` pass (offline).
+- `cargo test --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml` covers the build-error preference over the static fallback, and `... crates/tauri-app/Cargo.toml` covers the captured-error wiring and the advisory base_url check.
+- `vitest` in `frontend/` covers the non-blocking client advisories and the Gemini-kind hint.
+- Per-crate `cargo build`, `cargo test`, `cargo clippy` (with `-D warnings`), `vitest`, eslint, prettier, and `tauri build` are green, and CI passes on all matrix targets.
+
+---
+
 ## Cross-cutting: testing strategy and deferred items
 
 ### Testing strategy

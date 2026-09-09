@@ -2,7 +2,7 @@
   "id": "FEAT-003",
   "type": "docs",
   "description": "Update the hybrid-orchestrator spec to document the new error-surfacing behavior and the base_url UX/advisory guidance. Depends on FEAT-001 and FEAT-002 being implemented so the spec reflects what shipped.",
-  "status": "pending",
+  "status": "completed",
   "steps": [
     "In .kiro/specs/hybrid-orchestrator/architecture.md: in the Section 8.2 (model selector / diagnostics) discussion, document that per-provider diagnostics and the picker's enumeration errors now surface the REAL provider build error (the ProviderError Display captured from ProviderRegistry::build_from_config) for a configured-but-unbuilt row, in preference to the generic 'no instance was built' fallback, and note the display-safe invariant (no key material in any ProviderError variant Display). Reference the new providers::list_available_models_with_build_errors seam and that both list_available_models_inner and provider_diagnostics_inner feed it the captured per-row build errors so the two cannot drift.",
     "In .kiro/specs/hybrid-orchestrator/architecture.md Section 9.3 (base_url posture): document the new ADVISORY (non-blocking) guidance for GenericOpenAI base URLs that clearly are not API roots ('/session/' or ':generateContent'), distinct from the BLOCKING link-local/metadata-IP rule; and note the UX guidance (Kiro is a generic OpenAI-compatible endpoint expecting an API base URL like https://host/v1, and Gemini should be configured via the Gemini kind not the generic runtime).",
@@ -18,5 +18,5 @@
     "Read the edited spec sections and confirm they accurately describe the shipped FEAT-001/FEAT-002 behavior and reference the actual new symbol names."
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "Docs-only change. architecture.md Section 8.2 gained a 'Real build error surfaced, not the generic fallback' bullet documenting the list_available_models_with_build_errors seam (3-arg list_available_models delegates with an empty map), the captured-per-row-error wiring in list_available_models_inner and provider_diagnostics_inner (no more `let _ =`), the shared-enumeration no-drift design, concrete ProviderError::Auth / Other-or-decode examples, the display-safe invariant, and preserved v0.7.3 non-fatal + ollama-local behavior. Section 9.3 (base_url posture, titled 'LM Studio and local network calls') gained an 'Advisory base_url shape guidance for GenericOpenAI (non-blocking)' bullet distinguishing the advisory (advise_generic_openai_base_url + merge_warnings, wired into set_cloud_provider_inner/set_local_runtime_inner, flags /session/ and :generateContent) from the sole BLOCKING link-local/metadata-IP case, plus the Kiro=API-base and Gemini-via-Gemini-kind UX guidance. tasks.md gained a Phase 13 entry matching the existing Phase style (P13.1 capture/surface real build error, P13.2 confirm Gemini-by-key at default, P13.3 advisory base_url UX). No em dashes. Sandbox is INTEGRATIONS_ONLY so no build/test run (docs-only; CI is the authoritative gate per context.json)."
 }
