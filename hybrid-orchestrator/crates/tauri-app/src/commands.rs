@@ -976,10 +976,12 @@ fn check_provider_base_url(url: &str) -> Result<Option<String>, CommandError> {
 /// This is guidance ONLY: it NEVER blocks the save (link-local/metadata IPs
 /// remain the sole blocked case, enforced by [`validate_base_url`]); the
 /// backend enumeration surfaces the concrete failure (a 404 / HTML-not-JSON
-/// decode error) once the row is built. It is intentionally narrow (only the
-/// two unambiguous shapes) so a legitimate API root like `https://host/v1` is
-/// never flagged. The returned message is host/path-shape based and carries no
-/// secret material. Returns `None` for a URL that looks like an API root.
+/// decode error) once the row is built. It is intentionally narrow (the two
+/// unambiguous path shapes plus a bare `generativelanguage.googleapis.com`
+/// host, for parity with the client advisory) so a legitimate API root like
+/// `https://host/v1` is never flagged. The returned message is host/path-shape
+/// based and carries no secret material. Returns `None` for a URL that looks
+/// like an API root.
 fn advise_generic_openai_base_url(url: &str) -> Option<String> {
     let trimmed = url.trim();
     // Compare against the path/host shape only; strip any query/fragment so a
@@ -991,7 +993,13 @@ fn advise_generic_openai_base_url(url: &str) -> Option<String> {
         .unwrap_or(without_fragment);
     let looks_like_session = path_and_host.contains("/session/");
     let looks_like_generate = path_and_host.ends_with(":generateContent");
-    if looks_like_session || looks_like_generate {
+    // A bare Gemini host root (e.g. `https://generativelanguage.googleapis.com/
+    // v1beta/models`) is not `:generateContent` yet is still not an
+    // OpenAI-compatible API root, so flag it by host for parity with the client
+    // advisory. Reuse the single shared [`extract_host`] parser (lowercases and
+    // strips scheme/credentials/port) rather than re-parsing here.
+    let is_gemini_host = extract_host(path_and_host) == "generativelanguage.googleapis.com";
+    if looks_like_session || looks_like_generate || is_gemini_host {
         return Some(format!(
             "base_url {trimmed:?} looks like a web/session or model endpoint URL, not an \
              OpenAI-compatible API base URL; enter the API root (e.g. https://host/v1) so \
@@ -4749,6 +4757,12 @@ mod tests {
         assert!(advise_generic_openai_base_url("https://app.kiro.dev/session/abc").is_some());
         assert!(advise_generic_openai_base_url(
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
+        )
+        .is_some());
+        // A bare Gemini host root (no `:generateContent`) is flagged by host, so
+        // the persisted backend advisory corroborates the client advisory.
+        assert!(advise_generic_openai_base_url(
+            "https://generativelanguage.googleapis.com/v1beta/models"
         )
         .is_some());
         assert!(advise_generic_openai_base_url("https://host/v1").is_none());

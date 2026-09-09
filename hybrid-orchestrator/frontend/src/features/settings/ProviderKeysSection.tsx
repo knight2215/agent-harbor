@@ -28,37 +28,10 @@ import { ProviderEnumerationErrors } from "../model-selector/ProviderEnumeration
 import { clearCloudProvider, listCloudProviders, setCloudProvider } from "../../ipc/commands";
 import { useProvidersStore } from "../../state/providers";
 import type { CloudProviderConfig } from "../../types";
+import { adviseGenericOpenAiBaseUrl } from "./baseUrlAdvisory";
 
 /** The cloud provider kinds configurable here, in dropdown order. */
 type CloudKind = "openAI" | "anthropic" | "gemini" | "bedrock" | "azure" | "genericOpenAI";
-
-/**
- * A NON-BLOCKING client advisory for a generic OpenAI-compatible base URL: the
- * entered value looks like a web/session URL or a full model endpoint (a Kiro
- * `.../session/<id>` URL, a Gemini `...:generateContent` URL, or a
- * generativelanguage.googleapis.com host) rather than an OpenAI-compatible API
- * root. Returns guidance text, or `null` when the URL looks like an API root.
- * This never blocks saving (the backend remains the enforcement point); it just
- * steers the user before they paste the wrong thing.
- */
-function adviseGenericOpenAiBaseUrl(url: string): string | null {
-  const trimmed = url.trim();
-  if (trimmed === "") return null;
-  const pathAndHost = trimmed.split("#")[0].split("?")[0];
-  const looksLikeSession = pathAndHost.includes("/session/");
-  const looksLikeGenerate = pathAndHost.endsWith(":generateContent");
-  let host = "";
-  try {
-    host = new URL(trimmed).hostname.toLowerCase();
-  } catch {
-    host = "";
-  }
-  const isGeminiHost = host === "generativelanguage.googleapis.com";
-  if (looksLikeSession || looksLikeGenerate || isGeminiHost) {
-    return "This looks like a web/session or model endpoint URL, not an OpenAI-compatible API base URL. Enter the API root (e.g. https://host/v1) so models can be enumerated.";
-  }
-  return null;
-}
 
 /** Human labels for the dropdown; "Kiro" is surfaced as the genericOpenAI kind. */
 const KIND_LABELS: Record<CloudKind, string> = {
@@ -101,7 +74,12 @@ export function ProviderKeysSection() {
   // before they save. This never blocks the save (the backend remains the
   // enforcement point and also attaches its own advisory); it is guidance shown
   // as they type.
-  const baseUrlAdvisory = requiresBaseUrl ? adviseGenericOpenAiBaseUrl(baseUrl) : null;
+  const baseUrlAdvisory = requiresBaseUrl
+    ? adviseGenericOpenAiBaseUrl(
+        baseUrl,
+        "Enter the API root (e.g. https://host/v1) so models can be enumerated.",
+      )
+    : null;
 
   // Surface per-provider enumeration failures from the providers store so a user
   // who just added a key sees WHY a provider still contributed no models
