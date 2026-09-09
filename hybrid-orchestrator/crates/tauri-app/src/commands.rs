@@ -22,7 +22,9 @@ use orchestrator_core::{
 };
 use persistence::config::{AppConfig, PricingConfig};
 use persistence::{McpServerRepo, ProviderRepo};
-use providers::{list_available_models as list_models, AvailableModel, PricingTable, TokenPrice};
+use providers::{
+    list_available_models as list_models, AvailableModelsResult, PricingTable, TokenPrice,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -433,16 +435,21 @@ fn set_provider_secret_inner(
 ///
 /// It assembles the built-in provider registry from the persisted
 /// [`ProviderConfig`] rows and the pricing table from the versioned
-/// [`AppConfig`] (Section 6.2), then returns `Vec<`[`AvailableModel`]`>`.
+/// [`AppConfig`] (Section 6.2), then returns an [`AvailableModelsResult`]
+/// carrying both the successful [`AvailableModel`] rows and a display-safe list
+/// of per-provider enumeration errors so the UI can show why a misconfigured or
+/// unreachable provider contributed nothing (Section 8.2). A single failing
+/// provider never blanks the successful results.
 ///
-/// DISPLAY-SAFE (Section 9.1 / 9.2): the returned rows carry ONLY
-/// provider/model/capabilities/price labels. No secret material and no resolved
-/// [`SecretRef`] value ever crosses this boundary; secrets are resolved only
-/// inside the registry when it builds an instance, and stay there.
+/// DISPLAY-SAFE (Section 9.1 / 9.2): both the model rows and the enumeration
+/// error messages carry ONLY provider/model/capabilities/price/error labels. No
+/// secret material and no resolved [`SecretRef`] value ever crosses this
+/// boundary; secrets are resolved only inside the registry when it builds an
+/// instance, and stay there.
 #[tauri::command]
 pub async fn list_available_models(
     state: tauri::State<'_, AppState>,
-) -> Result<Vec<AvailableModel>, CommandError> {
+) -> Result<AvailableModelsResult, CommandError> {
     list_available_models_inner(&state).await
 }
 
@@ -452,13 +459,14 @@ pub async fn list_available_models(
 /// enumerates models.
 ///
 /// This is what enforces the DISPLAY-SAFE invariant: it returns only
-/// [`AvailableModel`] rows built from the provider/model/capabilities/price
-/// surface, never touching `SecretStore::resolve` for the return value. A
-/// regression that leaked secret material into the result would fail
+/// [`AvailableModel`] rows and display-safe enumeration error messages built
+/// from the provider/model/capabilities/price surface, never touching
+/// `SecretStore::resolve` for the return value. A regression that leaked secret
+/// material into the result would fail
 /// `list_available_models_inner_returns_display_safe_rows` below.
 async fn list_available_models_inner(
     state: &AppState,
-) -> Result<Vec<AvailableModel>, CommandError> {
+) -> Result<AvailableModelsResult, CommandError> {
     let db = state.session_manager.db();
 
     // Auto-seed the Ollama provider-config row (idempotent) BEFORE reading the
@@ -987,6 +995,266 @@ async fn clear_local_runtime_inner(
         .map_err(|e| CommandError::internal(e.to_string()))
 }
 
+// --- Cloud providers (OpenAI / Anthropic / Gemini / Bedrock / Azure / Kiro) -
+
+/// The stable per-kind config id for a user-configurable CLOUD provider, or
+/// `None` for any kind that is NOT configured through the cloud path (the local
+/// runtimes LmStudio/Ollama and the Embedded engine are owned by other command
+/// families). Kiro is not a distinct [`ProviderKind`]; it is an
+/// OpenAI-compatible endpoint, so the UI maps its "Kiro (OpenAI-compatible)"
+/// choice to [`ProviderKind::GenericOpenAI`] with a required base_url, and that
+/// kind's cloud id is `generic-openai-cloud`. These ids are DISTINCT from the
+/// local-runtime ids ([`local_runtime_config_id`]), [`EMBEDDED_PROVIDER_ID`],
+/// and [`OLLAMA_PROVIDER_ID`], so a cloud GenericOpenAI (Kiro) row never
+/// collides with a local generic OpenAI-compatible runtime.
+fn cloud_provider_config_id(kind: ProviderKind) -> Option<&'static str> {
+    match kind {
+        ProviderKind::OpenAI => Some("openai-cloud"),
+        ProviderKind::Anthropic => Some("anthropic-cloud"),
+        ProviderKind::Gemini => Some("gemini-cloud"),
+        ProviderKind::Bedrock => Some("bedrock-cloud"),
+        ProviderKind::Azure => Some("azure-cloud"),
+        ProviderKind::GenericOpenAI => Some("generic-openai-cloud"),
+        _ => None,
+    }
+}
+
+/// A display-safe view of a configured cloud provider for the webview. Carries
+/// only non-secret fields (Section 9.1): the plaintext API key and any resolved
+/// secret NEVER cross this boundary. `has_api_key` reports only WHETHER a key is
+/// stored (as an opaque [`SecretRef`]), never the key itself; `base_url` is the
+/// persisted endpoint override (`None` when the adapter's default is used);
+/// `warning` carries the optional display-safe base_url advisory from
+/// [`check_provider_base_url`].
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudProviderConfigView {
+    /// The stable per-kind config id (see [`cloud_provider_config_id`]).
+    pub id: String,
+    /// The provider kind (OpenAI/Anthropic/Gemini/Bedrock/Azure/GenericOpenAI).
+    pub kind: ProviderKind,
+    /// The persisted base_url override, or `None` when the adapter default is
+    /// used (required and always present for GenericOpenAI/Kiro).
+    pub base_url: Option<String>,
+    /// Whether an API key is stored (as an opaque `SecretRef`), never the key.
+    pub has_api_key: bool,
+    /// Optional display-safe advisory (e.g. non-loopback plaintext HTTP), only
+    /// surfaced on the write path; `None` when rehydrating existing rows.
+    pub warning: Option<String>,
+}
+
+/// Persist (upsert) a user-configured cloud provider: a hosted provider the
+/// user authenticates with an API key (OpenAI, Anthropic, Gemini, Bedrock,
+/// Azure, or a generic OpenAI-compatible endpoint used for "Kiro"). The key is
+/// stored straight into the keystore and referenced only as an opaque
+/// [`SecretRef`]; it never comes back across IPC. The config is written through
+/// [`ProviderRepo`], so the existing adapters, locality classifier, and routing
+/// pick it up with no further changes and its models are enumerated by
+/// [`list_available_models`].
+///
+/// `base_url` is REQUIRED for GenericOpenAI (Kiro, which has no default
+/// endpoint) and OPTIONAL for the other cloud kinds (their adapters default the
+/// base_url when `None`); when present it is validated through the Section 9.3
+/// posture ([`check_provider_base_url`]). Tauri maps the snake_case params to
+/// camelCase over the wire (`apiKey`, `baseUrl`).
+#[tauri::command]
+pub async fn set_cloud_provider(
+    state: tauri::State<'_, AppState>,
+    kind: ProviderKind,
+    api_key: String,
+    base_url: Option<String>,
+) -> Result<CloudProviderConfigView, CommandError> {
+    set_cloud_provider_inner(&state, kind, &api_key, base_url.as_deref()).await
+}
+
+/// The full validate-then-store-then-upsert body of [`set_cloud_provider`],
+/// factored out so it can be driven directly in tests without a live Tauri
+/// `State` (the established `_inner` testability pattern).
+///
+/// It (1) accepts ONLY the user-configurable cloud kinds (OpenAI, Anthropic,
+/// Gemini, Bedrock, Azure, GenericOpenAI), rejecting anything else with
+/// [`CommandError::invalid`]; (2) requires a non-empty `api_key` within
+/// [`MAX_SECRET_LEN`] (cloud providers always need a key); (3) requires a
+/// non-empty `base_url` for GenericOpenAI (Kiro) and validates any provided
+/// `base_url` via [`check_provider_base_url`], capturing its optional
+/// display-safe advisory into the view; (4) stores the key through the
+/// same secret store as [`set_provider_secret`], keeping only the opaque
+/// [`SecretRef`]; and (5) upserts the [`ProviderConfig`] by its stable per-kind
+/// id (get -> update | insert), so re-saving the same kind never duplicates the
+/// row. It returns a display-safe [`CloudProviderConfigView`] and NEVER the key.
+async fn set_cloud_provider_inner(
+    state: &AppState,
+    kind: ProviderKind,
+    api_key: &str,
+    base_url: Option<&str>,
+) -> Result<CloudProviderConfigView, CommandError> {
+    // (1) Only the hosted cloud kinds are configurable through this path.
+    let id = cloud_provider_config_id(kind).ok_or_else(|| {
+        CommandError::invalid(
+            "only OpenAI, Anthropic, Gemini, Bedrock, Azure, and generic OpenAI-compatible (Kiro) cloud providers can be configured here",
+        )
+    })?;
+
+    // (2) A cloud provider always needs a key; reject an empty/oversized one.
+    if api_key.is_empty() {
+        return Err(CommandError::invalid("`apiKey` must not be empty"));
+    }
+    if api_key.len() > MAX_SECRET_LEN {
+        return Err(CommandError::invalid(format!(
+            "`apiKey` exceeds the maximum length of {MAX_SECRET_LEN} bytes"
+        )));
+    }
+
+    // (3) GenericOpenAI (Kiro) has no default endpoint, so a base_url is
+    // REQUIRED; the other cloud kinds default their base_url when None. Any
+    // provided base_url is trimmed and validated through the Section 9.3
+    // posture before anything is persisted (a Blocked target errors here); an
+    // accepted non-loopback plaintext HTTP endpoint yields a display-safe
+    // advisory carried back in the view (parity with `set_local_runtime`).
+    let mut warning = None;
+    let base_url = match base_url.map(str::trim) {
+        Some(url) if !url.is_empty() => {
+            validate_nonempty("baseUrl", url, MAX_BASE_URL_LEN)?;
+            warning = check_provider_base_url(url)?;
+            Some(url.to_string())
+        }
+        _ => {
+            if kind == ProviderKind::GenericOpenAI {
+                return Err(CommandError::invalid(
+                    "`baseUrl` is required for a generic OpenAI-compatible (Kiro) provider",
+                ));
+            }
+            None
+        }
+    };
+
+    // Load any existing row up front so re-saving updates rather than inserts.
+    let repo = ProviderRepo::new(state.session_manager.db());
+    let existing = repo
+        .get(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // (4) Store the key as an opaque SecretRef; only the handle is persisted.
+    let api_key_ref = Some(
+        state
+            .secret_store
+            .store(id, api_key)
+            .map_err(|e| CommandError::internal(e.to_string()))?,
+    );
+
+    // (5) Upsert the config by its stable per-kind id (get -> update | insert),
+    // matching ProviderRepo::update's NotFound-on-missing contract.
+    let config = ProviderConfig {
+        id: id.to_string(),
+        kind,
+        base_url: base_url.clone(),
+        api_key_ref,
+        extra: serde_json::Value::Null,
+    };
+    if existing.is_some() {
+        repo.update(&config)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
+    } else {
+        repo.insert(&config)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
+    }
+
+    Ok(CloudProviderConfigView {
+        id: id.to_string(),
+        kind,
+        base_url,
+        has_api_key: true,
+        warning,
+    })
+}
+
+/// List the currently-configured cloud providers so the webview can rehydrate
+/// its Providers & Keys section from the backend source of truth (not a UI-only
+/// marker). Display-safe: each row carries only id/kind/baseUrl/hasApiKey and
+/// never the key or a resolved secret.
+#[tauri::command]
+pub async fn list_cloud_providers(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<CloudProviderConfigView>, CommandError> {
+    list_cloud_providers_inner(&state).await
+}
+
+/// The full body of [`list_cloud_providers`], factored out for direct testing.
+/// It loads every persisted [`ProviderConfig`], keeps only the cloud kinds
+/// addressed by their stable per-kind id, and maps each to a display-safe
+/// [`CloudProviderConfigView`] (`warning` is `None` when rehydrating an existing
+/// row; `has_api_key` reflects whether the row has a stored `SecretRef`).
+async fn list_cloud_providers_inner(
+    state: &AppState,
+) -> Result<Vec<CloudProviderConfigView>, CommandError> {
+    let configs = ProviderRepo::new(state.session_manager.db())
+        .list()
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let views = configs
+        .into_iter()
+        .filter(|cfg| cloud_provider_config_id(cfg.kind) == Some(cfg.id.as_str()))
+        .map(|cfg| CloudProviderConfigView {
+            id: cfg.id,
+            kind: cfg.kind,
+            base_url: cfg.base_url,
+            has_api_key: cfg.api_key_ref.is_some(),
+            warning: None,
+        })
+        .collect();
+    Ok(views)
+}
+
+/// Remove a configured cloud provider so the user can clear a previously-saved
+/// key/endpoint. Only the user-configurable cloud kinds are addressable; any
+/// other kind is rejected.
+#[tauri::command]
+pub async fn clear_cloud_provider(
+    state: tauri::State<'_, AppState>,
+    kind: ProviderKind,
+) -> Result<(), CommandError> {
+    clear_cloud_provider_inner(&state, kind).await
+}
+
+/// The full body of [`clear_cloud_provider`], factored out for direct testing.
+/// It resolves the stable per-kind id (rejecting non-cloud kinds), deletes any
+/// secret the row stored so no credential material is orphaned in the keychain
+/// (Section 9.1 keychain hygiene), then deletes the row via [`ProviderRepo`];
+/// deleting a missing secret or row is a no-op.
+async fn clear_cloud_provider_inner(
+    state: &AppState,
+    kind: ProviderKind,
+) -> Result<(), CommandError> {
+    let id = cloud_provider_config_id(kind).ok_or_else(|| {
+        CommandError::invalid(
+            "only OpenAI, Anthropic, Gemini, Bedrock, Azure, and generic OpenAI-compatible (Kiro) cloud providers can be configured here",
+        )
+    })?;
+    let repo = ProviderRepo::new(state.session_manager.db());
+    // Resolve the row's stored SecretRef (if any) and delete the secret before
+    // dropping the row, so clearing a provider never leaves the key behind under
+    // the stable per-kind handle. The store is idempotent (deleting a missing
+    // entry is not an error).
+    if let Some(config) = repo
+        .get(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?
+    {
+        if let Some(secret_ref) = config.api_key_ref.as_ref() {
+            state
+                .secret_store
+                .delete(secret_ref)
+                .map_err(|e| CommandError::internal(e.to_string()))?;
+        }
+    }
+    repo.delete(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))
+}
+
 // --- Message pipeline (P4.6 / Section 2.2 / 8.1) ---------------------------
 
 /// Send a user message and drive the end-to-end pipeline (architecture.md
@@ -1044,9 +1312,12 @@ async fn send_message_inner(
     let pricing = pricing_table_from_config(&app_config.pricing);
     let registry = providers::build_registry(configs.iter(), state.secret_store.as_ref())
         .map_err(|e| CommandError::internal(e.to_string()))?;
+    // Routing only needs the successful model candidates; enumeration errors are
+    // surfaced through the `list_available_models` command's UI, not routing.
     let available = list_models(&registry, &configs, &pricing)
         .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+        .map_err(|e| CommandError::internal(e.to_string()))?
+        .models;
     // The provably-local provider ids (from each row's concrete ProviderKind),
     // so routing enforces LocalOnly/Confidential on provable locality rather
     // than a zero price (Section 6.2 fail-closed).
@@ -1856,7 +2127,7 @@ const OLLAMA_PROVIDER_ID: &str = "ollama-local";
 /// enumeration, and is a no-op once it exists.
 ///
 /// The row carries no `base_url` (the Ollama adapter falls back to its own
-/// `DEFAULT_BASE_URL`, `http://localhost:11434/v1`, when `base_url` is None) and
+/// `DEFAULT_BASE_URL`, `http://127.0.0.1:11434/v1`, when `base_url` is None) and
 /// no `api_key_ref` (Ollama is keyless), so it is display-safe and never touches
 /// the secret store. Seeding is safe even when Ollama is not installed or not
 /// running: the enumeration path skips a provider whose `list_models` errors
@@ -2032,6 +2303,7 @@ mod tests {
     use super::*;
     use orchestrator_core::SessionManager;
     use persistence::Db;
+    use providers::AvailableModel;
     use secrets::{InMemorySecretStore, SecretError};
 
     async fn test_state() -> AppState {
@@ -2210,8 +2482,8 @@ mod tests {
     #[tokio::test]
     async fn list_available_models_inner_empty_when_no_providers() {
         let state = test_state().await;
-        let models = list_available_models_inner(&state).await.unwrap();
-        assert!(models.is_empty());
+        let result = list_available_models_inner(&state).await.unwrap();
+        assert!(result.models.is_empty());
     }
 
     /// The persisted pricing config converts into the in-memory pricing table:
@@ -2569,7 +2841,7 @@ mod tests {
     /// crate boundary so a regression in the mode plumbing is caught here too.
     #[tokio::test]
     async fn routing_mode_and_manual_pin_cannot_override_local_only() {
-        use providers::{AvailableModel, Capabilities, ChatMessage, MessageRole, TokenPrice};
+        use providers::{Capabilities, ChatMessage, MessageRole, TokenPrice};
         use routing::{
             AutoDefaultPolicy, ManualOverrideResolver, ManualRoute as RoutingManualRoute,
             RoutingError, RoutingPolicy, RoutingRequest,
@@ -2896,8 +3168,8 @@ mod tests {
         assert_eq!(secret_ref, SecretRef::new("openai"));
 
         // The model list handler body returns display-safe rows with no secret.
-        let models = list_available_models_inner(&state).await.unwrap();
-        let json = serde_json::to_string(&models).unwrap();
+        let result = list_available_models_inner(&state).await.unwrap();
+        let json = serde_json::to_string(&result).unwrap();
         assert!(
             !json.contains(plaintext),
             "list_available_models must not surface stored secret material"
@@ -3049,6 +3321,7 @@ mod tests {
         assert!(list_available_models_inner(&state)
             .await
             .unwrap()
+            .models
             .iter()
             .all(|m| m.provider_id != EMBEDDED_PROVIDER_ID));
 
@@ -3063,7 +3336,7 @@ mod tests {
 
         // The imported model now appears as a zero-priced AvailableModel under
         // the embedded provider id, so the picker groups it under Local.
-        let models = list_available_models_inner(&state).await.unwrap();
+        let models = list_available_models_inner(&state).await.unwrap().models;
         let embedded: Vec<_> = models
             .iter()
             .filter(|m| m.provider_id == EMBEDDED_PROVIDER_ID)
@@ -3154,7 +3427,21 @@ mod tests {
     async fn list_available_models_auto_seeds_ollama_provider_config() {
         let state = test_state().await;
         // Enumerate as the picker does; this must not error even with no Ollama.
-        let _ = list_available_models_inner(&state).await.unwrap();
+        let result = list_available_models_inner(&state).await.unwrap();
+        // No Ollama server is running in the test, so the auto-seeded row cannot
+        // be enumerated: its failure is surfaced as a display-safe enumeration
+        // error (instead of being silently swallowed) so the UI can explain why
+        // no local models appeared. The message never carries secret material.
+        let ollama_err = result
+            .errors
+            .iter()
+            .find(|e| e.provider_id == OLLAMA_PROVIDER_ID)
+            .expect("the unreachable seeded Ollama row must surface an enumeration error");
+        assert!(!ollama_err.message.is_empty());
+        let err_json = serde_json::to_string(&result.errors).unwrap();
+        assert!(err_json.contains("\"providerId\""));
+        assert!(!err_json.to_lowercase().contains("apikey"));
+        assert!(!err_json.to_lowercase().contains("secretref"));
         let configs = ProviderRepo::new(state.session_manager.db())
             .list()
             .await
@@ -3511,6 +3798,268 @@ mod tests {
         assert!(row.api_key_ref.is_none());
 
         // The prior secret is no longer resolvable in the store.
+        assert!(matches!(
+            state.secret_store.resolve(&old_ref),
+            Err(SecretError::NotFound(_))
+        ));
+    }
+
+    /// `set_cloud_provider_inner` persists a ProviderConfig row of the given
+    /// cloud kind by its stable per-kind id with an `api_key_ref`, returns
+    /// `has_api_key = true`, and NEVER echoes the plaintext key (in the view or
+    /// its serialized form). Re-saving the same kind UPDATES the one row rather
+    /// than duplicating it (the stable-per-kind-id upsert is idempotent).
+    #[tokio::test]
+    async fn set_cloud_provider_inner_persists_row_without_echo() {
+        let state = test_state().await;
+        let plaintext = "sk-cloud-do-not-leak-1234";
+
+        let view = set_cloud_provider_inner(&state, ProviderKind::Gemini, plaintext, None)
+            .await
+            .unwrap();
+        assert_eq!(view.id, "gemini-cloud");
+        assert_eq!(view.kind, ProviderKind::Gemini);
+        assert_eq!(view.base_url, None);
+        assert!(view.has_api_key);
+
+        // Neither the view nor its serialized form carries the key.
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains(plaintext));
+        assert!(!json.to_lowercase().contains("secret"));
+
+        // The persisted row is a real Gemini ProviderConfig referencing the
+        // secret only by an opaque handle; the plaintext is reachable ONLY via
+        // the internal resolve seam.
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let row = configs.iter().find(|c| c.id == "gemini-cloud").unwrap();
+        assert_eq!(row.kind, ProviderKind::Gemini);
+        let secret_ref = row.api_key_ref.as_ref().unwrap();
+        assert!(!secret_ref.handle().contains(plaintext));
+        assert_eq!(state.secret_store.resolve(secret_ref).unwrap(), plaintext);
+
+        // Re-saving the same kind updates the one row (no duplicate).
+        set_cloud_provider_inner(&state, ProviderKind::Gemini, "sk-cloud-rotated", None)
+            .await
+            .unwrap();
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let rows: Vec<_> = configs
+            .iter()
+            .filter(|c| c.kind == ProviderKind::Gemini)
+            .collect();
+        assert_eq!(rows.len(), 1, "re-saving must update, not duplicate");
+    }
+
+    /// A non-cloud kind (e.g. Ollama) is rejected with `InvalidArgument` by both
+    /// the set and clear inner paths and nothing is persisted.
+    #[tokio::test]
+    async fn set_cloud_provider_inner_rejects_non_cloud_kind() {
+        let state = test_state().await;
+
+        let err = set_cloud_provider_inner(&state, ProviderKind::Ollama, "sk-x", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        let err = clear_cloud_provider_inner(&state, ProviderKind::Ollama)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(configs.is_empty());
+    }
+
+    /// An empty api_key is rejected with `InvalidArgument` (cloud providers
+    /// always need a key) and nothing is persisted.
+    #[tokio::test]
+    async fn set_cloud_provider_inner_rejects_empty_api_key() {
+        let state = test_state().await;
+
+        let err = set_cloud_provider_inner(&state, ProviderKind::OpenAI, "", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        assert!(configs.is_empty());
+    }
+
+    /// Kiro maps to GenericOpenAI, which has no default endpoint, so a base_url
+    /// is REQUIRED: omitting it rejects with `InvalidArgument` (and persists
+    /// nothing), while a valid base_url is accepted, validated, and persisted on
+    /// the row. A Blocked base_url is rejected by the Section 9.3 posture.
+    #[tokio::test]
+    async fn set_cloud_provider_inner_requires_and_validates_kiro_base_url() {
+        let state = test_state().await;
+
+        // Missing base_url for GenericOpenAI (Kiro) is rejected.
+        let err = set_cloud_provider_inner(&state, ProviderKind::GenericOpenAI, "sk-kiro", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+        assert!(ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap()
+            .is_empty());
+
+        // A Blocked base_url is rejected by the base-url posture.
+        let err = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "sk-kiro",
+            Some("http://169.254.169.254/v1"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // A valid (TLS) base_url is accepted and persisted on the row.
+        let view = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "sk-kiro",
+            Some("https://kiro.example.com/v1"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.id, "generic-openai-cloud");
+        assert_eq!(
+            view.base_url.as_deref(),
+            Some("https://kiro.example.com/v1")
+        );
+        assert!(view.has_api_key);
+        // A TLS endpoint carries no advisory.
+        assert!(view.warning.is_none());
+
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let row = configs
+            .iter()
+            .find(|c| c.id == "generic-openai-cloud")
+            .unwrap();
+        assert_eq!(row.kind, ProviderKind::GenericOpenAI);
+        assert_eq!(row.base_url.as_deref(), Some("https://kiro.example.com/v1"));
+    }
+
+    /// A cloud provider (Kiro / GenericOpenAI) configured with a non-loopback
+    /// plaintext http base_url is accepted but carries a display-safe advisory
+    /// recommending TLS (parity with `set_local_runtime`); a loopback/TLS
+    /// base_url carries none. The advisory NEVER echoes the key material.
+    #[tokio::test]
+    async fn set_cloud_provider_inner_surfaces_plaintext_warning() {
+        let state = test_state().await;
+        let plaintext = "sk-kiro-do-not-leak-1234";
+
+        // Non-loopback plaintext http endpoint: accepted with a warning.
+        let view = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            plaintext,
+            Some("http://example.com/v1"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            view.warning.is_some(),
+            "a non-loopback plaintext endpoint must carry a warning"
+        );
+        // The advisory (and the whole serialized view) never carries the key.
+        let warning = view.warning.as_deref().unwrap();
+        assert!(!warning.contains(plaintext));
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains(plaintext));
+
+        // A loopback base_url carries no advisory.
+        let loopback = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            plaintext,
+            Some("http://127.0.0.1:1234/v1"),
+        )
+        .await
+        .unwrap();
+        assert!(loopback.warning.is_none());
+
+        // A TLS base_url carries no advisory.
+        let tls = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            plaintext,
+            Some("https://example.com/v1"),
+        )
+        .await
+        .unwrap();
+        assert!(tls.warning.is_none());
+    }
+
+    /// `list_cloud_providers_inner` returns the configured cloud rows after a
+    /// save (display-safe views with `has_api_key = true`), and does not leak
+    /// any key material in the serialized list.
+    #[tokio::test]
+    async fn list_cloud_providers_inner_returns_configured_rows() {
+        let state = test_state().await;
+
+        // Empty before any save.
+        assert!(list_cloud_providers_inner(&state).await.unwrap().is_empty());
+
+        set_cloud_provider_inner(&state, ProviderKind::Anthropic, "sk-anthropic", None)
+            .await
+            .unwrap();
+
+        let providers = list_cloud_providers_inner(&state).await.unwrap();
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0].id, "anthropic-cloud");
+        assert_eq!(providers[0].kind, ProviderKind::Anthropic);
+        assert!(providers[0].has_api_key);
+
+        let json = serde_json::to_string(&providers).unwrap();
+        assert!(!json.contains("sk-anthropic"));
+    }
+
+    /// `clear_cloud_provider_inner` deletes both the config row and the stored
+    /// secret so no credential material is orphaned in the keychain under the
+    /// stable per-kind handle.
+    #[tokio::test]
+    async fn clear_cloud_provider_inner_deletes_row_and_secret() {
+        let state = test_state().await;
+        let plaintext = "sk-clear-cloud-do-not-leak";
+
+        set_cloud_provider_inner(&state, ProviderKind::OpenAI, plaintext, None)
+            .await
+            .unwrap();
+
+        // Capture the SecretRef the save stored and confirm it resolves now.
+        let old_ref = {
+            let configs = ProviderRepo::new(state.session_manager.db())
+                .list()
+                .await
+                .unwrap();
+            let row = configs.iter().find(|c| c.id == "openai-cloud").unwrap();
+            row.api_key_ref.clone().unwrap()
+        };
+        assert_eq!(state.secret_store.resolve(&old_ref).unwrap(), plaintext);
+
+        clear_cloud_provider_inner(&state, ProviderKind::OpenAI)
+            .await
+            .unwrap();
+
+        // The config row is removed and the secret is no longer resolvable.
+        assert!(list_cloud_providers_inner(&state).await.unwrap().is_empty());
         assert!(matches!(
             state.secret_store.resolve(&old_ref),
             Err(SecretError::NotFound(_))

@@ -76,45 +76,132 @@ describe("Settings", () => {
     expect(await screen.findByRole("region", { name: "About / Updates" })).toBeInTheDocument();
   });
 
-  it("stores a provider key via set_provider_secret without retaining plaintext", async () => {
-    invoke.mockResolvedValue("secret-ref://openai");
+  it("registers a cloud provider via set_cloud_provider without retaining plaintext", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_cloud_providers") return Promise.resolve([]);
+      if (cmd === "set_cloud_provider") {
+        return Promise.resolve({
+          id: "openai-cloud",
+          kind: "openAI",
+          baseUrl: null,
+          hasApiKey: true,
+          warning: null,
+        });
+      }
+      return Promise.resolve([]);
+    });
     render(<Settings />);
 
-    fireEvent.change(screen.getByLabelText("Provider id"), { target: { value: "openai" } });
+    // The default selected provider is a cloud KIND (dropdown), not free text.
     fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-test" } });
     fireEvent.click(screen.getByRole("button", { name: "Save key" }));
 
-    expect(invoke).toHaveBeenCalledWith("set_provider_secret", {
-      providerId: "openai",
-      secret: "sk-test",
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_cloud_provider", {
+        kind: "openAI",
+        apiKey: "sk-test",
+        baseUrl: null,
+      });
     });
-    // The "configured" indication shows the provider and its opaque ref.
-    expect(await screen.findByTestId("provider-key-configured-openai")).toBeInTheDocument();
+    // The "configured" indication shows the provider by kind (display-safe).
+    expect(await screen.findByTestId("provider-key-configured-openAI")).toBeInTheDocument();
     // The plaintext key is cleared from the field after saving.
     expect((screen.getByLabelText("API key") as HTMLInputElement).value).toBe("");
   });
 
-  it("keeps the configured-key indication after navigating away and back", async () => {
-    invoke.mockResolvedValue("secret-ref://openai");
+  it("requires a base URL when the Kiro (genericOpenAI) provider is selected", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_cloud_providers") return Promise.resolve([]);
+      if (cmd === "set_cloud_provider") {
+        return Promise.resolve({
+          id: "generic-openai-cloud",
+          kind: "genericOpenAI",
+          baseUrl: "https://kiro.example.com/v1",
+          hasApiKey: true,
+          warning: null,
+        });
+      }
+      return Promise.resolve([]);
+    });
     render(<Settings />);
 
-    fireEvent.change(screen.getByLabelText("Provider id"), { target: { value: "openai" } });
-    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-test" } });
+    // Select Kiro; the Base URL field appears and is required.
+    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "genericOpenAI" } });
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-kiro" } });
+    // Saving without a base URL surfaces a validation error and does not call
+    // the backend.
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/base URL is required/i);
+    expect(invoke).not.toHaveBeenCalledWith("set_cloud_provider", expect.anything());
+
+    // Providing the base URL then saves via set_cloud_provider with it.
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "https://kiro.example.com/v1" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Save key" }));
 
-    expect(await screen.findByTestId("provider-key-configured-openai")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_cloud_provider", {
+        kind: "genericOpenAI",
+        apiKey: "sk-kiro",
+        baseUrl: "https://kiro.example.com/v1",
+      });
+    });
+    expect(await screen.findByTestId("provider-key-configured-genericOpenAI")).toBeInTheDocument();
+  });
 
-    // Simulate navigating to another destination and back: unmount, then mount
-    // a fresh Settings tree (which resets in-component state to defaults).
-    cleanup();
+  it("displays the backend warning for an accepted plaintext non-loopback Kiro URL", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_cloud_providers") return Promise.resolve([]);
+      if (cmd === "set_cloud_provider") {
+        return Promise.resolve({
+          id: "generic-openai-cloud",
+          kind: "genericOpenAI",
+          baseUrl: "http://example.com/v1",
+          hasApiKey: true,
+          warning: "This endpoint uses plaintext http over a non-loopback address.",
+        });
+      }
+      return Promise.resolve([]);
+    });
     render(<Settings />);
 
-    // The indication is rehydrated from the persisted non-secret marker.
-    expect(await screen.findByTestId("provider-key-configured-openai")).toBeInTheDocument();
-    // The plaintext key is never persisted; only the opaque ref is shown.
-    const marker = window.localStorage.getItem("ah-configured-providers");
-    expect(marker).not.toBeNull();
-    expect(marker).not.toContain("sk-test");
+    // Select Kiro and save with a plaintext, non-loopback base URL.
+    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "genericOpenAI" } });
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-kiro" } });
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "http://example.com/v1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+
+    // The advisory is shown (role="status", distinct from the error region)
+    // without blocking the save (the provider is still configured).
+    expect(await screen.findByTestId("cloud-provider-warning")).toHaveTextContent(
+      "This endpoint uses plaintext http over a non-loopback address.",
+    );
+    expect(await screen.findByTestId("provider-key-configured-genericOpenAI")).toBeInTheDocument();
+  });
+
+  it("rehydrates configured cloud providers on mount and persists across unmount/remount", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_cloud_providers") {
+        return Promise.resolve([
+          { id: "gemini-cloud", kind: "gemini", baseUrl: null, hasApiKey: true, warning: null },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
+    render(<Settings />);
+
+    // The configured provider is shown from the mount-time rehydration.
+    expect(await screen.findByTestId("provider-key-configured-gemini")).toBeInTheDocument();
+    expect(invoke).toHaveBeenCalledWith("list_cloud_providers");
+
+    // Simulate navigating away and back: unmount, then mount a fresh tree. It
+    // rehydrates from the backend source of truth (not a localStorage marker).
+    cleanup();
+    render(<Settings />);
+    expect(await screen.findByTestId("provider-key-configured-gemini")).toBeInTheDocument();
   });
 });
 

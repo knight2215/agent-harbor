@@ -75,10 +75,10 @@ export function LocalRuntimesSection() {
   // session).
   useEffect(() => {
     listLocalRuntimes()
-      .then((next) => setRuntimes(next))
+      .then((next) => setRuntimes(Array.isArray(next) ? next : []))
       .catch(() => setRuntimes([]));
     listEmbeddedModels()
-      .then((next) => setEmbeddedModels(next))
+      .then((next) => setEmbeddedModels(Array.isArray(next) ? next : []))
       .catch(() => setEmbeddedModels([]));
     embeddedModelStatus()
       .then((next) => setStatus(next))
@@ -122,7 +122,7 @@ export function LocalRuntimesSection() {
     setError(null);
     clearLocalRuntime(target)
       .then(() => listLocalRuntimes())
-      .then((next) => setRuntimes(next))
+      .then((next) => setRuntimes(Array.isArray(next) ? next : []))
       .catch((err: unknown) => setError(String(err)));
   };
 
@@ -154,7 +154,7 @@ export function LocalRuntimesSection() {
     setEmbeddedError(null);
     importEmbeddedModel(ggufPath)
       .then((next) => {
-        setEmbeddedModels(next);
+        setEmbeddedModels(Array.isArray(next) ? next : []);
         setGgufPath("");
       })
       .catch((err: unknown) => setEmbeddedError(String(err)));
@@ -166,7 +166,7 @@ export function LocalRuntimesSection() {
     setEmbeddedError(null);
     selectEmbeddedModel(ggufPath)
       .then((next) => {
-        setEmbeddedModels(next);
+        setEmbeddedModels(Array.isArray(next) ? next : []);
         setGgufPath("");
         return embeddedModelStatus();
       })

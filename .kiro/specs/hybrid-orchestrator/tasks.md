@@ -272,14 +272,14 @@ A hardened build with audited secret handling, a least-privilege IPC surface, sa
 
 ## Phase 8: Ollama integration
 
-Goal: integrate [Ollama](https://ollama.com/) as a first-class local provider, reusing the OpenAI-compatible native chat path for chat/streaming at `http://localhost:11434/v1` and adding Ollama's native model discovery (`GET /api/tags`), so installed Ollama models surface as Local models in the picker and route through the existing Auto / Prefer Local / Prefer Quality / Manual modes (Section 4.3).
+Goal: integrate [Ollama](https://ollama.com/) as a first-class local provider, reusing the OpenAI-compatible native chat path for chat/streaming at `http://127.0.0.1:11434/v1` and adding Ollama's native model discovery (`GET /api/tags`), so installed Ollama models surface as Local models in the picker and route through the existing Auto / Prefer Local / Prefer Quality / Manual modes (Section 4.3).
 
 Dependencies: Phase 2 (the `ChatProvider` contract, shared native adapter, and registry) and Phase 4 (routing consumes the local classification and zero price). Frontend surfacing depends on Phase 5's model selector.
 
 ### Tasks
 
 - **P8.1 Provider kind.** Add `ProviderKind::Ollama` to `domain` (serializes to `"ollama"` under the existing `rename_all = "camelCase"`), guarded by the camelCase serde test.
-- **P8.2 Ollama adapter (`providers/src/adapters/ollama.rs`).** Reuse the shared `NativeAdapter` for chat/streaming with `base_url` default `http://localhost:11434/v1` and no key by default. Override `list_models` to call Ollama's native `GET /api/tags` at the server root (derived by stripping a trailing `/v1` from the chat `base_url`), decoding `{"models":[{"name":...}]}` into `ModelInfo` ids.
+- **P8.2 Ollama adapter (`providers/src/adapters/ollama.rs`).** Reuse the shared `NativeAdapter` for chat/streaming with `base_url` default `http://127.0.0.1:11434/v1` and no key by default. Override `list_models` to call Ollama's native `GET /api/tags` at the server root (derived by stripping a trailing `/v1` from the chat `base_url`), decoding `{"models":[{"name":...}]}` into `ModelInfo` ids.
 - **P8.3 Registry and pricing wiring.** Add `OllamaFactory`, register it in `builtin_registry()`, re-export it from the crate root, and seed `ProviderKind::Ollama` at `TokenPrice::ZERO` in `PricingTable::bundled_defaults()` alongside LM Studio.
 - **P8.4 Local classification.** Classify `ProviderKind::Ollama` as provably-local in the routing privacy gate (`local_provider_ids()` in `tauri-app`), like LM Studio, so `Local-Only` requests may route to it and it is grouped under Local.
 - **P8.5 Frontend surfacing.** Add `"ollama"` to the TypeScript `ProviderKind` union so it mirrors the Rust enum; confirm the zero-priced Ollama models fall under the Local group in the `ProviderModelPicker` (via the existing zero-price heuristic) with no grouping change required.
@@ -295,7 +295,7 @@ A configured Ollama provider that lists its installed models via `/api/tags`, ru
 ### Verification / acceptance
 
 - `cargo test` in `providers` covers the adapter with mocked HTTP: `list_models` hits `GET /api/tags` and yields the installed model ids, and chat POSTs to `/chat/completions` with no `Authorization` header (no live network required in CI).
-- A `providers` inline unit test asserts `build_ollama` selects `AuthStrategy::None` when `api_key_ref` is unset; an `#[ignore]`d manual test exercises a real Ollama server on `http://localhost:11434`, excluded from CI.
+- A `providers` inline unit test asserts `build_ollama` selects `AuthStrategy::None` when `api_key_ref` is unset; an `#[ignore]`d manual test exercises a real Ollama server on `http://127.0.0.1:11434`, excluded from CI.
 - `cargo test` in `domain` asserts `ProviderKind::Ollama` serializes to `"ollama"`; the `providers` registry test asserts an Ollama factory is registered; the `tauri-app` test asserts Ollama is classified local.
 - A `vitest` test asserts a zero-priced Ollama-style model appears under the Local group in the model picker.
 - Whole-workspace per-crate `cargo build`, `cargo test`, `cargo clippy` (with `-D warnings`), and `vitest` are green, and CI passes on all matrix targets.
@@ -333,6 +333,43 @@ A zero-install embedded engine that imports/selects a local `.gguf`, runs stream
 - The gated `engine-native` CI job compiles `cargo build --manifest-path crates/engine/Cargo.toml --features llama` on ubuntu + windows; this is the only place the native llama.cpp path is exercised.
 - A `vitest` test asserts a zero-priced embedded-style model appears under the Local group in the model picker and the settings surface drives the import/select/load commands.
 - Whole-workspace per-crate `cargo build`, `cargo test`, `cargo clippy` (with `-D warnings`), and `vitest` are green, and CI passes on all matrix targets.
+
+---
+
+## Phase 10: Provider visibility diagnostics, cloud-key registration, and Ollama hardening
+
+Goal: close the "I added a key (or started Ollama) but nothing shows up in the picker" gap by making provider enumeration observable and by making the Providers & Keys and local-provider write paths actually persist enumerable `ProviderConfig` rows. Three concrete threads: surface per-provider enumeration errors instead of swallowing them, register cloud provider keys as real `ProviderConfig` rows so their models enumerate under Cloud, and harden Ollama's `GET /api/tags` discovery so a running local Ollama surfaces its installed models. This phase is diagnostics and wiring only; the routing engine, the provider contract, and the embedded engine are untouched.
+
+Dependencies: Phase 2 (the `ChatProvider` contract, registry, and `list_available_models`), Phase 5 (the model selector and settings surfaces that consume the results), and Phase 8 (the Ollama adapter and its `/api/tags` discovery). Section 9.1/9.2 secret-hygiene invariants constrain every new command and error path.
+
+### Tasks
+
+- **P10.1 Structured enumeration result surfaced to the UI.** Change `providers::list_available_models` to return a structured `AvailableModelsResult { models, errors }` instead of swallowing per-provider `list_models()` failures to stderr. Each failing provider is captured as a display-safe `ProviderEnumerationError { providerId, message }` while healthy providers still populate the list, so graceful degradation is preserved. Thread the new shape through the `list_available_models` Tauri command; `send_message` routing candidates consume only `result.models` so routing behavior is unchanged. Add the frontend `AvailableModelsResult` / `ProviderEnumerationError` types, update the IPC wrapper and the providers store (`errors: []` default), and render the errors near the model picker and under Providers & Keys via a `ProviderEnumerationErrors` component without blanking the picker. Verification: `cargo test --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml` covers a mixed run where one adapter errors and others still return models; `cargo test --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml` covers the command returning both models and errors; `vitest` in `frontend/` asserts models and an enumeration error render together.
+- **P10.2 Cloud provider key registration (`set_cloud_provider` family).** Add a `set_cloud_provider` / `list_cloud_providers` / `clear_cloud_provider` command family that persists a real `ProviderConfig` row (correct `ProviderKind`, stable per-kind id, `api_key_ref` = the stored `SecretRef`, optional `base_url`), mirroring the `set_local_runtime` pattern (get then update or insert, store the optional key via the `SecretStore` keeping only the opaque `SecretRef`, validate input, return a display-safe `_inner`-testable view). Register the commands in `generate_handler!` and add frontend IPC wrappers. Rework `ProviderKeysSection` to pick a provider KIND from a dropdown and rehydrate configured providers from the backend on mount instead of the dead-end `set_provider_secret` plus a `localStorage` marker, so cloud providers (OpenAI, Anthropic, Gemini, Bedrock, Azure, and Kiro) are enumerated and their models surface under Cloud. Verification: `cargo test --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml` drives the `_inner` fns to assert an inserted row carries the right kind and a `SecretRef` (never raw key material) and that `list_`/`clear_` round-trip; `vitest` in `frontend/` asserts selecting a kind and saving a key calls `set_cloud_provider` and rehydrates from `list_cloud_providers`.
+- **P10.3 Ollama `/api/tags` hardening.** Harden the Ollama discovery override so a running local Ollama actually surfaces its models: default the base URL to the IPv4 loopback literal `http://127.0.0.1:11434/v1` (see the IPv4-vs-IPv6 tradeoff in Section 4.3), send an explicit `Accept: application/json` header on the `GET /api/tags` request, and prove the decode with a test using the exact rich `/api/tags` payload (models with `details`/`capabilities`) so serde leniency over `TagsResponse` (no `deny_unknown_fields`) is guaranteed to keep tolerating it. Verification: `cargo test --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml` covers the wiremock `/api/tags` contract test asserting the `Accept` header and the decode of the exact payload into the installed model ids, plus the inline `DEFAULT_BASE_URL` / `tags_root` unit tests; the real-server exercise stays an `#[ignore]`d manual test excluded from CI.
+
+### Deliverable
+
+Provider enumeration is observable end to end: `list_available_models` returns healthy models plus display-safe per-provider enumeration errors that the picker and Providers & Keys surface without blanking the list; cloud provider keys entered under Providers & Keys persist a real `ProviderConfig` so their models enumerate under Cloud; and a running local Ollama surfaces its installed models via a hardened `GET /api/tags` discovery (IPv4 loopback default, explicit `Accept` header, decode proven against the exact payload).
+
+### Parallelization
+
+- P10.1, P10.2, and P10.3 touch mostly distinct seams (the enumeration return shape, the cloud-provider command family, and the Ollama adapter) and can proceed in parallel. P10.1 lands the `AvailableModelsResult` shape that the picker consumes, so coordinate the frontend rendering of P10.1's errors with P10.2's Providers & Keys rework since both render in that settings surface.
+
+### Verification / acceptance
+
+- `cargo test --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml` covers the mixed healthy/errored enumeration run and the Ollama `/api/tags` contract and decode tests.
+- `cargo test --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml` covers the `list_available_models` command returning `{ models, errors }` and the `set_cloud_provider` / `list_cloud_providers` / `clear_cloud_provider` `_inner` round-trip with no raw key material in any returned view.
+- `vitest` in `frontend/` asserts models plus an enumeration error render together, and that Providers & Keys persists via `set_cloud_provider` and rehydrates from `list_cloud_providers`.
+- Per-crate `cargo build`, `cargo test`, `cargo clippy` (with `-D warnings`), and `vitest` are green, and CI passes on all matrix targets.
+
+### Future work / considered alternatives
+
+These arose while closing this phase and are recorded as deferred and explicitly out of scope here so the intent is not lost:
+
+- **OAuth "connect / login" for cloud providers.** An alternative to pasting an API key: let a user connect or log in to a provider and have the app obtain a token, rather than entering a raw key under Providers & Keys. Deferred. The tradeoff is a substantially larger effort: per-provider OAuth clients, token storage plus refresh, and Tauri redirect handling, whereas the current `SecretStore` plus `api_key_ref` contract (Section 9.1) is key-based and satisfies the "no secret material outside the keychain" invariant as-is. Not implemented in this phase, which only makes the existing key-based path persist a real `ProviderConfig`.
+- **Folder-scan browse mode for the embedded engine.** A usability improvement over selecting a single `.gguf` file: let the embedded-engine "Browse" control select a FOLDER and have Agent Harbor scan it directly for local `.gguf` models. Deferred and out of scope here; the embedded engine (Phase 9) is untouched by this phase, and this concerns the Local Runtimes browse UX rather than provider visibility.
+- **LAN host mode.** A future networking feature where one Agent Harbor instance runs an agent as a host and another device on the same local network connects to it and utilizes its language models. Deferred and out of scope here as a substantial future feature: it needs host and discovery, authentication, and transport design of its own, none of which this diagnostics-and-wiring phase introduces.
 
 ---
 

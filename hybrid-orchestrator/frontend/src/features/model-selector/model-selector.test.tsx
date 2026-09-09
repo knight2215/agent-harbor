@@ -14,7 +14,12 @@ import { useProvidersStore } from "../../state/providers";
 import { PerMessageOverrideControl } from "./PerMessageOverrideControl";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { RoutingModeToggle } from "./RoutingModeToggle";
-import type { AvailableModel, Conversation } from "../../types";
+import type {
+  AvailableModel,
+  AvailableModelsResult,
+  Conversation,
+  ProviderEnumerationError,
+} from "../../types";
 
 function model(providerId: string, id: string, local: boolean): AvailableModel {
   return {
@@ -29,6 +34,13 @@ function model(providerId: string, id: string, local: boolean): AvailableModel {
     },
     price: local ? { inputPerMtok: 0, outputPerMtok: 0 } : { inputPerMtok: 5, outputPerMtok: 15 },
   };
+}
+
+function result(
+  models: AvailableModel[],
+  errors: ProviderEnumerationError[] = [],
+): AvailableModelsResult {
+  return { models, errors };
 }
 
 function conversation(id: string): Conversation {
@@ -53,7 +65,7 @@ function resetStores() {
     pendingOverride: null,
     pendingPermissions: [],
   });
-  useProvidersStore.setState({ models: [] });
+  useProvidersStore.setState({ models: [], errors: [] });
 }
 
 describe("model selector", () => {
@@ -286,11 +298,50 @@ describe("model selector", () => {
   });
 
   it("providers_changed refreshes the model list", async () => {
-    invoke.mockResolvedValue([model("openai", "gpt-4o", false)]);
+    invoke.mockResolvedValue(result([model("openai", "gpt-4o", false)]));
     useProvidersStore.getState().applyCoreEvent({ type: "providersChanged" });
     expect(invoke).toHaveBeenCalledWith("list_available_models");
     await waitFor(() => {
       expect(useProvidersStore.getState().models).toHaveLength(1);
     });
+  });
+
+  it("PerMessageOverrideControl renders enumeration errors alongside the models without blanking the picker", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    // The core enumeration returned one healthy model AND one failing provider:
+    // the picker must still show the model while the error is surfaced too.
+    invoke.mockResolvedValue(
+      result(
+        [model("openai", "gpt-4o", false)],
+        [{ providerId: "ollama-local", message: "transport error: connection refused" }],
+      ),
+    );
+    await useProvidersStore.getState().load();
+
+    render(<PerMessageOverrideControl />);
+
+    // The healthy model is still selectable (the picker is NOT blanked).
+    expect(await screen.findByRole("button", { name: /openai \/ gpt-4o/ })).toBeInTheDocument();
+    // The empty state is NOT shown because models exist.
+    expect(screen.queryByTestId("no-models-empty-state")).toBeNull();
+    // The enumeration error is surfaced with the failing provider id + message.
+    const errors = await screen.findByTestId("provider-enumeration-errors");
+    expect(within(errors).getByText(/ollama-local/)).toBeInTheDocument();
+    expect(within(errors).getByText(/transport error: connection refused/)).toBeInTheDocument();
+  });
+
+  it("PerMessageOverrideControl shows enumeration errors even when no models exist", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    invoke.mockResolvedValue(
+      result([], [{ providerId: "ollama-local", message: "transport error: connection refused" }]),
+    );
+    await useProvidersStore.getState().load();
+
+    render(<PerMessageOverrideControl />);
+
+    // The truly-empty case still guides the user AND surfaces the error.
+    expect(await screen.findByTestId("no-models-empty-state")).toBeInTheDocument();
+    const errors = await screen.findByTestId("provider-enumeration-errors");
+    expect(within(errors).getByText(/ollama-local/)).toBeInTheDocument();
   });
 });

@@ -226,6 +226,25 @@ export interface LocalRuntimeConfig {
 }
 
 /**
+ * A display-safe view of one configured cloud provider (OpenAI / Anthropic /
+ * Gemini / Bedrock / Azure / a generic OpenAI-compatible endpoint used for
+ * "Kiro"), returned by the `set_cloud_provider` / `list_cloud_providers`
+ * commands. Mirrors Rust `commands::CloudProviderConfigView`. `hasApiKey`
+ * reports only WHETHER a key is stored (as an opaque {@link SecretRef}), never
+ * the key itself; `baseUrl` is the persisted endpoint override (null when the
+ * adapter's default is used, always present for the Kiro/genericOpenAI kind);
+ * `warning` carries the optional display-safe base-url advisory from the
+ * backend's `check_provider_base_url` validation (null when there is none).
+ */
+export interface CloudProviderConfig {
+  id: string;
+  kind: ProviderKind;
+  baseUrl: string | null;
+  hasApiKey: boolean;
+  warning: string | null;
+}
+
+/**
  * Per-model capability descriptor. Mirrors Rust `providers::Capabilities`
  * (architecture.md Section 4.1). Rust uses `#[serde(rename_all = "camelCase")]`,
  * so `json_mode` -> `jsonMode` and `max_context` -> `maxContext`.
@@ -267,6 +286,36 @@ export interface AvailableModel {
   model: string;
   capabilities: Capabilities;
   price: TokenPrice;
+}
+
+/**
+ * One provider instance that could not be enumerated, surfaced by
+ * `list_available_models` so a misconfigured or unreachable provider is
+ * diagnosable instead of silently contributing nothing. Mirrors Rust
+ * `providers::ProviderEnumerationError` (architecture.md Section 8.2).
+ *
+ * DISPLAY-SAFE: carries only the configured provider instance id and the
+ * provider error's message, never secret material (Section 9.1 / 9.2).
+ */
+export interface ProviderEnumerationError {
+  providerId: string;
+  message: string;
+}
+
+/**
+ * The combined result of the `list_available_models` command: the successfully
+ * enumerated models plus a display-safe list of per-provider enumeration
+ * errors. Mirrors Rust `providers::AvailableModelsResult` (Section 8.2).
+ * Enumeration is fault-tolerant, so `models` and `errors` can both be non-empty
+ * at once: a single failing provider populates `errors` while the healthy
+ * providers still populate `models`.
+ *
+ * DISPLAY-SAFE: neither the model rows nor the error messages carry secret
+ * material (Section 9.1 / 9.2).
+ */
+export interface AvailableModelsResult {
+  models: AvailableModel[];
+  errors: ProviderEnumerationError[];
 }
 
 /**

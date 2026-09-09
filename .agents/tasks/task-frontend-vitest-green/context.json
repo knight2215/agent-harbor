@@ -1,0 +1,25 @@
+{
+  "project_type": "Tauri desktop app; React + TypeScript frontend (Vite) over Rust core crates",
+  "language": "TypeScript (frontend), Rust (backend crates)",
+  "build_system": "npm (frontend, no committed package-lock.json), cargo (backend). Frontend lives at hybrid-orchestrator/frontend.",
+  "test_framework": "vitest + @testing-library/react + jsdom (frontend). Convention: assertions after state changes use await findBy*/waitFor.",
+  "build_command": "cd hybrid-orchestrator/frontend && npx tsc --noEmit (type-check); npm run build for full build",
+  "test_command": "cd hybrid-orchestrator/frontend && npx vitest run",
+  "verification_instructions": "Frontend gates that must stay green in CI: npm test (vitest run), npx tsc --noEmit, npx eslint ., npx prettier --check . . Rust gates already green: build, clippy -D warnings, tests, cargo fmt.",
+  "snapshot_or_generated_files": null,
+  "setup_instructions": "node_modules is NOT present in this sandbox and npm 403s under INTEGRATIONS_ONLY, so vitest/tsc/eslint CANNOT be run locally. Only reasoning + prettier --check (if prettier binary were present) is possible. CI installs deps via npm ci || npm install and runs the gates.",
+  "environment_constraints": "INTEGRATIONS_ONLY network: npm registry blocked, node_modules/.bin absent. Cannot run vitest/tsc/eslint/prettier locally. Fixes must be reasoned to pass the NEXT CI run in one pass. Each CI cycle ~15 min.",
+  "contribution_requirements": "Do NOT push/tag/PR (orchestrator does that). Commit onto existing branch feat/provider-visibility-diagnostics. Keep all gates green: no unused imports (eslint no-unused-vars, clippy -D warnings), prettier + rustfmt clean, keep feature behavior intact.",
+  "key_patterns": "Zustand stores (state/providers.ts) default arrays to [] and setState shallow-merges. IPC wrappers in ipc/commands.ts wrap Tauri invoke. Tests mock @tauri-apps/api/core invoke via a routeInvoke switch; commands NOT in the switch resolve to undefined. Components map/read .length on arrays sourced from IPC and store selectors.",
+  "relevant_files": [
+    "hybrid-orchestrator/frontend/src/features/settings/ProviderKeysSection.tsx",
+    "hybrid-orchestrator/frontend/src/features/settings/LocalRuntimesSection.tsx",
+    "hybrid-orchestrator/frontend/src/features/model-selector/ProviderEnumerationErrors.tsx",
+    "hybrid-orchestrator/frontend/src/features/model-selector/ProviderModelPicker.tsx",
+    "hybrid-orchestrator/frontend/src/features/model-selector/PerMessageOverrideControl.tsx",
+    "hybrid-orchestrator/frontend/src/state/providers.ts",
+    "hybrid-orchestrator/frontend/src/app.test.tsx",
+    "hybrid-orchestrator/frontend/src/features/settings/settings.test.tsx"
+  ],
+  "directory_structure": "hybrid-orchestrator/frontend/src: app.tsx + app.test.tsx (shell), features/{settings,model-selector,chat,history,agent-editor,tool-manager}, state/ (zustand stores), ipc/ (Tauri command wrappers + events), types/index.ts (TS mirrors of Rust types)."
+}

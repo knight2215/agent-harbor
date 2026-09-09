@@ -1,14 +1,14 @@
 //! Native Ollama adapter (architecture.md Section 4.3, tasks.md Phase 8).
 //!
 //! Ollama serves the OpenAI Chat Completions format natively at
-//! `http://localhost:11434/v1`, so chat and streaming deliberately reuse the
+//! `http://127.0.0.1:11434/v1`, so chat and streaming deliberately reuse the
 //! EXACT SAME code path as the OpenAI adapter ([`super::native::NativeAdapter`]);
 //! only the `base_url` differs and, by default, no API key is sent.
 //!
 //! The one net-new piece versus LM Studio is model discovery. Ollama does NOT
 //! surface its installed models under the OpenAI `/v1/models` path; instead it
 //! exposes a NATIVE discovery endpoint `GET /api/tags` rooted at the SERVER ROOT
-//! (`http://localhost:11434`), NOT under `/v1`. It returns JSON of shape
+//! (`http://127.0.0.1:11434`), NOT under `/v1`. It returns JSON of shape
 //! `{"models":[{"name":"llama3.1:8b", ...}, ...]}`. So [`OllamaAdapter`] wraps a
 //! [`NativeAdapter`] for chat/chat_stream/capabilities/id and overrides
 //! [`ChatProvider::list_models`] to hit `/api/tags` on the tags root derived by
@@ -18,7 +18,7 @@
 //! # Manual integration check (NOT run in CI)
 //!
 //! With Ollama running locally and a model pulled, the adapter can be exercised
-//! against the real `http://localhost:11434/v1` endpoint. This is documented
+//! against the real `http://127.0.0.1:11434/v1` endpoint. This is documented
 //! here and encoded as the `#[ignore]`d test
 //! [`tests::manual_ollama_localhost_stream`] below; it is intentionally excluded
 //! from CI (the sandbox and CI runners have no Ollama server) and is run by hand
@@ -43,7 +43,17 @@ use crate::registry::ProviderFactory;
 /// Default Ollama local server root when `ProviderConfig::base_url` is unset.
 /// This is the OpenAI-compatible chat root; native discovery lives one level up
 /// at the server root's `/api/tags`.
-pub const DEFAULT_BASE_URL: &str = "http://localhost:11434/v1";
+///
+/// We target `127.0.0.1` (IPv4 loopback) rather than the `localhost` hostname on
+/// purpose. Ollama binds `127.0.0.1:11434` by default, but on some systems
+/// `localhost` resolves to `::1` (IPv6) first. In that case the reqwest client
+/// dials `[::1]:11434`, gets connection-refused, and enumeration fails silently,
+/// while `curl http://localhost:11434/api/tags` still works because curl retries
+/// the other address family. Using the IPv4 literal avoids that resolution
+/// mismatch. Tradeoff: a user who deliberately runs Ollama on an IPv6-only `::1`
+/// bind must set a custom `base_url` (e.g. `http://[::1]:11434/v1`); a
+/// user-supplied `base_url` is always honored unchanged.
+pub const DEFAULT_BASE_URL: &str = "http://127.0.0.1:11434/v1";
 
 /// Derive the Ollama server root (which hosts `/api/tags`) from the configured
 /// OpenAI-compatible chat `base_url`, by stripping any trailing slash then any
@@ -123,8 +133,16 @@ impl ChatProvider for OllamaAdapter {
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         // Ollama's native discovery endpoint is `GET /api/tags` on the server
         // root, NOT the OpenAI `/v1/models` path. Reuse the shared client's
-        // `get_json` helper against the tags-root client.
-        let tags: TagsResponse = self.tags_client.get_json("api/tags", &[]).await?;
+        // `get_json` helper against the tags-root client. Send an explicit
+        // `Accept: application/json` header so a content-negotiating server or
+        // proxy cannot hand back a non-JSON representation.
+        let tags: TagsResponse = self
+            .tags_client
+            .get_json(
+                "api/tags",
+                &[("Accept".to_string(), "application/json".to_string())],
+            )
+            .await?;
         Ok(tags
             .models
             .into_iter()
@@ -172,14 +190,42 @@ mod tests {
     #[test]
     fn tags_root_strips_v1_and_trailing_slash() {
         assert_eq!(
-            tags_root("http://localhost:11434/v1"),
-            "http://localhost:11434"
+            tags_root("http://127.0.0.1:11434/v1"),
+            "http://127.0.0.1:11434"
         );
         assert_eq!(
-            tags_root("http://localhost:11434/v1/"),
-            "http://localhost:11434"
+            tags_root("http://127.0.0.1:11434/v1/"),
+            "http://127.0.0.1:11434"
         );
         assert_eq!(tags_root("http://host:9999"), "http://host:9999");
+    }
+
+    /// The keyless local default targets the IPv4 loopback literal `127.0.0.1`,
+    /// NOT the `localhost` hostname, so the reqwest client dials the address
+    /// family Ollama actually binds and does not fail when `localhost` resolves
+    /// to `::1` first. A user-supplied `base_url` remains honored (proven by the
+    /// wiremock contract test).
+    #[test]
+    fn default_base_url_uses_ipv4_loopback() {
+        assert_eq!(DEFAULT_BASE_URL, "http://127.0.0.1:11434/v1");
+        assert_eq!(tags_root(DEFAULT_BASE_URL), "http://127.0.0.1:11434");
+    }
+
+    /// Decode proof (FEAT-004): deserialize the EXACT rich `/api/tags` payload a
+    /// real Ollama server returns -- including `model`, `modified_at`, `size`,
+    /// `digest`, a nested `details` object, and a `capabilities` array -- into
+    /// [`TagsResponse`]. [`TagEntry`] derives `Deserialize` WITHOUT
+    /// `deny_unknown_fields`, so serde's default leniency ignores every extra
+    /// field and only `name` is consumed. This guards against a regression where
+    /// a stricter attribute or a type-mismatched field would make the real
+    /// payload fail to decode and the model silently vanish from the picker.
+    #[test]
+    fn tags_response_decodes_real_rich_payload() {
+        let body = r#"{"models":[{"name":"qwen3:8b","model":"qwen3:8b","modified_at":"2026-09-02T00:42:29.5225957-07:00","size":5225388164,"digest":"500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41","details":{"parent_model":"","format":"gguf","family":"qwen3","families":["qwen3"],"parameter_size":"8.2B","quantization_level":"Q4_K_M","context_length":40960,"embedding_length":4096},"capabilities":["completion","tools","thinking"]}]}"#;
+        let parsed: TagsResponse =
+            serde_json::from_str(body).expect("decode rich /api/tags payload");
+        assert_eq!(parsed.models.len(), 1);
+        assert_eq!(parsed.models[0].name, "qwen3:8b");
     }
 
     /// Ollama on the default local path sends NO implicit API key: with
@@ -192,7 +238,7 @@ mod tests {
         let cfg = ProviderConfig {
             id: "ollama-local".to_string(),
             kind: ProviderKind::Ollama,
-            base_url: None, // default http://localhost:11434/v1
+            base_url: None, // default http://127.0.0.1:11434/v1
             api_key_ref: None,
             extra: Value::Null,
         };
@@ -207,7 +253,7 @@ mod tests {
     }
 
     /// OPTIONAL manual integration check against a REAL Ollama server at
-    /// `http://localhost:11434/v1` (default). Requires Ollama running with a
+    /// `http://127.0.0.1:11434/v1` (default). Requires Ollama running with a
     /// model pulled. NOT run in CI (no such server there); run by hand with:
     ///
     /// `cargo test -p providers -- --ignored manual_ollama_localhost_stream`
@@ -215,13 +261,13 @@ mod tests {
     /// Asserts that a streamed completion yields at least one delta and the
     /// stream terminates. Uses the real default base_url and no API key.
     #[tokio::test]
-    #[ignore = "manual: requires a local Ollama server on localhost:11434"]
+    #[ignore = "manual: requires a local Ollama server on 127.0.0.1:11434"]
     async fn manual_ollama_localhost_stream() {
         let store = InMemorySecretStore::new();
         let cfg = ProviderConfig {
             id: "ollama-local".to_string(),
             kind: ProviderKind::Ollama,
-            base_url: None, // default http://localhost:11434/v1
+            base_url: None, // default http://127.0.0.1:11434/v1
             api_key_ref: None,
             extra: Value::Null,
         };

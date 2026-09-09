@@ -63,8 +63,8 @@ pub use registry::{ProviderFactory, ProviderRegistry};
 // instantiates from persisted config, and `list_available_models` returns
 // provider/model/capabilities/price (Section 4.5 / 6.1 / 8.2).
 pub use builtins::{
-    build_registry, builtin_registry, list_available_models, AvailableModel, PricingTable,
-    TokenPrice,
+    build_registry, builtin_registry, list_available_models, AvailableModel, AvailableModelsResult,
+    PricingTable, ProviderEnumerationError, TokenPrice,
 };
 
 // Native OpenAI-compatible adapter factories (FEAT-002). Registering these on a

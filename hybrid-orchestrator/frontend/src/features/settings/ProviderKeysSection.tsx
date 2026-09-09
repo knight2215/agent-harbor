@@ -1,107 +1,173 @@
 // Providers & Keys settings section (FEAT-003).
 //
-// A thin wrapper over the existing `set_provider_secret` command
-// (ipc/commands.ts). The plaintext key flows IN and only an opaque SecretRef
-// handle comes back (architecture.md Section 9.1); this form NEVER displays or
-// stores the key. It is the sanctioned UI entry point for the provider-secret
-// path that previously had no surface.
+// Registers a hosted CLOUD provider so its models are enumerated and appear
+// under Cloud in the picker. The user picks a provider KIND from a dropdown
+// (not a free-text id) and enters an API key; the form calls
+// `set_cloud_provider` (ipc/commands.ts), which persists a REAL ProviderConfig
+// row (correct domain::ProviderKind, stable per-kind id, api_key_ref = stored
+// SecretRef) so the existing enumerate path picks it up. This replaces the old
+// dead-end that only called `set_provider_secret` + a localStorage marker and
+// never persisted a config row (the direct cause of "adding Kiro/Gemini keys
+// does nothing").
 //
-// PERSISTED "configured" MARKER: the backend has no command to query which
-// providers already hold a key (the only secret command is `set_provider_secret`,
-// which writes the plaintext and returns an opaque `SecretRef` handle). So the
-// "a key is configured for provider X" indication is kept alive across
-// navigation by persisting a NON-SECRET marker: a map of provider id -> its
-// opaque `SecretRef` handle. The ref is explicitly non-secret (it never carries
-// key material per the command's own contract), and the plaintext key is never
-// stored anywhere. On mount we reload this map so the indicator re-renders even
-// after the component was unmounted (e.g. navigating to Chat and back). We
-// mirror app.tsx's guarded `window.localStorage` try/catch pattern so a
-// constrained/private-mode environment degrades gracefully instead of throwing.
+// KIRO MAPPING (architecture decision, see spec FEAT-005): there is NO Kiro
+// variant in domain::ProviderKind and adding one is out of scope. Kiro is an
+// OpenAI-compatible endpoint, so the "Kiro (OpenAI-compatible)" choice maps to
+// ProviderKind.genericOpenAI with a REQUIRED base URL (its OpenAI-compatible
+// endpoint). The other cloud kinds default their base URL in the adapter, so
+// the Base URL field is optional (and hidden) for them.
+//
+// SECRET HYGIENE (Section 9.1): the plaintext key flows IN and only an opaque
+// SecretRef handle is stored server-side; no command returns key material, and
+// this form NEVER displays or persists the key. The configured providers are
+// the BACKEND source of truth (rehydrated on mount from `list_cloud_providers`),
+// so there is no localStorage marker.
 
-import { useState } from "react";
-import { setProviderSecret } from "../../ipc/commands";
-import type { SecretRef } from "../../types";
+import { useEffect, useState } from "react";
+import { ProviderEnumerationErrors } from "../model-selector/ProviderEnumerationErrors";
+import { clearCloudProvider, listCloudProviders, setCloudProvider } from "../../ipc/commands";
+import { useProvidersStore } from "../../state/providers";
+import type { CloudProviderConfig } from "../../types";
 
-/** localStorage key persisting the non-secret map of configured provider refs. */
-const CONFIGURED_PROVIDERS_KEY = "ah-configured-providers";
+/** The cloud provider kinds configurable here, in dropdown order. */
+type CloudKind = "openAI" | "anthropic" | "gemini" | "bedrock" | "azure" | "genericOpenAI";
 
-/** A provider id mapped to the opaque (non-secret) SecretRef handle it stored. */
-type ConfiguredProviders = Record<string, SecretRef>;
+/** Human labels for the dropdown; "Kiro" is surfaced as the genericOpenAI kind. */
+const KIND_LABELS: Record<CloudKind, string> = {
+  openAI: "OpenAI",
+  anthropic: "Anthropic",
+  gemini: "Gemini",
+  bedrock: "Bedrock",
+  azure: "Azure",
+  genericOpenAI: "Kiro (OpenAI-compatible)",
+};
 
-/** Read the persisted configured-providers map (guarded for constrained envs). */
-function readConfiguredProviders(): ConfiguredProviders {
-  try {
-    const raw = window.localStorage.getItem(CONFIGURED_PROVIDERS_KEY);
-    if (raw === null) return {};
-    const parsed: unknown = JSON.parse(raw);
-    if (typeof parsed !== "object" || parsed === null) return {};
-    // Keep only string->string entries; ignore anything malformed.
-    const result: ConfiguredProviders = {};
-    for (const [id, ref] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof ref === "string") result[id] = ref;
-    }
-    return result;
-  } catch {
-    return {};
-  }
-}
-
-/** Persist the configured-providers map (guarded; never stores key material). */
-function writeConfiguredProviders(map: ConfiguredProviders): void {
-  try {
-    window.localStorage.setItem(CONFIGURED_PROVIDERS_KEY, JSON.stringify(map));
-  } catch {
-    // Ignore storage write errors (private mode / constrained env).
-  }
-}
+const KIND_ORDER: CloudKind[] = [
+  "openAI",
+  "anthropic",
+  "gemini",
+  "bedrock",
+  "azure",
+  "genericOpenAI",
+];
 
 export function ProviderKeysSection() {
-  const [providerId, setProviderId] = useState("");
+  const [kind, setKind] = useState<CloudKind>("openAI");
   const [secret, setSecret] = useState("");
-  const [configured, setConfigured] = useState<ConfiguredProviders>(readConfiguredProviders);
+  const [baseUrl, setBaseUrl] = useState("");
+  // The configured cloud providers are the backend source of truth (rehydrated
+  // on mount from `list_cloud_providers`), so they survive unmount/remount
+  // instead of a UI-only marker.
+  const [providers, setProviders] = useState<CloudProviderConfig[]>([]);
+  // `warning` holds the last non-blocking base-url advisory (e.g. a non-loopback
+  // plaintext http:// Kiro endpoint recommending TLS); `error` holds a rejection.
+  const [warning, setWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const save = () => {
-    setError(null);
-    const id = providerId.trim();
-    if (id === "" || secret === "") {
-      setError("Provider id and key are required.");
-      return;
-    }
-    setProviderSecret(id, secret)
-      .then((ref) => {
-        // Persist a NON-SECRET marker so the "configured" indication survives
-        // navigation (the backend exposes no query for this). Never retain the
-        // plaintext key.
-        setConfigured((prev) => {
-          const next = { ...prev, [id]: ref };
-          writeConfiguredProviders(next);
-          return next;
-        });
-        setSecret("");
-      })
-      .catch(() => setError("Failed to store the key."));
+  // Kiro (genericOpenAI) has no default endpoint, so its base URL is required
+  // and shown; the other cloud kinds default it in the adapter (field hidden).
+  const requiresBaseUrl = kind === "genericOpenAI";
+
+  // Surface per-provider enumeration failures from the providers store so a user
+  // who just added a key sees WHY a provider still contributed no models
+  // (display-safe; never secret material). Refresh on mount so the list reflects
+  // the current provider configuration when this section is opened.
+  const enumerationErrors = useProvidersStore((s) => s.errors);
+  const loadProviders = useProvidersStore((s) => s.load);
+
+  // On mount, hydrate the configured cloud providers from the backend (so a
+  // provider saved in a previous session / before navigating away is shown) and
+  // re-enumerate so any enumeration error surfaces.
+  useEffect(() => {
+    listCloudProviders()
+      .then((next) => setProviders(Array.isArray(next) ? next : []))
+      .catch(() => setProviders([]));
+    void loadProviders();
+  }, [loadProviders]);
+
+  // Merge a freshly-configured provider into the list, replacing any existing
+  // row for the same kind (the backend upserts by a stable per-kind id).
+  const upsertProvider = (config: CloudProviderConfig) => {
+    setProviders((prev) => [...prev.filter((entry) => entry.kind !== config.kind), config]);
   };
 
-  const configuredEntries = Object.entries(configured);
+  const save = () => {
+    setWarning(null);
+    setError(null);
+    if (secret === "") {
+      setError("An API key is required.");
+      return;
+    }
+    const trimmedBaseUrl = baseUrl.trim();
+    if (requiresBaseUrl && trimmedBaseUrl === "") {
+      setError("A base URL is required for a Kiro (OpenAI-compatible) provider.");
+      return;
+    }
+    // A blocked/invalid base URL (or any backend validation error) surfaces in
+    // the error region; an accepted plaintext non-loopback base URL resolves
+    // with a non-blocking warning recommending TLS. The key is stored
+    // server-side as an opaque SecretRef and never comes back.
+    setCloudProvider(kind, secret, trimmedBaseUrl === "" ? null : trimmedBaseUrl)
+      .then((config) => {
+        upsertProvider(config);
+        setSecret("");
+        if (config.warning !== null) setWarning(config.warning);
+        // Re-enumerate so any error from the just-configured provider surfaces.
+        void loadProviders();
+      })
+      .catch((err: unknown) => setError(String(err)));
+  };
+
+  // Prefill the form from a configured provider so re-saving edits the same row.
+  const editProvider = (config: CloudProviderConfig) => {
+    setKind(config.kind as CloudKind);
+    setBaseUrl(config.baseUrl ?? "");
+    setSecret("");
+    setWarning(null);
+    setError(null);
+  };
+
+  // Remove a configured provider, then refresh the list from the backend.
+  const clearProvider = (target: CloudKind) => {
+    setWarning(null);
+    setError(null);
+    clearCloudProvider(target)
+      .then(() => listCloudProviders())
+      .then((next) => setProviders(Array.isArray(next) ? next : []))
+      .then(() => loadProviders())
+      .catch((err: unknown) => setError(String(err)));
+  };
 
   return (
     <section className="settings__panel" role="region" aria-label="Providers & Keys">
       <h3 className="settings__section-title">Providers &amp; Keys</h3>
       <p className="settings__section-desc">
-        Store a provider API key in the OS keychain. The key is never displayed after saving; only
-        an opaque reference is kept.
+        Add a hosted provider API key so its models appear under Cloud. The key is stored in the OS
+        keychain and never displayed after saving; only an opaque reference is kept.
       </p>
       <div className="settings-form">
         <label>
-          Provider id
-          <input
-            type="text"
-            value={providerId}
-            placeholder="e.g. openai"
-            onChange={(event) => setProviderId(event.target.value)}
-          />
+          Provider
+          <select value={kind} onChange={(event) => setKind(event.target.value as CloudKind)}>
+            {KIND_ORDER.map((option) => (
+              <option key={option} value={option}>
+                {KIND_LABELS[option]}
+              </option>
+            ))}
+          </select>
         </label>
+        {requiresBaseUrl && (
+          <label>
+            Base URL
+            <input
+              type="text"
+              value={baseUrl}
+              placeholder="https://your-kiro-endpoint/v1"
+              aria-label="Base URL"
+              onChange={(event) => setBaseUrl(event.target.value)}
+            />
+          </label>
+        )}
         <label>
           API key
           <input
@@ -114,24 +180,47 @@ export function ProviderKeysSection() {
         <button type="button" onClick={save}>
           Save key
         </button>
-        {configuredEntries.length > 0 && (
+        {providers.length > 0 && (
           <ul
-            className="settings__section-desc"
+            className="settings__list"
             data-testid="configured-providers"
             aria-label="Configured providers"
           >
-            {configuredEntries.map(([id, ref]) => (
-              <li key={id} data-testid={`provider-key-configured-${id}`}>
-                Key configured for <strong>{id}</strong> (reference: {ref}).
+            {providers.map((entry) => (
+              <li key={entry.id} data-testid={`provider-key-configured-${entry.kind}`}>
+                <span className="settings__list-label">
+                  Key configured for <strong>{KIND_LABELS[entry.kind as CloudKind]}</strong>
+                  {entry.baseUrl !== null ? ` at ${entry.baseUrl}` : ""}.
+                </span>
+                <button
+                  type="button"
+                  onClick={() => editProvider(entry)}
+                  data-testid={`provider-key-edit-${entry.kind}`}
+                >
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  onClick={() => clearProvider(entry.kind as CloudKind)}
+                  data-testid={`provider-key-clear-${entry.kind}`}
+                >
+                  Clear
+                </button>
               </li>
             ))}
           </ul>
+        )}
+        {warning !== null && (
+          <p className="settings__section-desc" role="status" data-testid="cloud-provider-warning">
+            {warning}
+          </p>
         )}
         {error !== null && (
           <p className="settings__section-desc" role="alert">
             {error}
           </p>
         )}
+        <ProviderEnumerationErrors errors={enumerationErrors} />
       </div>
     </section>
   );

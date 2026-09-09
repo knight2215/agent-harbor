@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentPersona,
-  AvailableModel,
+  AvailableModelsResult,
+  CloudProviderConfig,
   Conversation,
   EmbeddedModelStatus,
   EmbeddedModelView,
@@ -124,11 +125,14 @@ export function deletePersona(personaId: string): Promise<void> {
 /**
  * List every available model across all configured providers, with per-model
  * capabilities and price, for the model selector (architecture.md Section 8.2).
- * DISPLAY-SAFE: the rows never carry secret material. Backed by
- * `list_available_models`.
+ * Returns both the successfully enumerated models and a display-safe list of
+ * per-provider enumeration errors, so the UI can show why a misconfigured or
+ * unreachable provider contributed nothing without blanking the picker.
+ * DISPLAY-SAFE: neither the model rows nor the error messages carry secret
+ * material. Backed by `list_available_models`.
  */
-export function listAvailableModels(): Promise<AvailableModel[]> {
-  return invoke<AvailableModel[]>("list_available_models");
+export function listAvailableModels(): Promise<AvailableModelsResult> {
+  return invoke<AvailableModelsResult>("list_available_models");
 }
 
 /**
@@ -181,6 +185,50 @@ export function listLocalRuntimes(): Promise<LocalRuntimeConfig[]> {
  */
 export function clearLocalRuntime(kind: ProviderKind): Promise<void> {
   return invoke<void>("clear_local_runtime", { kind });
+}
+
+// --- Cloud providers (OpenAI / Anthropic / Gemini / Bedrock / Azure / Kiro) -
+
+/**
+ * Configure a hosted cloud provider (OpenAI, Anthropic, Gemini, Bedrock, Azure,
+ * or a generic OpenAI-compatible endpoint used for "Kiro") by persisting a real
+ * {@link ProviderConfig}, so its models are enumerated and appear under Cloud in
+ * the picker. `baseUrl` is REQUIRED for the Kiro/`genericOpenAI` kind (which has
+ * no default endpoint) and OPTIONAL for the other kinds (pass `null` to use the
+ * adapter default); when present it is validated through the Section 9.3
+ * base-url posture and a blocked URL REJECTS this call. The config is upserted
+ * by a stable per-kind id, so re-saving the same `kind` edits the one row.
+ *
+ * SECRET HYGIENE (Section 9.1): the plaintext `apiKey` flows IN and is stored as
+ * an opaque {@link SecretRef}; it NEVER comes back across IPC (the returned
+ * {@link CloudProviderConfig} only reports `hasApiKey`). Backed by
+ * `set_cloud_provider`.
+ */
+export function setCloudProvider(
+  kind: ProviderKind,
+  apiKey: string,
+  baseUrl: string | null,
+): Promise<CloudProviderConfig> {
+  return invoke<CloudProviderConfig>("set_cloud_provider", { kind, apiKey, baseUrl });
+}
+
+/**
+ * List the currently-configured cloud providers so the Providers & Keys UI can
+ * rehydrate from the backend source of truth instead of a UI-only marker.
+ * DISPLAY-SAFE: each row carries only id/kind/baseUrl/hasApiKey, never the key.
+ * Backed by `list_cloud_providers`.
+ */
+export function listCloudProviders(): Promise<CloudProviderConfig[]> {
+  return invoke<CloudProviderConfig[]>("list_cloud_providers");
+}
+
+/**
+ * Remove the configured cloud provider for the given `kind`, clearing a
+ * previously-saved key/endpoint (and deleting the stored secret). Clearing a
+ * provider that is not configured is a no-op. Backed by `clear_cloud_provider`.
+ */
+export function clearCloudProvider(kind: ProviderKind): Promise<void> {
+  return invoke<void>("clear_cloud_provider", { kind });
 }
 
 // --- Message pipeline (P4.6 / Section 8.1) ----------------------------------
