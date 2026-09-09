@@ -72,6 +72,7 @@ pub fn run() {
             commands::list_cloud_providers,
             commands::clear_cloud_provider,
             commands::list_available_models,
+            commands::provider_diagnostics,
             commands::send_message,
             commands::resolve_permission,
             commands::get_messages,

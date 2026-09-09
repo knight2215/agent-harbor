@@ -491,8 +491,26 @@ async fn list_available_models_inner(
 
     // Build the built-in registry and instantiate the configured providers,
     // resolving each row's api_key_ref through the secret store at build time.
-    let mut registry = providers::build_registry(configs.iter(), state.secret_store.as_ref())
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    //
+    // This deliberately does NOT use `providers::build_registry`, which delegates
+    // to `ProviderRegistry::build_all` and short-circuits on the FIRST build
+    // failure via `?`. That fail-fast behavior turned a single un-buildable
+    // config row into a thrown CommandError that aborted the WHOLE enumeration,
+    // so the frontend saw a rejected promise (a clean-empty cause with no visible
+    // error). Instead we build per-row and, on a per-row build error, skip that
+    // row (do NOT insert an instance) rather than aborting. Because
+    // `providers::list_available_models` now records any configured row lacking a
+    // built instance as a display-safe enumeration error, skipping the failed
+    // build surfaces it as a per-provider error instead of a whole-list abort,
+    // preserving per-provider isolation.
+    let mut registry = providers::builtin_registry();
+    for cfg in &configs {
+        // A per-row build failure (missing factory, secret resolution error,
+        // bad config) is isolated: the row is simply left un-built so the
+        // enumeration path reports it per-provider, and the other rows still
+        // build. DISPLAY-SAFE: no secret material is logged or surfaced here.
+        let _ = registry.build_from_config(cfg, state.secret_store.as_ref());
+    }
 
     // Bridge the embedded engine seam (FEAT-002): the lifecycle commands import
     // `.gguf` models onto the SHARED `AppState.embedded_engine`, but
@@ -540,6 +558,181 @@ fn pricing_table_from_config(config: &PricingConfig) -> PricingTable {
         }
     }
     table
+}
+
+// --- Provider diagnostics (model-picker self-report) -----------------------
+
+/// A display-safe, per-provider diagnostic row for the model-picker diagnostics
+/// panel (architecture.md Section 8.2). It reports exactly what happened to one
+/// configured provider row during the same enumeration the picker runs: its
+/// kind, its display-safe base_url (or None), whether an instance was built,
+/// how many models it enumerated, and the display-safe error (if any) explaining
+/// why it contributed nothing.
+///
+/// DISPLAY-SAFE (Section 9.1 / 9.2): this crosses the Tauri IPC boundary and
+/// carries ONLY id/kind/base_url/counts and a [`providers::ProviderError`]
+/// Display string. It NEVER carries `api_key_ref`, a resolved [`SecretRef`], or
+/// any key material. `base_url` is the display-safe persisted string; keys are
+/// not.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderDiagnostic {
+    /// The configured provider instance id (`ProviderConfig::id`).
+    pub id: String,
+    /// The provider kind of this configured row.
+    pub kind: ProviderKind,
+    /// The display-safe persisted base URL, or None when unset.
+    pub base_url: Option<String>,
+    /// Whether a live instance was built for this row (its factory build
+    /// succeeded). False means the build failed or was skipped.
+    pub instance_built: bool,
+    /// How many models this provider enumerated (0 when it errored or is
+    /// unbuilt).
+    pub model_count: usize,
+    /// The display-safe reason this provider contributed nothing, or None when
+    /// it enumerated successfully. Never carries secret material.
+    pub error: Option<String>,
+}
+
+/// The full display-safe report returned by [`provider_diagnostics`]: a summary
+/// (how many rows are configured, the total model count across all providers,
+/// and how many providers contributed at least one model) plus the per-provider
+/// [`ProviderDiagnostic`] rows (architecture.md Section 8.2).
+///
+/// DISPLAY-SAFE (Section 9.1 / 9.2): every field is a count or a display-safe
+/// per-provider row; no secret material crosses this boundary.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderDiagnosticsReport {
+    /// Number of configured provider rows (including auto-seeded rows).
+    pub configured_count: usize,
+    /// Total number of models enumerated across all providers.
+    pub total_model_count: usize,
+    /// Number of providers that contributed at least one model.
+    pub provider_count_with_models: usize,
+    /// The per-provider diagnostic rows, one per configured row.
+    pub providers: Vec<ProviderDiagnostic>,
+}
+
+/// Report, per configured provider row, exactly what happened during model
+/// enumeration: the backend data source for the visible model-picker diagnostics
+/// panel (architecture.md Section 8.2). This runs the SAME seeding + registry
+/// build + enumeration the picker ([`list_available_models`]) runs, so it reports
+/// the same reality the user sees, but with a richer per-provider breakdown that
+/// makes the two invisible clean-empty causes (a configured row with no built
+/// instance, or a provider whose enumeration errors) diagnosable.
+///
+/// DISPLAY-SAFE (Section 9.1 / 9.2): the report carries only id/kind/base_url/
+/// counts and display-safe [`providers::ProviderError`] messages. It never
+/// touches `SecretStore::resolve` for the return value and never surfaces
+/// `api_key_ref` or key material.
+#[tauri::command]
+pub async fn provider_diagnostics(
+    state: tauri::State<'_, AppState>,
+) -> Result<ProviderDiagnosticsReport, CommandError> {
+    provider_diagnostics_inner(&state).await
+}
+
+/// The full body of [`provider_diagnostics`], factored out so it can be driven
+/// directly in tests without a live Tauri `State` (the `list_available_models`
+/// testability pattern). It mirrors `list_available_models_inner`'s seeding,
+/// resilient per-row registry build, and shared-embedded-instance setup EXACTLY,
+/// so the diagnostics reflect the same enumeration the picker performs.
+async fn provider_diagnostics_inner(
+    state: &AppState,
+) -> Result<ProviderDiagnosticsReport, CommandError> {
+    let db = state.session_manager.db();
+
+    // Mirror list_available_models_inner's seeding EXACTLY: it auto-seeds only
+    // the Ollama provider-config row (idempotent) before reading the configs. It
+    // does NOT call ensure_embedded_provider_config; the shared embedded instance
+    // is inserted below and only enumerated when an embedded row is persisted.
+    ensure_ollama_provider_config(state).await?;
+
+    let configs: Vec<ProviderConfig> = ProviderRepo::new(db)
+        .list()
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // Load pricing to mirror list_available_models_inner's setup exactly and to
+    // feed the SAME shared enumeration the picker runs (below). The diagnostics
+    // only surface counts, so the resolved prices are not read per model here,
+    // but the shared `list_available_models` signature takes `&pricing`, and
+    // keeping the seeding + build + enumeration sequence identical to the picker
+    // is exactly what guarantees the two cannot diverge.
+    let app_config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let pricing = pricing_table_from_config(&app_config.pricing);
+
+    // Build the registry resiliently, EXACTLY as list_available_models_inner
+    // does: start from the built-in factories and build each configured row
+    // in isolation. A per-row build failure is NOT fatal here either; the row is
+    // simply left un-built so the diagnostic reports instance_built == false with
+    // a display-safe error.
+    let mut registry = providers::builtin_registry();
+    for cfg in &configs {
+        let _ = registry.build_from_config(cfg, state.secret_store.as_ref());
+    }
+
+    // Bridge the embedded engine seam exactly as list_available_models_inner
+    // does: replace the throwaway embedded instance with one wrapping the SHARED
+    // engine so the diagnostics observe the same imported models the picker does.
+    registry.insert_instance(std::sync::Arc::new(
+        providers::EmbeddedProvider::from_shared(state.embedded_engine.clone()),
+    ));
+
+    // Run the SAME shared enumeration the picker runs (the `list_models` alias
+    // for `providers::list_available_models`) exactly ONCE, then DERIVE the
+    // per-provider report from its result. This is deliberately NOT a second
+    // inline get/list_models/count-or-error loop: re-implementing the picker's
+    // per-row logic here (including its "no instance was built" message) would
+    // let the two silently drift, which would make the diagnostics misleading
+    // (the exact failure this diagnostics surface exists to prevent). Consuming
+    // the shared result makes the mirror structural: the model_count and error
+    // of each row are, by construction, whatever the picker saw.
+    let AvailableModelsResult { models, errors } = list_models(&registry, &configs, &pricing)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // Derive each row's diagnostic from the shared enumeration result plus the
+    // configs. `model_count` is how many of the enumerated models the shared fn
+    // attributed to this row's id; `error` is the display-safe message of any
+    // enumeration error the shared fn recorded for this row (an unreachable
+    // endpoint OR the "configured but no instance built" invisible-skip case,
+    // which the shared fn now records under the same provider_id).
+    let mut diagnostics = Vec::with_capacity(configs.len());
+    let mut provider_count_with_models = 0usize;
+    for cfg in &configs {
+        let model_count = models.iter().filter(|m| m.provider_id == cfg.id).count();
+        let error = errors
+            .iter()
+            .find(|e| e.provider_id == cfg.id)
+            .map(|e| e.message.clone());
+
+        if model_count > 0 {
+            provider_count_with_models += 1;
+        }
+
+        diagnostics.push(ProviderDiagnostic {
+            id: cfg.id.clone(),
+            kind: cfg.kind,
+            base_url: cfg.base_url.clone(),
+            // Whether a live instance was built for this row (its factory build
+            // succeeded), read directly from the SAME registry the shared
+            // enumeration consulted.
+            instance_built: registry.get(&cfg.id).is_some(),
+            model_count,
+            error,
+        });
+    }
+
+    Ok(ProviderDiagnosticsReport {
+        configured_count: configs.len(),
+        total_model_count: models.len(),
+        provider_count_with_models,
+        providers: diagnostics,
+    })
 }
 
 /// Derive the set of provider instance ids that are PROVABLY local
@@ -3591,6 +3784,110 @@ mod tests {
             ollama_rows, 1,
             "the picker's enumerate path must auto-seed exactly one Ollama row"
         );
+    }
+
+    /// `provider_diagnostics_inner` reports the SAME reality the picker sees: with
+    /// zero user configuration it auto-seeds the `ollama-local` row (kind Ollama),
+    /// builds an instance for it (`instanceBuilt == true`), but because no live
+    /// Ollama exists in the sandbox its `list_models` errors, so the row carries a
+    /// non-empty display-safe `error` and `modelCount == 0`. This is exactly the
+    /// clean-empty diagnosis the user needs (a configured, built, but unreachable
+    /// provider) surfaced instead of an invisible skip.
+    #[tokio::test]
+    async fn provider_diagnostics_inner_reports_seeded_ollama_row() {
+        let state = test_state().await;
+        let report = provider_diagnostics_inner(&state).await.unwrap();
+
+        // The auto-seeded Ollama row is present and configured.
+        assert!(report.configured_count >= 1);
+        let ollama = report
+            .providers
+            .iter()
+            .find(|p| p.id == OLLAMA_PROVIDER_ID)
+            .expect("diagnostics must include the auto-seeded ollama-local row");
+        assert_eq!(ollama.kind, ProviderKind::Ollama);
+        // The seeded row carries no base_url (the adapter uses its default).
+        assert_eq!(ollama.base_url, None);
+        // An instance is built for the keyless Ollama row (the build succeeds
+        // even offline; only list_models hits the network).
+        assert!(
+            ollama.instance_built,
+            "the keyless Ollama row must build an instance even when offline"
+        );
+        // No live Ollama in the sandbox, so enumeration errors and no models.
+        assert_eq!(ollama.model_count, 0);
+        let err = ollama
+            .error
+            .as_ref()
+            .expect("the unreachable Ollama row must carry a display-safe error");
+        assert!(!err.is_empty());
+
+        // configuredCount reflects the seeded rows and matches the row count.
+        assert_eq!(report.configured_count, report.providers.len());
+        // With no reachable provider in the sandbox, nothing contributes models.
+        assert_eq!(report.total_model_count, 0);
+        assert_eq!(report.provider_count_with_models, 0);
+
+        // DISPLAY-SAFE: the serialized report is camelCase and secret-free.
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"configuredCount\""));
+        assert!(json.contains("\"totalModelCount\""));
+        assert!(json.contains("\"providerCountWithModels\""));
+        assert!(json.contains("\"instanceBuilt\""));
+        assert!(json.contains("\"modelCount\""));
+        assert!(json.contains("\"baseUrl\""));
+        assert!(!json.to_lowercase().contains("apikey"));
+        assert!(!json.to_lowercase().contains("secretref"));
+    }
+
+    /// A configured provider row whose instance cannot be built (an
+    /// un-instantiable configuration) is reported as `instanceBuilt == false`
+    /// with a non-empty display-safe error and zero models, rather than aborting
+    /// the whole report. This pins the per-provider isolation of the resilient
+    /// registry build and the visible self-report of the invisible-skip cause.
+    #[tokio::test]
+    async fn provider_diagnostics_inner_reports_unbuildable_row() {
+        let state = test_state().await;
+
+        // Persist a GenericOpenAI row with no base_url. The GenericOpenAI factory
+        // requires an endpoint, so its build fails; the row is left un-built and
+        // must surface as instanceBuilt == false with a display-safe error.
+        let cfg = ProviderConfig {
+            id: "broken-generic".to_string(),
+            kind: ProviderKind::GenericOpenAI,
+            base_url: None,
+            api_key_ref: None,
+            extra: serde_json::Value::Null,
+        };
+        ProviderRepo::new(state.session_manager.db())
+            .insert(&cfg)
+            .await
+            .unwrap();
+
+        let report = provider_diagnostics_inner(&state).await.unwrap();
+        let broken = report
+            .providers
+            .iter()
+            .find(|p| p.id == "broken-generic")
+            .expect("the unbuildable row must appear in the diagnostics report");
+        assert!(
+            !broken.instance_built,
+            "a row whose factory build failed must report instanceBuilt == false"
+        );
+        assert_eq!(broken.model_count, 0);
+        let err = broken
+            .error
+            .as_ref()
+            .expect("an unbuilt row must carry a display-safe reason");
+        assert!(!err.is_empty());
+
+        // The report still includes the other rows (per-provider isolation).
+        assert!(report.configured_count >= 2);
+
+        // DISPLAY-SAFE: no secret material in the serialized report.
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(!json.to_lowercase().contains("apikey"));
+        assert!(!json.to_lowercase().contains("secretref"));
     }
 
     /// The embedded-model DTOs are display-safe camelCase and carry no secret

@@ -17,6 +17,7 @@ import type {
   PermissionDecision,
   PermissionMode,
   PrivacyTag,
+  ProviderDiagnosticsReport,
   ProviderKind,
   RouteExplanation,
   RoutingHint,
@@ -133,6 +134,19 @@ export function deletePersona(personaId: string): Promise<void> {
  */
 export function listAvailableModels(): Promise<AvailableModelsResult> {
   return invoke<AvailableModelsResult>("list_available_models");
+}
+
+/**
+ * Fetch a display-safe, per-provider diagnostics report so the app can
+ * self-report exactly what happened during model enumeration (why the picker is
+ * empty): for each configured provider row, its kind, display-safe base URL,
+ * whether an instance was built, how many models it produced, and any
+ * enumeration error, plus summary counts. Backed by `provider_diagnostics`.
+ * DISPLAY-SAFE: the report carries only ids/kinds/base URLs/counts and provider
+ * error messages, never secret material.
+ */
+export function providerDiagnostics(): Promise<ProviderDiagnosticsReport> {
+  return invoke<ProviderDiagnosticsReport>("provider_diagnostics");
 }
 
 /**

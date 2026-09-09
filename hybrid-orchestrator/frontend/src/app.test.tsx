@@ -41,6 +41,8 @@ function routeInvoke(command: string): unknown {
       return [];
     case "embedded_model_status":
       return { loadedModelId: null, registeredCount: 0 };
+    case "provider_diagnostics":
+      return { configuredCount: 0, totalModelCount: 0, providerCountWithModels: 0, providers: [] };
     default:
       return undefined;
   }

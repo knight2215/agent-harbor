@@ -70,7 +70,13 @@ function resetStores() {
     pendingOverride: null,
     pendingPermissions: [],
   });
-  useProvidersStore.setState({ models: [], errors: [], load: realProvidersLoad });
+  useProvidersStore.setState({
+    models: [],
+    errors: [],
+    loadState: "idle",
+    lastError: null,
+    load: realProvidersLoad,
+  });
 }
 
 describe("model selector", () => {
@@ -333,6 +339,24 @@ describe("model selector", () => {
     const errors = await screen.findByTestId("provider-enumeration-errors");
     expect(within(errors).getByText(/ollama-local/)).toBeInTheDocument();
     expect(within(errors).getByText(/transport error: connection refused/)).toBeInTheDocument();
+    // The copyable status line reports the loaded outcome (1 model, 1 provider).
+    expect(screen.getByTestId("model-load-status")).toHaveTextContent(
+      "loaded 1 models from 1 providers",
+    );
+  });
+
+  it("PerMessageOverrideControl status line reports a failed load with the error message", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    // A rejected list_available_models must self-report via the status line
+    // instead of a silent empty picker (the clean-empty bug).
+    invoke.mockRejectedValue(new Error("provider registry build failed"));
+    await useProvidersStore.getState().load();
+
+    render(<PerMessageOverrideControl />);
+
+    expect(screen.getByTestId("model-load-status")).toHaveTextContent(
+      "failed: provider registry build failed",
+    );
   });
 
   it("PerMessageOverrideControl exposes a Refresh models control that re-enumerates via the store", async () => {

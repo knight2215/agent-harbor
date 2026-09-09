@@ -253,6 +253,14 @@ where
 /// collected into [`AvailableModelsResult::errors`] so the UI can tell the user
 /// why a provider contributed nothing.
 ///
+/// A configured row whose instance was never built (its factory build failed or
+/// was skipped, so `registry.get(&cfg.id)` is `None`) is likewise recorded as an
+/// [`AvailableModelsResult::errors`] entry rather than silently dropped. A silent
+/// drop was a prime clean-empty cause: the row contributed neither a model nor an
+/// error, so the picker showed "No models available yet" with nothing to explain
+/// why. The recorded message is a static, display-safe string (no secret
+/// material).
+///
 /// Because it drives the trait method, tests inject a fake [`ChatProvider`]
 /// whose `list_models` returns a fixed list, so no live network is required.
 pub async fn list_available_models(
@@ -264,8 +272,17 @@ pub async fn list_available_models(
     let mut errors_out = Vec::new();
     for cfg in configs {
         let Some(instance) = registry.get(&cfg.id) else {
-            // No live instance for this config row (e.g. build was skipped);
-            // nothing to enumerate.
+            // No live instance for this config row: its factory build failed or
+            // was skipped. Record it as a display-safe enumeration error instead
+            // of silently continuing, so a configured-but-unbuilt provider is
+            // diagnosable rather than an invisible clean-empty cause. The message
+            // is a static string and carries no secret material.
+            errors_out.push(ProviderEnumerationError {
+                provider_id: cfg.id.clone(),
+                message: "provider is configured but no instance was built \
+                          (build failed or was skipped); it cannot be enumerated"
+                    .to_string(),
+            });
             continue;
         };
         let models = match instance.list_models().await {
@@ -551,6 +568,41 @@ mod tests {
         assert_eq!(result.errors.len(), 1);
         let err = &result.errors[0];
         assert_eq!(err.provider_id, "offline-local");
+        assert!(!err.message.is_empty());
+
+        // DISPLAY-SAFE: the serialized error uses camelCase and never carries
+        // secret/key material.
+        let json = serde_json::to_string(&result.errors).unwrap();
+        assert!(json.contains("\"providerId\""));
+        assert!(json.contains("\"message\""));
+        assert!(!json.contains("apiKey"));
+        assert!(!json.contains("secret"));
+    }
+
+    /// The mirror image of `instances_without_a_config_row_are_skipped`: a
+    /// configured row that references an id with NO built instance in the
+    /// registry (its build failed or was skipped) is no longer silently dropped.
+    /// It now yields exactly one display-safe `ProviderEnumerationError` carrying
+    /// that provider id and a non-empty message, while `models` stays empty. This
+    /// pins the invisible-skip fix: a configured-but-unbuilt provider is
+    /// diagnosable instead of an invisible clean-empty cause.
+    #[tokio::test]
+    async fn a_config_row_without_a_built_instance_is_recorded_as_an_error() {
+        // An empty registry has no instances, so the configured row cannot be
+        // resolved to a built instance.
+        let registry = builtin_registry();
+        let configs = vec![config("unbuilt", ProviderKind::Ollama)];
+
+        let result = list_available_models(&registry, &configs, &PricingTable::new())
+            .await
+            .expect("an unbuilt configured row must not abort the whole enumeration");
+
+        // No model is produced for the unbuilt row.
+        assert!(result.models.is_empty());
+        // Exactly one display-safe error is recorded for that provider id.
+        assert_eq!(result.errors.len(), 1);
+        let err = &result.errors[0];
+        assert_eq!(err.provider_id, "unbuilt");
         assert!(!err.message.is_empty());
 
         // DISPLAY-SAFE: the serialized error uses camelCase and never carries

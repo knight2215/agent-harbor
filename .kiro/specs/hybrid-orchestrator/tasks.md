@@ -408,6 +408,35 @@ The chat model picker is populated on launch without opening Settings; saving or
 
 ---
 
+## Phase 12: Model-picker self-reporting diagnostics
+
+Goal: close the last "nothing shows up and nothing tells me why" gap after Phases 10 and 11. A user still reported the chat picker showing "No models available yet ..." with no visible reason, so this phase makes the built app SELF-REPORT the load-path outcome instead of failing silently. Three remaining clean-empty causes are made visible: (A) the providers store `load()` swallowed an IPC rejection, leaving `models:[]`/`errors:[]` with no signal; (B) `providers::list_available_models` silently skipped a configured provider row whose instance was never built (the invisible skip); and (C) `list_available_models_inner` used a fail-fast `build_registry(...)?` that aborted the whole enumeration on the first un-buildable row. This phase is diagnostics and wiring only; the routing engine, the provider contract, the enumeration shape, the Ollama adapter, and the embedded engine are untouched.
+
+Dependencies: Phase 10 (the `AvailableModelsResult { models, errors }` shape and `ProviderEnumerationErrors` component), Phase 11 (the startup `load()` and the chat-context enumeration). Section 9.1/9.2 secret-hygiene invariants constrain every new command and readout: only display-safe fields (`baseUrl`, counts, `ProviderError` `Display` strings) are surfaced, never a resolved secret.
+
+### Tasks
+
+- **P12.1 Backend self-report plus the invisible-skip fix.** In `crates/providers/src/builtins.rs`, change `list_available_models`'s `let Some(instance) = registry.get(&cfg.id) else { continue };` None branch to push a display-safe `ProviderEnumerationError { providerId, message }` (static message: the provider is configured but no instance was built and cannot be enumerated) instead of silently continuing. In `crates/tauri-app/src/commands.rs`, replace the fail-fast `providers::build_registry(...)?` in `list_available_models_inner` with a resilient per-row build (start from `builtin_registry()`, `build_from_config` per row, skip a failed row rather than aborting) so one un-buildable row surfaces via the enumeration path instead of a thrown `CommandError`. Add a display-safe `provider_diagnostics` `#[tauri::command]` with an `_inner` body that mirrors `list_available_models_inner`'s seeding, registry build, and shared embedded-instance setup exactly, returning `ProviderDiagnosticsReport { configuredCount, totalModelCount, providerCountWithModels, providers: [ ProviderDiagnostic { id, kind, baseUrl, instanceBuilt, modelCount, error } ] }` (`#[serde(rename_all = "camelCase")]`, never any `api_key_ref`/secret). Register it in `generate_handler!`. Verification: `cargo test --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml` proves a config row with no built instance yields exactly one display-safe camelCase error and models stays empty; `cargo test --manifest-path hybrid-orchestrator/crates/tauri-app/Cargo.toml` proves `provider_diagnostics_inner` reports the seeded ollama-local row with `instanceBuilt` true and a non-empty error (no live Ollama) and that the serialized report is camelCase and secret-free.
+- **P12.2 Frontend capture of the load outcome.** Extend the providers store (`frontend/src/state/providers.ts`) with `loadState` (`idle`/`loading`/`loaded`/`failed`) and a display-safe `lastError`, and rewrite `load()` to capture a rejected `list_available_models` into `loadState:"failed"`/`lastError` instead of swallowing it (models left as-is on failure). In `PerMessageOverrideControl`, render a copyable status line (`data-testid="model-load-status"`) reading `loading…` / `loaded N models from M providers` / `failed: <error>` above the existing `ProviderEnumerationErrors`. Add the hand-mirrored `ProviderDiagnostic` / `ProviderDiagnosticsReport` TS types and a `providerDiagnostics()` IPC wrapper. Verification: `vitest` in `frontend/` asserts a rejected `listAvailableModels()` sets `loadState:"failed"`/`lastError` without throwing, the status line renders the loaded/failed text, and `providerDiagnostics()` invokes `provider_diagnostics`.
+- **P12.3 Always-reachable Diagnostics settings section.** Add `frontend/src/features/settings/DiagnosticsSection.tsx` (mount-load pattern from `LocalRuntimesSection`/`ProviderKeysSection`) that runs `provider_diagnostics` on mount and renders a plain-text, copyable per-provider readout (id, kind, `baseUrl` or "default", `instanceBuilt` yes/no, `modelCount`, and any `error`) plus a summary line and a "Run diagnostics" / Refresh button (`data-testid="diagnostics-refresh"`), catching an IPC throw so the panel is never blank. Wire it into `Settings.tsx`'s `SECTIONS` and section switch. Verification: `vitest` in `frontend/` navigates to the Diagnostics section, asserts the region and summary render with a well-formed mock, that Refresh re-invokes `provider_diagnostics`, and that a rejected call shows `failed: <error>` rather than a blank panel; every `<App/>`/`<Settings/>`/model-selector test has a `provider_diagnostics`-safe mock so no new IPC call resolves `undefined`.
+
+### Deliverable
+
+The built app self-reports the model-picker load outcome: the chat area shows a copyable status line (loading / loaded N from M / failed: reason), a configured provider row with no built instance is reported as a per-provider enumeration error instead of vanishing, one un-buildable row no longer aborts the whole enumeration, and an always-reachable Settings "Diagnostics" section runs `provider_diagnostics` to show a display-safe per-provider readout the user can copy into a bug report.
+
+### Parallelization
+
+- P12.1 (backend command plus fixes) lands the `provider_diagnostics` shape that P12.2 and P12.3 consume, so land it first or together. P12.2 (store plus chat status line) and P12.3 (Diagnostics settings section) touch mostly disjoint frontend seams and can proceed in parallel once the types and IPC wrapper exist.
+
+### Verification / acceptance
+
+- `cargo fmt --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml --check` and `... crates/tauri-app/Cargo.toml --check` pass (offline).
+- `cargo test --manifest-path hybrid-orchestrator/crates/providers/Cargo.toml` covers the invisible-skip regression, and `... crates/tauri-app/Cargo.toml` covers `provider_diagnostics_inner`.
+- `vitest` in `frontend/` covers the store throw path, the chat status line, the `providerDiagnostics()` wrapper, and the Diagnostics section (including the IPC-throw path).
+- Per-crate `cargo build`, `cargo test`, `cargo clippy` (with `-D warnings`), `vitest`, eslint, prettier, and `tauri build` are green, and CI passes on all matrix targets.
+
+---
+
 ## Cross-cutting: testing strategy and deferred items
 
 ### Testing strategy

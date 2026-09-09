@@ -21,6 +21,7 @@ import {
   setProviderSecret,
   sendMessage,
   listAvailableModels,
+  providerDiagnostics,
   getMessages,
   setConversationRoute,
   assignPersona,
@@ -153,6 +154,30 @@ describe("ipc/commands wrappers", () => {
     expect(result.models).toEqual([]);
     expect(result.errors).toHaveLength(1);
     expect(result.errors[0].providerId).toBe("ollama-local");
+  });
+
+  it("providerDiagnostics invokes provider_diagnostics and returns the report shape", async () => {
+    invoke.mockResolvedValue({
+      configuredCount: 1,
+      totalModelCount: 0,
+      providerCountWithModels: 0,
+      providers: [
+        {
+          id: "ollama-local",
+          kind: "ollama",
+          baseUrl: null,
+          instanceBuilt: true,
+          modelCount: 0,
+          error: "transport error: connection refused",
+        },
+      ],
+    });
+    const report = await providerDiagnostics();
+    expect(invoke).toHaveBeenCalledWith("provider_diagnostics");
+    expect(report.configuredCount).toBe(1);
+    expect(report.providers).toHaveLength(1);
+    expect(report.providers[0].id).toBe("ollama-local");
+    expect(report.providers[0].instanceBuilt).toBe(true);
   });
 
   it("getMessages forwards conversationId", async () => {

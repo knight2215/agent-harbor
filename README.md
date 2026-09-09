@@ -85,6 +85,32 @@ hosts the brand/logo and the primary destinations **Chat**, **History**, and
   appearance). The **Appearance** section holds a **dark/light theme toggle**;
   the theme follows the OS by default until an explicit choice is stored.
 
+### Reading model-picker diagnostics
+
+If the chat model picker shows "No models available yet ..." (or fewer models
+than you expect), the app can tell you exactly what happened on the load path so
+you do not have to guess:
+
+1. Open **Settings > Diagnostics** and click **Run diagnostics**. The section
+   shows a per-provider readout: the provider **id**, its **kind**, the
+   display-safe **base URL** (or "default" when none is set), whether an
+   **instance was built** (yes/no), the **model count**, and any **error**. It
+   also shows a summary line (loaded N models from M of K configured providers,
+   or the failure reason).
+2. Note the copyable **status line** near the chat picker, which reads
+   "loading...", "loaded N models from M providers", or "failed: &lt;reason&gt;".
+
+Copy that per-provider readout plus the chat status line into any bug report:
+that is the precise information needed to diagnose why a provider did not
+enumerate. The readout is display-safe by design, it shows only base URLs and
+counts, never API keys or other secrets, so it is safe to paste.
+
+On **Windows**, you can also see the app's stderr/log output by launching the
+installed executable from a terminal (PowerShell or cmd) instead of from the
+Start menu, for example `& "$env:LOCALAPPDATA\Programs\Agent Harbor\Agent
+Harbor.exe"`. The backend log lines printed during the load path then appear in
+that terminal, which complements the on-screen diagnostics.
+
 The brand mark is a **hand-crafted SVG logo** (a harbor anchor fused with an
 agent-node/network glyph in the teal/blue accent, legible on both light and dark
 backgrounds). It lives in two places:
