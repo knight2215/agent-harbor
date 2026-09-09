@@ -23,8 +23,7 @@ use orchestrator_core::{
 use persistence::config::{AppConfig, PricingConfig};
 use persistence::{McpServerRepo, ProviderRepo};
 use providers::{
-    list_available_models as list_models, AvailableModel, AvailableModelsResult, PricingTable,
-    TokenPrice,
+    list_available_models as list_models, AvailableModelsResult, PricingTable, TokenPrice,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
