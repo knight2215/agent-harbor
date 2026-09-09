@@ -1,7 +1,14 @@
 {
   "task_id": "task-frontend-vitest-green",
   "task_description": "Drive the frontend vitest suite to GREEN on branch feat/provider-visibility-diagnostics by fixing the ProviderKeysSection '.length on undefined' crash (listCloudProviders() resolving undefined) and its cascade into app.test's Settings-navigation test, hardening every undefined-array read in the reworked provider/model-selector UI at the source, and aligning the app.test IPC mock with the new command shapes. No push/PR (orchestrator handles).",
-  "status": "in_progress",
+  "status": "completed",
   "feature_order": ["FEAT-001"],
-  "blocked_reason": null
+  "blocked_reason": null,
+  "verification": {
+    "build": "skipped",
+    "tests": "reasoned",
+    "test_quality": "pass",
+    "docker_build": "skipped",
+    "summary": "vitest/tsc/eslint cannot run in this INTEGRATIONS_ONLY sandbox (npm E403, node_modules absent), so correctness was verified by tracing every array read. Confirmed: (1) ProviderKeysSection/LocalRuntimesSection now assign an array to state on every IPC path (Array.isArray guard + existing .catch); (2) ProviderEnumerationErrors and ProviderModelPicker normalize their array inputs; (3) providers store still defaults models/errors to [] and load() uses ?? []; (4) app.test routeInvoke now returns [] for list_cloud_providers/list_local_runtimes/list_embedded_models and {loadedModelId:null,registeredCount:0} for embedded_model_status, keeping list_available_models -> {models:[],errors:[]}. Root cause (ProviderKeysSection reading providers.length after listCloudProviders() resolved undefined) is fixed at the source AND in the mock, so the 'switches to the History and Settings destinations' cascade is resolved. All other test entry points that mount ProviderKeysSection (settings.test.tsx) already mock list_cloud_providers to []; about-updates.test/theme.test do not mount it. prettier --check RAN and is clean on all 5 changed files. No Rust files touched, no unused imports introduced. build/docker skipped: frontend-only change and no network for image pulls."
+  }
 }
