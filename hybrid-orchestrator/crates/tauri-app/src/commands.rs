@@ -2117,7 +2117,7 @@ const OLLAMA_PROVIDER_ID: &str = "ollama-local";
 /// enumeration, and is a no-op once it exists.
 ///
 /// The row carries no `base_url` (the Ollama adapter falls back to its own
-/// `DEFAULT_BASE_URL`, `http://localhost:11434/v1`, when `base_url` is None) and
+/// `DEFAULT_BASE_URL`, `http://127.0.0.1:11434/v1`, when `base_url` is None) and
 /// no `api_key_ref` (Ollama is keyless), so it is display-safe and never touches
 /// the secret store. Seeding is safe even when Ollama is not installed or not
 /// running: the enumeration path skips a provider whose `list_models` errors

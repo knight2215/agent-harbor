@@ -249,6 +249,59 @@ async fn ollama_discovers_models_via_api_tags() {
     );
 }
 
+/// End-to-end contract proof (FEAT-004): a real Ollama server returns a RICH
+/// `/api/tags` payload (nested `details`, a `capabilities` array, plus `model`,
+/// `size`, `digest`, `modified_at`). Mount exactly that shape and assert
+/// [`OllamaAdapter::list_models`] parses it through the HTTP client and yields a
+/// [`ModelInfo`] with id `qwen3:8b`. Also assert the request carries the
+/// explicit `Accept: application/json` header. This complements the isolated
+/// serde decode unit test by exercising the full HTTP -> decode path.
+#[tokio::test]
+async fn ollama_discovers_models_from_rich_api_tags_payload() {
+    ensure_crypto_provider();
+    let server = MockServer::start().await;
+    let store = InMemorySecretStore::new();
+
+    Mock::given(method("GET"))
+        .and(path("/api/tags"))
+        .and(header("accept", "application/json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [{
+                "name": "qwen3:8b",
+                "model": "qwen3:8b",
+                "modified_at": "2026-09-02T00:42:29.5225957-07:00",
+                "size": 5225388164u64,
+                "digest": "500a1f067a9f782620b40bee6f7b0c89e17ae61f686b92c24933e4ca4b2b8b41",
+                "details": {
+                    "parent_model": "",
+                    "format": "gguf",
+                    "family": "qwen3",
+                    "families": ["qwen3"],
+                    "parameter_size": "8.2B",
+                    "quantization_level": "Q4_K_M",
+                    "context_length": 40960,
+                    "embedding_length": 4096
+                },
+                "capabilities": ["completion", "tools", "thinking"]
+            }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cfg = ProviderConfig {
+        id: "ollama".to_string(),
+        kind: ProviderKind::Ollama,
+        base_url: Some(format!("{}/v1", server.uri())),
+        api_key_ref: None,
+        extra: Value::Null,
+    };
+    let adapter = build_ollama(&cfg, &store).unwrap();
+    let models = adapter.list_models().await.unwrap();
+    let ids: Vec<_> = models.into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, vec!["qwen3:8b".to_string()]);
+}
+
 #[tokio::test]
 async fn ollama_chat_sends_no_authorization_header() {
     ensure_crypto_provider();
