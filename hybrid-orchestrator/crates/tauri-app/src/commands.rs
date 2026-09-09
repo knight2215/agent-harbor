@@ -789,6 +789,19 @@ pub struct LocalRuntimeConfigView {
     pub warning: Option<String>,
 }
 
+/// Notify the frontend that the set/availability of providers or models changed
+/// so the model-selector store (`state/providers.ts`) refetches via
+/// `list_available_models` (architecture.md Sections 7.3 / 8.2). Fire-and-forget
+/// through [`AppState::core_events`], mirroring the `McpStateChanged` sends: a
+/// dropped UI event must never fail the mutation that triggered it, so the send
+/// result is intentionally ignored. Callers emit this only AFTER a provider-config
+/// mutation has succeeded, so a validation/persist error emits nothing.
+fn emit_providers_changed(state: &AppState) {
+    let _ = state
+        .core_events
+        .send(orchestrator_core::CoreEvent::ProvidersChanged);
+}
+
 /// Persist (upsert) a user-configured local runtime: an OpenAI-compatible
 /// server the user runs themselves (LM Studio or a generic OpenAI-compatible
 /// endpoint). The entered `base_url` is validated through the Section 9.3
@@ -806,7 +819,27 @@ pub async fn set_local_runtime(
     base_url: String,
     api_key: Option<String>,
 ) -> Result<LocalRuntimeConfigView, CommandError> {
-    set_local_runtime_inner(&state, kind, &base_url, api_key.as_deref()).await
+    set_local_runtime_and_notify(&state, kind, &base_url, api_key.as_deref()).await
+}
+
+/// The mutation-plus-notify seam behind [`set_local_runtime`]: run the
+/// [`set_local_runtime_inner`] body and, only if it succeeds (the `?`
+/// short-circuits on a validation/persist error before the emit), ask the
+/// frontend providers store to refetch by emitting `ProvidersChanged` (bug B).
+/// The `#[tauri::command]` wrapper is a one-line delegation to this seam so the
+/// emit is exercised by the same call the wrapper makes; tests drive this seam
+/// directly (a live `tauri::State` cannot be built offline). Fire-and-forget: a
+/// dropped UI event must never fail the command (mirrors the McpStateChanged
+/// sends).
+async fn set_local_runtime_and_notify(
+    state: &AppState,
+    kind: ProviderKind,
+    base_url: &str,
+    api_key: Option<&str>,
+) -> Result<LocalRuntimeConfigView, CommandError> {
+    let view = set_local_runtime_inner(state, kind, base_url, api_key).await?;
+    emit_providers_changed(state);
+    Ok(view)
 }
 
 /// The full validate-then-store-then-upsert body of [`set_local_runtime`],
@@ -956,7 +989,21 @@ pub async fn clear_local_runtime(
     state: tauri::State<'_, AppState>,
     kind: ProviderKind,
 ) -> Result<(), CommandError> {
-    clear_local_runtime_inner(&state, kind).await
+    clear_local_runtime_and_notify(&state, kind).await
+}
+
+/// The mutation-plus-notify seam behind [`clear_local_runtime`]: run the
+/// [`clear_local_runtime_inner`] body and, only on success, emit
+/// `ProvidersChanged` so the model selector drops the cleared runtime's models
+/// (bug B). The `#[tauri::command]` wrapper delegates to this seam in one line;
+/// tests drive the seam directly.
+async fn clear_local_runtime_and_notify(
+    state: &AppState,
+    kind: ProviderKind,
+) -> Result<(), CommandError> {
+    clear_local_runtime_inner(state, kind).await?;
+    emit_providers_changed(state);
+    Ok(())
 }
 
 /// The full body of [`clear_local_runtime`], factored out for direct testing.
@@ -1064,7 +1111,24 @@ pub async fn set_cloud_provider(
     api_key: String,
     base_url: Option<String>,
 ) -> Result<CloudProviderConfigView, CommandError> {
-    set_cloud_provider_inner(&state, kind, &api_key, base_url.as_deref()).await
+    set_cloud_provider_and_notify(&state, kind, &api_key, base_url.as_deref()).await
+}
+
+/// The mutation-plus-notify seam behind [`set_cloud_provider`]: run the
+/// [`set_cloud_provider_inner`] body and, only if it succeeds (the `?`
+/// short-circuits on a validation/persist error before the emit), emit
+/// `ProvidersChanged` so the saved provider's models become enumerable (bug B).
+/// The `#[tauri::command]` wrapper delegates to this seam in one line; tests
+/// drive the seam directly.
+async fn set_cloud_provider_and_notify(
+    state: &AppState,
+    kind: ProviderKind,
+    api_key: &str,
+    base_url: Option<&str>,
+) -> Result<CloudProviderConfigView, CommandError> {
+    let view = set_cloud_provider_inner(state, kind, api_key, base_url).await?;
+    emit_providers_changed(state);
+    Ok(view)
 }
 
 /// The full validate-then-store-then-upsert body of [`set_cloud_provider`],
@@ -1216,7 +1280,21 @@ pub async fn clear_cloud_provider(
     state: tauri::State<'_, AppState>,
     kind: ProviderKind,
 ) -> Result<(), CommandError> {
-    clear_cloud_provider_inner(&state, kind).await
+    clear_cloud_provider_and_notify(&state, kind).await
+}
+
+/// The mutation-plus-notify seam behind [`clear_cloud_provider`]: run the
+/// [`clear_cloud_provider_inner`] body and, only on success, emit
+/// `ProvidersChanged` so the model selector drops the cleared provider's models
+/// (bug B). The `#[tauri::command]` wrapper delegates to this seam in one line;
+/// tests drive the seam directly.
+async fn clear_cloud_provider_and_notify(
+    state: &AppState,
+    kind: ProviderKind,
+) -> Result<(), CommandError> {
+    clear_cloud_provider_inner(state, kind).await?;
+    emit_providers_changed(state);
+    Ok(())
 }
 
 /// The full body of [`clear_cloud_provider`], factored out for direct testing.
@@ -2213,10 +2291,25 @@ pub async fn import_embedded_model(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<Vec<EmbeddedModelView>, CommandError> {
-    validate_gguf_path(&path)?;
-    ensure_embedded_provider_config(&state).await?;
+    import_embedded_model_and_notify(&state, &path).await
+}
+
+/// The mutation-plus-notify seam behind [`import_embedded_model`]: validate and
+/// register the `.gguf` path, build the refreshed model list, and only on
+/// success emit `ProvidersChanged` (a newly imported model changes what
+/// enumerates under Local, bug B). The `?` short-circuits on a bad path before
+/// the emit. The `#[tauri::command]` wrapper delegates to this seam in one line;
+/// tests drive the seam directly.
+async fn import_embedded_model_and_notify(
+    state: &AppState,
+    path: &str,
+) -> Result<Vec<EmbeddedModelView>, CommandError> {
+    validate_gguf_path(path)?;
+    ensure_embedded_provider_config(state).await?;
     state.embedded_engine.register_path(path.trim()).await;
-    Ok(embedded_model_views(&state).await)
+    let views = embedded_model_views(state).await;
+    emit_providers_changed(state);
+    Ok(views)
 }
 
 /// Select (import if needed, then mark active) a local `.gguf` model by path
@@ -2227,11 +2320,26 @@ pub async fn select_embedded_model(
     state: tauri::State<'_, AppState>,
     path: String,
 ) -> Result<Vec<EmbeddedModelView>, CommandError> {
-    validate_gguf_path(&path)?;
-    ensure_embedded_provider_config(&state).await?;
+    select_embedded_model_and_notify(&state, &path).await
+}
+
+/// The mutation-plus-notify seam behind [`select_embedded_model`]: validate and
+/// register the `.gguf` path, mark it active, build the refreshed model list,
+/// and only on success emit `ProvidersChanged` (the active Local model changed,
+/// bug B). The `?` short-circuits on a bad path before the emit. The
+/// `#[tauri::command]` wrapper delegates to this seam in one line; tests drive
+/// the seam directly.
+async fn select_embedded_model_and_notify(
+    state: &AppState,
+    path: &str,
+) -> Result<Vec<EmbeddedModelView>, CommandError> {
+    validate_gguf_path(path)?;
+    ensure_embedded_provider_config(state).await?;
     let id = state.embedded_engine.register_path(path.trim()).await;
     *state.embedded_loaded_model.write().await = Some(id);
-    Ok(embedded_model_views(&state).await)
+    let views = embedded_model_views(state).await;
+    emit_providers_changed(state);
+    Ok(views)
 }
 
 /// Load (make active) an already-imported embedded model by id (architecture.md
@@ -2242,6 +2350,19 @@ pub async fn load_embedded_model(
     state: tauri::State<'_, AppState>,
     model_id: String,
 ) -> Result<EmbeddedModelStatus, CommandError> {
+    load_embedded_model_and_notify(&state, model_id).await
+}
+
+/// The mutation-plus-notify seam behind [`load_embedded_model`]: validate the
+/// id, reject an unregistered one, mark it active, build the engine status, and
+/// only on success emit `ProvidersChanged` (the active Local model changed, bug
+/// B). The `?`/early return short-circuits on an invalid or unknown id before
+/// the emit. The `#[tauri::command]` wrapper delegates to this seam in one line;
+/// tests drive the seam directly.
+async fn load_embedded_model_and_notify(
+    state: &AppState,
+    model_id: String,
+) -> Result<EmbeddedModelStatus, CommandError> {
     validate_nonempty("modelId", &model_id, MAX_MODEL_PATH_LEN)?;
     let registered = state.embedded_engine.registered_model_ids().await;
     if !registered.iter().any(|id| id == &model_id) {
@@ -2250,7 +2371,9 @@ pub async fn load_embedded_model(
         )));
     }
     *state.embedded_loaded_model.write().await = Some(model_id);
-    Ok(embedded_model_status_inner(&state).await)
+    let status = embedded_model_status_inner(state).await;
+    emit_providers_changed(state);
+    Ok(status)
 }
 
 /// Unload the currently selected/loaded embedded model (architecture.md Section
@@ -2260,8 +2383,21 @@ pub async fn load_embedded_model(
 pub async fn unload_embedded_model(
     state: tauri::State<'_, AppState>,
 ) -> Result<EmbeddedModelStatus, CommandError> {
+    unload_embedded_model_and_notify(&state).await
+}
+
+/// The mutation-plus-notify seam behind [`unload_embedded_model`]: clear the
+/// active-model state, build the engine status, and emit `ProvidersChanged`
+/// (the Local surface changed, bug B). Idempotent: unloading when nothing is
+/// loaded is a no-op that still notifies. The `#[tauri::command]` wrapper
+/// delegates to this seam in one line; tests drive the seam directly.
+async fn unload_embedded_model_and_notify(
+    state: &AppState,
+) -> Result<EmbeddedModelStatus, CommandError> {
     *state.embedded_loaded_model.write().await = None;
-    Ok(embedded_model_status_inner(&state).await)
+    let status = embedded_model_status_inner(state).await;
+    emit_providers_changed(state);
+    Ok(status)
 }
 
 /// Report the embedded engine's lifecycle status (architecture.md Section 4,
@@ -2301,10 +2437,11 @@ pub fn app_version() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use orchestrator_core::SessionManager;
+    use orchestrator_core::{CoreEvent, SessionManager};
     use persistence::Db;
     use providers::AvailableModel;
     use secrets::{InMemorySecretStore, SecretError};
+    use tokio::sync::mpsc::UnboundedReceiver;
 
     async fn test_state() -> AppState {
         let db = Db::open_in_memory().await.unwrap();
@@ -4064,5 +4201,180 @@ mod tests {
             state.secret_store.resolve(&old_ref),
             Err(SecretError::NotFound(_))
         ));
+    }
+
+    // --- ProvidersChanged emit (bug B: the model selector never refetched) ---
+    //
+    // The provider-config mutation commands emit `CoreEvent::ProvidersChanged`
+    // so the frontend providers store refetches `list_available_models`. The
+    // emit lives in a `*_and_notify(&AppState, ...)` seam that runs the mutation
+    // then emits; each thin `#[tauri::command]` wrapper is a one-line delegation
+    // to that seam (the wrappers hold a live `tauri::State`, which cannot be
+    // built offline). These tests drive the SEAM directly - NOT
+    // `emit_providers_changed` in the test body - so a dropped emit inside a
+    // seam (equivalently, a wrapper) is a test failure. Each positive test
+    // asserts the seam emits EXACTLY ONE `ProvidersChanged` (event queued, then
+    // the receiver is empty); the rejected-mutation test proves the emit is
+    // skipped on the `?` short-circuit.
+
+    /// A state whose core-event receiver half is RETAINED (the shared
+    /// `test_state()` drops it), so a test can drain emitted [`CoreEvent`]s.
+    async fn test_state_with_rx() -> (AppState, UnboundedReceiver<CoreEvent>) {
+        let db = Db::open_in_memory().await.unwrap();
+        AppState::new(
+            SessionManager::new(db),
+            Arc::new(InMemorySecretStore::new()),
+        )
+    }
+
+    /// Drain one queued `CoreEvent`, assert it is `ProvidersChanged`, and assert
+    /// it was the ONLY one queued. Draining exactly one pins the seam to a single
+    /// emit: a dropped emit fails the first `try_recv`, and a duplicated emit
+    /// fails the emptiness check.
+    fn assert_one_providers_changed(rx: &mut UnboundedReceiver<CoreEvent>) {
+        match rx.try_recv() {
+            Ok(CoreEvent::ProvidersChanged) => {}
+            other => panic!("expected CoreEvent::ProvidersChanged, got {other:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "a mutation seam must emit ProvidersChanged exactly once"
+        );
+    }
+
+    /// Saving a cloud provider emits `ProvidersChanged` (via the seam the
+    /// `set_cloud_provider` wrapper delegates to).
+    #[tokio::test]
+    async fn set_cloud_provider_emits_providers_changed() {
+        let (state, mut rx) = test_state_with_rx().await;
+        set_cloud_provider_and_notify(&state, ProviderKind::Gemini, "sk-gemini-key", None)
+            .await
+            .unwrap();
+        assert_one_providers_changed(&mut rx);
+    }
+
+    /// Clearing a cloud provider emits `ProvidersChanged` (via the seam the
+    /// `clear_cloud_provider` wrapper delegates to).
+    #[tokio::test]
+    async fn clear_cloud_provider_emits_providers_changed() {
+        let (state, mut rx) = test_state_with_rx().await;
+        set_cloud_provider_and_notify(&state, ProviderKind::OpenAI, "sk-openai-key", None)
+            .await
+            .unwrap();
+        assert_one_providers_changed(&mut rx);
+
+        clear_cloud_provider_and_notify(&state, ProviderKind::OpenAI)
+            .await
+            .unwrap();
+        assert_one_providers_changed(&mut rx);
+    }
+
+    /// Saving a local runtime emits `ProvidersChanged` (via the seam the
+    /// `set_local_runtime` wrapper delegates to).
+    #[tokio::test]
+    async fn set_local_runtime_emits_providers_changed() {
+        let (state, mut rx) = test_state_with_rx().await;
+        set_local_runtime_and_notify(
+            &state,
+            ProviderKind::LmStudio,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_one_providers_changed(&mut rx);
+    }
+
+    /// Clearing a local runtime emits `ProvidersChanged` (via the seam the
+    /// `clear_local_runtime` wrapper delegates to).
+    #[tokio::test]
+    async fn clear_local_runtime_emits_providers_changed() {
+        let (state, mut rx) = test_state_with_rx().await;
+        set_local_runtime_and_notify(
+            &state,
+            ProviderKind::LmStudio,
+            "http://localhost:1234/v1",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_one_providers_changed(&mut rx);
+
+        clear_local_runtime_and_notify(&state, ProviderKind::LmStudio)
+            .await
+            .unwrap();
+        assert_one_providers_changed(&mut rx);
+    }
+
+    /// A failed (rejected) mutation must NOT emit `ProvidersChanged`: the seam
+    /// only emits after the inner body returns `Ok`, so a validation error (here
+    /// a non-cloud kind) short-circuits at the `?` before the emit and leaves the
+    /// receiver empty. Driving the seam (not `_inner`) proves the skip happens on
+    /// the exact path the wrapper takes.
+    #[tokio::test]
+    async fn rejected_mutation_does_not_emit_providers_changed() {
+        let (state, mut rx) = test_state_with_rx().await;
+        // Ollama is a local kind, not configurable via the cloud path: the inner
+        // body returns Err, so the seam's `?` short-circuits before the emit.
+        let err = set_cloud_provider_and_notify(&state, ProviderKind::Ollama, "sk-x", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+        assert!(
+            rx.try_recv().is_err(),
+            "a rejected mutation must not emit ProvidersChanged"
+        );
+    }
+
+    /// The embedded-model lifecycle seams emit `ProvidersChanged`: importing,
+    /// selecting, loading, and unloading each change what enumerates under Local.
+    /// Driving each seam (the wrapper delegates to it) asserts exactly one emit
+    /// per mutation, so a dropped emit in any of the four is a test failure.
+    #[tokio::test]
+    async fn embedded_model_mutations_emit_providers_changed() {
+        let (state, mut rx) = test_state_with_rx().await;
+
+        // import
+        import_embedded_model_and_notify(&state, "/tmp/model-a.gguf")
+            .await
+            .unwrap();
+        assert_one_providers_changed(&mut rx);
+
+        // select (registers and marks active, returning its id for load)
+        select_embedded_model_and_notify(&state, "/tmp/model-b.gguf")
+            .await
+            .unwrap();
+        assert_one_providers_changed(&mut rx);
+        let id = state
+            .embedded_loaded_model
+            .read()
+            .await
+            .clone()
+            .expect("select marks a model loaded");
+
+        // load
+        load_embedded_model_and_notify(&state, id).await.unwrap();
+        assert_one_providers_changed(&mut rx);
+
+        // unload
+        unload_embedded_model_and_notify(&state).await.unwrap();
+        assert_one_providers_changed(&mut rx);
+    }
+
+    /// A rejected embedded-model seam must NOT emit `ProvidersChanged`: an
+    /// invalid `.gguf` path short-circuits at the `?` before the emit, so the
+    /// receiver stays empty. This pins the emit-only-after-Ok contract for the
+    /// embedded path too.
+    #[tokio::test]
+    async fn rejected_embedded_mutation_does_not_emit_providers_changed() {
+        let (state, mut rx) = test_state_with_rx().await;
+        let err = import_embedded_model_and_notify(&state, "/tmp/not-a-model.txt")
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+        assert!(
+            rx.try_recv().is_err(),
+            "a rejected embedded mutation must not emit ProvidersChanged"
+        );
     }
 }

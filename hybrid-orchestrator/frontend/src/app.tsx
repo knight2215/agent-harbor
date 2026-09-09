@@ -17,7 +17,11 @@
 // via `getState()`, so switching destinations NEVER tears it down or opens a
 // second subscription. The effect returns a stable cleanup that awaits and
 // calls the `UnlistenFn`, so the subscription is torn down exactly once on
-// unmount. The status footer surfaces the real app version, read at runtime via
+// unmount. The SAME effect also triggers the providers store's `load()` once at
+// startup (Section 8.2) so the chat model picker is populated on launch without
+// the user first opening Settings; a `providersChanged` CoreEvent (emitted by
+// the provider-config mutation commands) then refetches it on demand. The
+// status footer surfaces the real app version, read at runtime via
 // `@tauri-apps/api/app` getVersion() (which reads tauri.conf.json), so it stays
 // in sync with the shipped build without any hardcoding.
 
@@ -105,6 +109,15 @@ export function App() {
     const applyProviders = useProvidersStore.getState().applyCoreEvent;
     const applyTools = useToolsStore.getState().applyCoreEvent;
     const applyPersonas = usePersonasStore.getState().applyCoreEvent;
+
+    // Populate the model-selector store once at startup so the chat picker
+    // reflects configured providers/models WITHOUT the user first opening
+    // Settings (bug A). This mirrors how AgentEditor/ToolManager/History load
+    // their own stores on mount; here it lives in the single root effect so it
+    // runs exactly once, alongside (not instead of) the subscription below. The
+    // load is fire-and-forget (its own errors surface via the store's `errors`
+    // and the ProviderEnumerationErrors near the picker).
+    void useProvidersStore.getState().load();
 
     const unlistenPromise = onCoreEvent((event) => {
       applyConversations(event.payload);

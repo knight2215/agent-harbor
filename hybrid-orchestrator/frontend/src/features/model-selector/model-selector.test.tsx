@@ -57,6 +57,11 @@ function conversation(id: string): Conversation {
   };
 }
 
+// The providers store is a module-level singleton; capture its REAL load()
+// before any test swaps in a spy so resetStores() can restore it (a leaked spy
+// would otherwise break the tests that drive load()/applyCoreEvent directly).
+const realProvidersLoad = useProvidersStore.getState().load;
+
 function resetStores() {
   useConversationsStore.setState({
     conversations: [],
@@ -65,7 +70,7 @@ function resetStores() {
     pendingOverride: null,
     pendingPermissions: [],
   });
-  useProvidersStore.setState({ models: [], errors: [] });
+  useProvidersStore.setState({ models: [], errors: [], load: realProvidersLoad });
 }
 
 describe("model selector", () => {
@@ -328,6 +333,39 @@ describe("model selector", () => {
     const errors = await screen.findByTestId("provider-enumeration-errors");
     expect(within(errors).getByText(/ollama-local/)).toBeInTheDocument();
     expect(within(errors).getByText(/transport error: connection refused/)).toBeInTheDocument();
+  });
+
+  it("PerMessageOverrideControl exposes a Refresh models control that re-enumerates via the store", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    // Start empty; the refresh will fetch a model and populate the picker.
+    useProvidersStore.setState({ models: [], errors: [] });
+    invoke.mockResolvedValue(result([model("openai", "gpt-4o", false)]));
+
+    render(<PerMessageOverrideControl />);
+
+    // Before refresh: the empty-state guidance is shown (no models yet).
+    expect(screen.getByTestId("no-models-empty-state")).toBeInTheDocument();
+
+    // Click the always-available Refresh affordance (accessible by aria-label).
+    fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+
+    // It re-runs list_available_models through the store's load().
+    expect(invoke).toHaveBeenCalledWith("list_available_models");
+    // After the async load resolves, the fetched model is selectable.
+    expect(await screen.findByRole("button", { name: /openai \/ gpt-4o/ })).toBeInTheDocument();
+    expect(screen.queryByTestId("no-models-empty-state")).toBeNull();
+  });
+
+  it("PerMessageOverrideControl Refresh models control calls the providers store load()", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    const load = vi.fn();
+    useProvidersStore.setState({ load });
+
+    render(<PerMessageOverrideControl />);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+    expect(load).toHaveBeenCalled();
+    // The next test's beforeEach -> resetStores() restores the real load(), so
+    // the seeded spy does not leak.
   });
 
   it("PerMessageOverrideControl shows enumeration errors even when no models exist", async () => {

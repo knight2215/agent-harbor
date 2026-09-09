@@ -47,6 +47,11 @@ function routeInvoke(command: string): unknown {
 }
 
 describe("<App />", () => {
+  // Capture the store's REAL load() before any test swaps in a spy, so
+  // beforeEach can restore it (the store is a module-level singleton and a
+  // leaked spy would otherwise persist across tests).
+  const realProvidersLoad = useProvidersStore.getState().load;
+
   beforeEach(() => {
     invoke.mockReset();
     listen.mockReset();
@@ -73,9 +78,12 @@ describe("<App />", () => {
       pendingPermissions: [],
     });
     // The providers store is also a module-level singleton. Tests below seed
-    // its `models` (and one swaps in a spy `load`), so reset it to the real
-    // default shape here so no partial providers state bleeds between tests.
-    useProvidersStore.setState({ models: [] });
+    // its `models` (and some swap in a spy `load`), so reset it to the real
+    // default shape here so no partial providers state - or a leaked spy - bleeds
+    // between tests. Restore the real `load` so the startup load() that the App
+    // now runs on mount routes through the mocked `invoke` for tests that do not
+    // seed their own spy.
+    useProvidersStore.setState({ models: [], load: realProvidersLoad });
   });
 
   it("renders the app version read at runtime via getVersion()", async () => {
@@ -207,6 +215,18 @@ describe("<App />", () => {
     ).toBeInTheDocument();
   });
 
+  it("loads the providers store once at startup so the chat picker is populated on launch", async () => {
+    // Bug A regression: the chat model picker must be populated on launch
+    // WITHOUT the user first opening Settings. The single root effect calls the
+    // providers store's load() once at mount; seed a spy and assert it fired.
+    const load = vi.fn();
+    useProvidersStore.setState({ load });
+
+    render(<App />);
+
+    await waitFor(() => expect(load).toHaveBeenCalled());
+  });
+
   it("opens a SINGLE core-event subscription that survives navigation between views", async () => {
     const load = vi.fn();
     useProvidersStore.setState({ load });
@@ -216,6 +236,10 @@ describe("<App />", () => {
     // Exactly one subscription is opened for the whole shell (the fan-out).
     expect(listen).toHaveBeenCalledTimes(1);
 
+    // The root effect also loads the providers store once at startup (bug A),
+    // so the seeded spy is already called once from mount.
+    expect(load).toHaveBeenCalledTimes(1);
+
     // Switching between destinations must NOT open a second subscription or
     // tear down the existing one.
     fireEvent.click(screen.getByRole("button", { name: /History/ }));
@@ -224,11 +248,20 @@ describe("<App />", () => {
     expect(listen).toHaveBeenCalledTimes(1);
     expect(unlisten).not.toHaveBeenCalled();
 
+    // Beyond the startup load, opening Settings above mounted ProviderKeysSection
+    // (the default "Providers & Keys" section), whose own mount effect calls the
+    // providers store's load() once. That mount-load is orthogonal to the event
+    // fan-out under test, so capture the current count right before dispatching
+    // the event rather than hardcoding a total; the test then asserts purely
+    // that the providersChanged event drives EXACTLY ONE additional refetch.
+    const before = load.mock.calls.length;
+
     // The registered handler dispatches to every store; a providersChanged
-    // event drives the providers store to refetch its models.
+    // event drives the providers store to refetch its models (one more load
+    // beyond whatever startup + navigation already triggered).
     const handler = listen.mock.calls[0][1] as (event: { payload: unknown }) => void;
     handler({ payload: { type: "providersChanged" } });
-    expect(load).toHaveBeenCalled();
+    expect(load).toHaveBeenCalledTimes(before + 1);
   });
 
   it("tears down the subscription on unmount", async () => {

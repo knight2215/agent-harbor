@@ -18,11 +18,12 @@
 //!
 //! Most variants are now constructed by the pipeline and the tauri-app event
 //! bridge (message/conversation-update events by the streaming pipeline, MCP
-//! and permission events by the tauri-app commands). The four still-unemitted
+//! and permission events by the tauri-app commands, and `ProvidersChanged` by
+//! the provider-config mutation commands). The three still-unemitted
 //! lifecycle/selector variants (`ConversationCreated`, `ConversationDeleted`,
-//! `ProvidersChanged`, `PersonasChanged`) carry a per-variant
-//! `#[allow(dead_code)]` to keep clippy `-D warnings` clean until the surfaces
-//! that emit them land; drop each one as its emitter is wired.
+//! `PersonasChanged`) carry a per-variant `#[allow(dead_code)]` to keep clippy
+//! `-D warnings` clean until the surfaces that emit them land; drop each one as
+//! its emitter is wired.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -116,7 +117,9 @@ pub enum CoreEvent {
         rationale: String,
     },
     /// The set or availability of providers/models changed (Section 8.2).
-    #[allow(dead_code)] // no emitter wired yet (provider/model selector surface)
+    /// Emitted by the tauri-app provider-config mutation commands (set/clear
+    /// cloud provider, set/clear local runtime, and the embedded-model
+    /// import/select/load/unload) so the model-selector store refetches.
     ProvidersChanged,
     /// The set of personas changed (Section 8.4).
     #[allow(dead_code)] // no emitter wired yet (persona selector surface)

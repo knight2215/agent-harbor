@@ -866,6 +866,16 @@ body {
   color: var(--ah-text);
 }
 
+/*
+ * The always-available "Refresh models" affordance sits at the trailing edge of
+ * the header so it stays unobtrusive next to the picker. It re-runs
+ * list_available_models via the providers store so the user can re-enumerate on
+ * demand (e.g. after starting a local runtime or saving a key).
+ */
+.per-message-override__refresh {
+  margin-left: auto;
+}
+
 /* --- Responsive sidebar --------------------------------------------------- */
 
 /*
