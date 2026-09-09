@@ -59,6 +59,9 @@ export function ProviderKeysSection() {
   // on mount from `list_cloud_providers`), so they survive unmount/remount
   // instead of a UI-only marker.
   const [providers, setProviders] = useState<CloudProviderConfig[]>([]);
+  // `warning` holds the last non-blocking base-url advisory (e.g. a non-loopback
+  // plaintext http:// Kiro endpoint recommending TLS); `error` holds a rejection.
+  const [warning, setWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   // Kiro (genericOpenAI) has no default endpoint, so its base URL is required
@@ -89,6 +92,7 @@ export function ProviderKeysSection() {
   };
 
   const save = () => {
+    setWarning(null);
     setError(null);
     if (secret === "") {
       setError("An API key is required.");
@@ -100,12 +104,14 @@ export function ProviderKeysSection() {
       return;
     }
     // A blocked/invalid base URL (or any backend validation error) surfaces in
-    // the error region; the key is stored server-side as an opaque SecretRef and
-    // never comes back.
+    // the error region; an accepted plaintext non-loopback base URL resolves
+    // with a non-blocking warning recommending TLS. The key is stored
+    // server-side as an opaque SecretRef and never comes back.
     setCloudProvider(kind, secret, trimmedBaseUrl === "" ? null : trimmedBaseUrl)
       .then((config) => {
         upsertProvider(config);
         setSecret("");
+        if (config.warning !== null) setWarning(config.warning);
         // Re-enumerate so any error from the just-configured provider surfaces.
         void loadProviders();
       })
@@ -117,11 +123,13 @@ export function ProviderKeysSection() {
     setKind(config.kind as CloudKind);
     setBaseUrl(config.baseUrl ?? "");
     setSecret("");
+    setWarning(null);
     setError(null);
   };
 
   // Remove a configured provider, then refresh the list from the backend.
   const clearProvider = (target: CloudKind) => {
+    setWarning(null);
     setError(null);
     clearCloudProvider(target)
       .then(() => listCloudProviders())
@@ -201,6 +209,11 @@ export function ProviderKeysSection() {
               </li>
             ))}
           </ul>
+        )}
+        {warning !== null && (
+          <p className="settings__section-desc" role="status" data-testid="cloud-provider-warning">
+            {warning}
+          </p>
         )}
         {error !== null && (
           <p className="settings__section-desc" role="alert">

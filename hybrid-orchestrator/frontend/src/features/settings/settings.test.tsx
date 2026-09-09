@@ -85,6 +85,7 @@ describe("Settings", () => {
           kind: "openAI",
           baseUrl: null,
           hasApiKey: true,
+          warning: null,
         });
       }
       return Promise.resolve([]);
@@ -117,6 +118,7 @@ describe("Settings", () => {
           kind: "genericOpenAI",
           baseUrl: "https://kiro.example.com/v1",
           hasApiKey: true,
+          warning: null,
         });
       }
       return Promise.resolve([]);
@@ -148,11 +150,43 @@ describe("Settings", () => {
     expect(await screen.findByTestId("provider-key-configured-genericOpenAI")).toBeInTheDocument();
   });
 
+  it("displays the backend warning for an accepted plaintext non-loopback Kiro URL", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_cloud_providers") return Promise.resolve([]);
+      if (cmd === "set_cloud_provider") {
+        return Promise.resolve({
+          id: "generic-openai-cloud",
+          kind: "genericOpenAI",
+          baseUrl: "http://example.com/v1",
+          hasApiKey: true,
+          warning: "This endpoint uses plaintext http over a non-loopback address.",
+        });
+      }
+      return Promise.resolve([]);
+    });
+    render(<Settings />);
+
+    // Select Kiro and save with a plaintext, non-loopback base URL.
+    fireEvent.change(screen.getByLabelText("Provider"), { target: { value: "genericOpenAI" } });
+    fireEvent.change(screen.getByLabelText("API key"), { target: { value: "sk-kiro" } });
+    fireEvent.change(screen.getByLabelText("Base URL"), {
+      target: { value: "http://example.com/v1" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save key" }));
+
+    // The advisory is shown (role="status", distinct from the error region)
+    // without blocking the save (the provider is still configured).
+    expect(await screen.findByTestId("cloud-provider-warning")).toHaveTextContent(
+      "This endpoint uses plaintext http over a non-loopback address.",
+    );
+    expect(await screen.findByTestId("provider-key-configured-genericOpenAI")).toBeInTheDocument();
+  });
+
   it("rehydrates configured cloud providers on mount and persists across unmount/remount", async () => {
     invoke.mockImplementation((cmd: string) => {
       if (cmd === "list_cloud_providers") {
         return Promise.resolve([
-          { id: "gemini-cloud", kind: "gemini", baseUrl: null, hasApiKey: true },
+          { id: "gemini-cloud", kind: "gemini", baseUrl: null, hasApiKey: true, warning: null },
         ]);
       }
       return Promise.resolve([]);

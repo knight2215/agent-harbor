@@ -232,13 +232,16 @@ export interface LocalRuntimeConfig {
  * commands. Mirrors Rust `commands::CloudProviderConfigView`. `hasApiKey`
  * reports only WHETHER a key is stored (as an opaque {@link SecretRef}), never
  * the key itself; `baseUrl` is the persisted endpoint override (null when the
- * adapter's default is used, always present for the Kiro/genericOpenAI kind).
+ * adapter's default is used, always present for the Kiro/genericOpenAI kind);
+ * `warning` carries the optional display-safe base-url advisory from the
+ * backend's `check_provider_base_url` validation (null when there is none).
  */
 export interface CloudProviderConfig {
   id: string;
   kind: ProviderKind;
   baseUrl: string | null;
   hasApiKey: boolean;
+  warning: string | null;
 }
 
 /**

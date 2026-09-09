@@ -1024,7 +1024,9 @@ fn cloud_provider_config_id(kind: ProviderKind) -> Option<&'static str> {
 /// only non-secret fields (Section 9.1): the plaintext API key and any resolved
 /// secret NEVER cross this boundary. `has_api_key` reports only WHETHER a key is
 /// stored (as an opaque [`SecretRef`]), never the key itself; `base_url` is the
-/// persisted endpoint override (`None` when the adapter's default is used).
+/// persisted endpoint override (`None` when the adapter's default is used);
+/// `warning` carries the optional display-safe base_url advisory from
+/// [`check_provider_base_url`].
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudProviderConfigView {
@@ -1037,6 +1039,9 @@ pub struct CloudProviderConfigView {
     pub base_url: Option<String>,
     /// Whether an API key is stored (as an opaque `SecretRef`), never the key.
     pub has_api_key: bool,
+    /// Optional display-safe advisory (e.g. non-loopback plaintext HTTP), only
+    /// surfaced on the write path; `None` when rehydrating existing rows.
+    pub warning: Option<String>,
 }
 
 /// Persist (upsert) a user-configured cloud provider: a hosted provider the
@@ -1072,7 +1077,8 @@ pub async fn set_cloud_provider(
 /// [`CommandError::invalid`]; (2) requires a non-empty `api_key` within
 /// [`MAX_SECRET_LEN`] (cloud providers always need a key); (3) requires a
 /// non-empty `base_url` for GenericOpenAI (Kiro) and validates any provided
-/// `base_url` via [`check_provider_base_url`]; (4) stores the key through the
+/// `base_url` via [`check_provider_base_url`], capturing its optional
+/// display-safe advisory into the view; (4) stores the key through the
 /// same secret store as [`set_provider_secret`], keeping only the opaque
 /// [`SecretRef`]; and (5) upserts the [`ProviderConfig`] by its stable per-kind
 /// id (get -> update | insert), so re-saving the same kind never duplicates the
@@ -1103,11 +1109,14 @@ async fn set_cloud_provider_inner(
     // (3) GenericOpenAI (Kiro) has no default endpoint, so a base_url is
     // REQUIRED; the other cloud kinds default their base_url when None. Any
     // provided base_url is trimmed and validated through the Section 9.3
-    // posture before anything is persisted (a Blocked target errors here).
+    // posture before anything is persisted (a Blocked target errors here); an
+    // accepted non-loopback plaintext HTTP endpoint yields a display-safe
+    // advisory carried back in the view (parity with `set_local_runtime`).
+    let mut warning = None;
     let base_url = match base_url.map(str::trim) {
         Some(url) if !url.is_empty() => {
             validate_nonempty("baseUrl", url, MAX_BASE_URL_LEN)?;
-            check_provider_base_url(url)?;
+            warning = check_provider_base_url(url)?;
             Some(url.to_string())
         }
         _ => {
@@ -1159,6 +1168,7 @@ async fn set_cloud_provider_inner(
         kind,
         base_url,
         has_api_key: true,
+        warning,
     })
 }
 
@@ -1176,8 +1186,8 @@ pub async fn list_cloud_providers(
 /// The full body of [`list_cloud_providers`], factored out for direct testing.
 /// It loads every persisted [`ProviderConfig`], keeps only the cloud kinds
 /// addressed by their stable per-kind id, and maps each to a display-safe
-/// [`CloudProviderConfigView`] (`has_api_key` reflects whether the row has a
-/// stored `SecretRef`).
+/// [`CloudProviderConfigView`] (`warning` is `None` when rehydrating an existing
+/// row; `has_api_key` reflects whether the row has a stored `SecretRef`).
 async fn list_cloud_providers_inner(
     state: &AppState,
 ) -> Result<Vec<CloudProviderConfigView>, CommandError> {
@@ -1193,6 +1203,7 @@ async fn list_cloud_providers_inner(
             kind: cfg.kind,
             base_url: cfg.base_url,
             has_api_key: cfg.api_key_ref.is_some(),
+            warning: None,
         })
         .collect();
     Ok(views)
@@ -3930,6 +3941,8 @@ mod tests {
             Some("https://kiro.example.com/v1")
         );
         assert!(view.has_api_key);
+        // A TLS endpoint carries no advisory.
+        assert!(view.warning.is_none());
 
         let configs = ProviderRepo::new(state.session_manager.db())
             .list()
@@ -3941,6 +3954,57 @@ mod tests {
             .unwrap();
         assert_eq!(row.kind, ProviderKind::GenericOpenAI);
         assert_eq!(row.base_url.as_deref(), Some("https://kiro.example.com/v1"));
+    }
+
+    /// A cloud provider (Kiro / GenericOpenAI) configured with a non-loopback
+    /// plaintext http base_url is accepted but carries a display-safe advisory
+    /// recommending TLS (parity with `set_local_runtime`); a loopback/TLS
+    /// base_url carries none. The advisory NEVER echoes the key material.
+    #[tokio::test]
+    async fn set_cloud_provider_inner_surfaces_plaintext_warning() {
+        let state = test_state().await;
+        let plaintext = "sk-kiro-do-not-leak-1234";
+
+        // Non-loopback plaintext http endpoint: accepted with a warning.
+        let view = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            plaintext,
+            Some("http://example.com/v1"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            view.warning.is_some(),
+            "a non-loopback plaintext endpoint must carry a warning"
+        );
+        // The advisory (and the whole serialized view) never carries the key.
+        let warning = view.warning.as_deref().unwrap();
+        assert!(!warning.contains(plaintext));
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains(plaintext));
+
+        // A loopback base_url carries no advisory.
+        let loopback = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            plaintext,
+            Some("http://127.0.0.1:1234/v1"),
+        )
+        .await
+        .unwrap();
+        assert!(loopback.warning.is_none());
+
+        // A TLS base_url carries no advisory.
+        let tls = set_cloud_provider_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            plaintext,
+            Some("https://example.com/v1"),
+        )
+        .await
+        .unwrap();
+        assert!(tls.warning.is_none());
     }
 
     /// `list_cloud_providers_inner` returns the configured cloud rows after a
