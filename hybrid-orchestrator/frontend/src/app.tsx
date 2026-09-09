@@ -20,7 +20,8 @@
 // unmount. The SAME effect also triggers the providers store's `load()` once at
 // startup (Section 8.2) so the chat model picker is populated on launch without
 // the user first opening Settings; a `providersChanged` CoreEvent (emitted by
-// the provider-config mutation commands) then refetches it on demand. The status footer surfaces the real app version, read at runtime via
+// the provider-config mutation commands) then refetches it on demand. The
+// status footer surfaces the real app version, read at runtime via
 // `@tauri-apps/api/app` getVersion() (which reads tauri.conf.json), so it stays
 // in sync with the shipped build without any hardcoding.
 
