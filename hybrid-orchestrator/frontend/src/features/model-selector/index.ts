@@ -7,6 +7,8 @@
 export { AutoRationaleTooltip } from "./AutoRationaleTooltip";
 export type { AutoRationaleTooltipProps } from "./AutoRationaleTooltip";
 export { PerMessageOverrideControl } from "./PerMessageOverrideControl";
+export { ProviderEnumerationErrors } from "./ProviderEnumerationErrors";
+export type { ProviderEnumerationErrorsProps } from "./ProviderEnumerationErrors";
 export { ProviderModelPicker } from "./ProviderModelPicker";
 export type { ProviderModelPickerProps } from "./ProviderModelPicker";
 export { RoutingModeToggle } from "./RoutingModeToggle";

@@ -7,12 +7,18 @@
 
 import { create } from "zustand";
 import { listAvailableModels } from "../ipc/commands";
-import type { AvailableModel, CoreEvent } from "../types";
+import type { AvailableModel, CoreEvent, ProviderEnumerationError } from "../types";
 
 export interface ProvidersState {
   /** Available models across all configured providers. */
   models: AvailableModel[];
-  /** Load the available models from the core. */
+  /**
+   * Per-provider enumeration failures (display-safe), so the UI can show why a
+   * misconfigured or unreachable provider contributed no models. Empty when
+   * every configured provider enumerated successfully.
+   */
+  errors: ProviderEnumerationError[];
+  /** Load the available models (and enumeration errors) from the core. */
   load: () => Promise<void>;
   /** Apply a CoreEvent: refetch on `providersChanged`. */
   applyCoreEvent: (event: CoreEvent) => void;
@@ -20,10 +26,11 @@ export interface ProvidersState {
 
 export const useProvidersStore = create<ProvidersState>((set, get) => ({
   models: [],
+  errors: [],
 
   load: async () => {
-    const models = await listAvailableModels();
-    set({ models });
+    const result = await listAvailableModels();
+    set({ models: result.models ?? [], errors: result.errors ?? [] });
   },
 
   applyCoreEvent: (event) => {

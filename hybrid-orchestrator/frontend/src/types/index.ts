@@ -270,6 +270,36 @@ export interface AvailableModel {
 }
 
 /**
+ * One provider instance that could not be enumerated, surfaced by
+ * `list_available_models` so a misconfigured or unreachable provider is
+ * diagnosable instead of silently contributing nothing. Mirrors Rust
+ * `providers::ProviderEnumerationError` (architecture.md Section 8.2).
+ *
+ * DISPLAY-SAFE: carries only the configured provider instance id and the
+ * provider error's message, never secret material (Section 9.1 / 9.2).
+ */
+export interface ProviderEnumerationError {
+  providerId: string;
+  message: string;
+}
+
+/**
+ * The combined result of the `list_available_models` command: the successfully
+ * enumerated models plus a display-safe list of per-provider enumeration
+ * errors. Mirrors Rust `providers::AvailableModelsResult` (Section 8.2).
+ * Enumeration is fault-tolerant, so `models` and `errors` can both be non-empty
+ * at once: a single failing provider populates `errors` while the healthy
+ * providers still populate `models`.
+ *
+ * DISPLAY-SAFE: neither the model rows nor the error messages carry secret
+ * material (Section 9.1 / 9.2).
+ */
+export interface AvailableModelsResult {
+  models: AvailableModel[];
+  errors: ProviderEnumerationError[];
+}
+
+/**
  * A display-safe view of one imported embedded (local `.gguf`) model (Strategy
  * B / FEAT-002). Mirrors Rust `commands::EmbeddedModelView`. Carries only the
  * model id and its on-disk path; never secret material (the embedded engine

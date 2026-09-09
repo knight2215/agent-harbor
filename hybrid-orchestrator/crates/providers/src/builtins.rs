@@ -165,6 +165,41 @@ pub struct AvailableModel {
     pub price: TokenPrice,
 }
 
+/// A single provider instance that could not be enumerated, surfaced to the UI
+/// so a misconfigured or unreachable provider is diagnosable instead of silently
+/// contributing nothing (architecture.md Section 8.2 model selector diagnostics).
+///
+/// DISPLAY-SAFE: this crosses the Tauri IPC boundary. It carries only the
+/// configured provider instance id and the [`ProviderError`]'s Display string.
+/// Every [`ProviderError`] variant (Transport/HttpStatus/Decode/Auth/Other) is
+/// display-safe and never carries resolved secret or key material (Section 9.1 /
+/// 9.2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderEnumerationError {
+    /// The configured provider instance id (`ProviderConfig::id`) that failed.
+    pub provider_id: String,
+    /// The display-safe error message (`ProviderError`'s Display), never secret.
+    pub message: String,
+}
+
+/// The combined result of [`list_available_models`]: the successfully enumerated
+/// models plus a display-safe list of per-provider enumeration errors
+/// (architecture.md Section 8.2). Enumeration is fault-tolerant, so both vecs can
+/// be non-empty at once: a single failing provider populates `errors` while the
+/// healthy providers still populate `models`.
+///
+/// DISPLAY-SAFE: this is the exact shape that crosses the Tauri IPC boundary; it
+/// carries no secret material (Section 9.1 / 9.2).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableModelsResult {
+    /// Every selectable model across all healthy provider instances.
+    pub models: Vec<AvailableModel>,
+    /// Per-provider enumeration failures (display-safe), empty when all healthy.
+    pub errors: Vec<ProviderEnumerationError>,
+}
+
 /// Construct a [`ProviderRegistry`] with every built-in [`ProviderFactory`]
 /// registered, one per [`ProviderKind`] (architecture.md Section 4.5). No
 /// instances are built yet; call [`ProviderRegistry::build_all`] (or
@@ -213,7 +248,10 @@ where
 /// Enumeration is fault-tolerant: an instance whose `list_models` errors (for
 /// example an unreachable or misconfigured local endpoint) is skipped rather
 /// than aborting the whole call, so one offline provider degrades gracefully
-/// and the remaining providers still populate the picker.
+/// and the remaining providers still populate the picker. Instead of swallowing
+/// the failure to stderr, the failing provider's id and display-safe error are
+/// collected into [`AvailableModelsResult::errors`] so the UI can tell the user
+/// why a provider contributed nothing.
 ///
 /// Because it drives the trait method, tests inject a fake [`ChatProvider`]
 /// whose `list_models` returns a fixed list, so no live network is required.
@@ -221,8 +259,9 @@ pub async fn list_available_models(
     registry: &ProviderRegistry,
     configs: &[ProviderConfig],
     pricing: &PricingTable,
-) -> Result<Vec<AvailableModel>, ProviderError> {
-    let mut out = Vec::new();
+) -> Result<AvailableModelsResult, ProviderError> {
+    let mut models_out = Vec::new();
+    let mut errors_out = Vec::new();
     for cfg in configs {
         let Some(instance) = registry.get(&cfg.id) else {
             // No live instance for this config row (e.g. build was skipped);
@@ -235,23 +274,22 @@ pub async fn list_available_models(
                 // This provider could not be enumerated (e.g. an unreachable
                 // local endpoint, a bad key, or a wrong URL); skip it so the
                 // rest of the picker still populates instead of blanking the
-                // entire list. Emit the provider id and the error to stderr
-                // (the codebase's existing lightweight logging facility; no new
-                // dependency) so a genuine misconfiguration is diagnosable
-                // rather than silently indistinguishable from an offline
-                // endpoint. DISPLAY-SAFE: only the config id and the provider
-                // error are logged, never any resolved secret or key material.
-                eprintln!(
-                    "provider '{}' could not be enumerated and was skipped: {err}",
-                    cfg.id
-                );
+                // entire list, and record the failure so the UI can surface why
+                // this provider contributed nothing. DISPLAY-SAFE: only the
+                // config id and the provider error's Display string are kept,
+                // never any resolved secret or key material (every
+                // ProviderError variant is display-safe).
+                errors_out.push(ProviderEnumerationError {
+                    provider_id: cfg.id.clone(),
+                    message: err.to_string(),
+                });
                 continue;
             }
         };
         for model in models {
             let capabilities = instance.capabilities(&model.id);
             let price = pricing.price_for(cfg.kind, &model.id);
-            out.push(AvailableModel {
+            models_out.push(AvailableModel {
                 provider_id: cfg.id.clone(),
                 model: model.id,
                 capabilities,
@@ -259,7 +297,10 @@ pub async fn list_available_models(
             });
         }
     }
-    Ok(out)
+    Ok(AvailableModelsResult {
+        models: models_out,
+        errors: errors_out,
+    })
 }
 
 #[cfg(test)]
@@ -409,9 +450,12 @@ mod tests {
         ];
         let pricing = PricingTable::bundled_defaults();
 
-        let mut models = list_available_models(&registry, &configs, &pricing)
+        let result = list_available_models(&registry, &configs, &pricing)
             .await
             .unwrap();
+        // All providers enumerated successfully, so there are no errors.
+        assert!(result.errors.is_empty());
+        let mut models = result.models;
         models.sort_by(|a, b| {
             (a.provider_id.clone(), a.model.clone()).cmp(&(b.provider_id.clone(), b.model.clone()))
         });
@@ -452,16 +496,18 @@ mod tests {
             list_models_errors: false,
         }));
         // No config row references "ghost", so nothing is listed.
-        let out = list_available_models(&registry, &[], &PricingTable::new())
+        let result = list_available_models(&registry, &[], &PricingTable::new())
             .await
             .unwrap();
-        assert!(out.is_empty());
+        assert!(result.models.is_empty());
+        assert!(result.errors.is_empty());
     }
 
     /// A single provider whose `list_models` errors (an unreachable/offline
     /// local endpoint) is skipped rather than aborting the whole enumeration:
     /// `list_available_models` still returns the healthy provider's models and
-    /// does not error. This proves the softened, fault-tolerant loop.
+    /// does not error, and captures the failing provider's id and a display-safe
+    /// message in the errors vec. This proves the softened, fault-tolerant loop.
     #[tokio::test]
     async fn enumeration_skips_a_provider_that_errors_and_returns_the_rest() {
         let mut registry = builtin_registry();
@@ -486,16 +532,34 @@ mod tests {
             config("offline-local", ProviderKind::LmStudio),
         ];
 
-        let models = list_available_models(&registry, &configs, &PricingTable::new())
+        let result = list_available_models(&registry, &configs, &PricingTable::new())
             .await
             .expect("one failing provider must not abort the whole enumeration");
 
         // Only the healthy provider's model is returned; the failing one is
-        // silently skipped.
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].provider_id, "healthy");
-        assert_eq!(models[0].model, "gpt-4o");
-        assert!(!models.iter().any(|m| m.provider_id == "offline-local"));
+        // skipped from the models list.
+        assert_eq!(result.models.len(), 1);
+        assert_eq!(result.models[0].provider_id, "healthy");
+        assert_eq!(result.models[0].model, "gpt-4o");
+        assert!(!result
+            .models
+            .iter()
+            .any(|m| m.provider_id == "offline-local"));
+
+        // The failing provider is captured as a display-safe enumeration error
+        // with a non-empty message and its config id.
+        assert_eq!(result.errors.len(), 1);
+        let err = &result.errors[0];
+        assert_eq!(err.provider_id, "offline-local");
+        assert!(!err.message.is_empty());
+
+        // DISPLAY-SAFE: the serialized error uses camelCase and never carries
+        // secret/key material.
+        let json = serde_json::to_string(&result.errors).unwrap();
+        assert!(json.contains("\"providerId\""));
+        assert!(json.contains("\"message\""));
+        assert!(!json.contains("apiKey"));
+        assert!(!json.contains("secret"));
     }
 
     #[test]

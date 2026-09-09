@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AgentPersona,
-  AvailableModel,
+  AvailableModelsResult,
   Conversation,
   EmbeddedModelStatus,
   EmbeddedModelView,
@@ -124,11 +124,14 @@ export function deletePersona(personaId: string): Promise<void> {
 /**
  * List every available model across all configured providers, with per-model
  * capabilities and price, for the model selector (architecture.md Section 8.2).
- * DISPLAY-SAFE: the rows never carry secret material. Backed by
- * `list_available_models`.
+ * Returns both the successfully enumerated models and a display-safe list of
+ * per-provider enumeration errors, so the UI can show why a misconfigured or
+ * unreachable provider contributed nothing without blanking the picker.
+ * DISPLAY-SAFE: neither the model rows nor the error messages carry secret
+ * material. Backed by `list_available_models`.
  */
-export function listAvailableModels(): Promise<AvailableModel[]> {
-  return invoke<AvailableModel[]>("list_available_models");
+export function listAvailableModels(): Promise<AvailableModelsResult> {
+  return invoke<AvailableModelsResult>("list_available_models");
 }
 
 /**

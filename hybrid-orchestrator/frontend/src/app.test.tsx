@@ -32,8 +32,9 @@ function routeInvoke(command: string): unknown {
     case "list_conversations":
     case "list_personas":
     case "list_mcp_servers":
-    case "list_available_models":
       return [];
+    case "list_available_models":
+      return { models: [], errors: [] };
     default:
       return undefined;
   }

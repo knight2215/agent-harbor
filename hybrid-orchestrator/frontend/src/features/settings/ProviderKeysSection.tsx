@@ -18,8 +18,10 @@
 // mirror app.tsx's guarded `window.localStorage` try/catch pattern so a
 // constrained/private-mode environment degrades gracefully instead of throwing.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { ProviderEnumerationErrors } from "../model-selector/ProviderEnumerationErrors";
 import { setProviderSecret } from "../../ipc/commands";
+import { useProvidersStore } from "../../state/providers";
 import type { SecretRef } from "../../types";
 
 /** localStorage key persisting the non-secret map of configured provider refs. */
@@ -61,6 +63,16 @@ export function ProviderKeysSection() {
   const [configured, setConfigured] = useState<ConfiguredProviders>(readConfiguredProviders);
   const [error, setError] = useState<string | null>(null);
 
+  // Surface per-provider enumeration failures from the providers store so a user
+  // who just added a key sees WHY a provider still contributed no models
+  // (display-safe; never secret material). Refresh on mount so the list reflects
+  // the current provider configuration when this section is opened.
+  const enumerationErrors = useProvidersStore((s) => s.errors);
+  const loadProviders = useProvidersStore((s) => s.load);
+  useEffect(() => {
+    void loadProviders();
+  }, [loadProviders]);
+
   const save = () => {
     setError(null);
     const id = providerId.trim();
@@ -79,6 +91,8 @@ export function ProviderKeysSection() {
           return next;
         });
         setSecret("");
+        // Re-enumerate so any error from the just-configured provider surfaces.
+        void loadProviders();
       })
       .catch(() => setError("Failed to store the key."));
   };
@@ -132,6 +146,7 @@ export function ProviderKeysSection() {
             {error}
           </p>
         )}
+        <ProviderEnumerationErrors errors={enumerationErrors} />
       </div>
     </section>
   );

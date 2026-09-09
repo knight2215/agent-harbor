@@ -22,7 +22,10 @@ use orchestrator_core::{
 };
 use persistence::config::{AppConfig, PricingConfig};
 use persistence::{McpServerRepo, ProviderRepo};
-use providers::{list_available_models as list_models, AvailableModel, PricingTable, TokenPrice};
+use providers::{
+    list_available_models as list_models, AvailableModel, AvailableModelsResult, PricingTable,
+    TokenPrice,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
@@ -433,16 +436,21 @@ fn set_provider_secret_inner(
 ///
 /// It assembles the built-in provider registry from the persisted
 /// [`ProviderConfig`] rows and the pricing table from the versioned
-/// [`AppConfig`] (Section 6.2), then returns `Vec<`[`AvailableModel`]`>`.
+/// [`AppConfig`] (Section 6.2), then returns an [`AvailableModelsResult`]
+/// carrying both the successful [`AvailableModel`] rows and a display-safe list
+/// of per-provider enumeration errors so the UI can show why a misconfigured or
+/// unreachable provider contributed nothing (Section 8.2). A single failing
+/// provider never blanks the successful results.
 ///
-/// DISPLAY-SAFE (Section 9.1 / 9.2): the returned rows carry ONLY
-/// provider/model/capabilities/price labels. No secret material and no resolved
-/// [`SecretRef`] value ever crosses this boundary; secrets are resolved only
-/// inside the registry when it builds an instance, and stay there.
+/// DISPLAY-SAFE (Section 9.1 / 9.2): both the model rows and the enumeration
+/// error messages carry ONLY provider/model/capabilities/price/error labels. No
+/// secret material and no resolved [`SecretRef`] value ever crosses this
+/// boundary; secrets are resolved only inside the registry when it builds an
+/// instance, and stay there.
 #[tauri::command]
 pub async fn list_available_models(
     state: tauri::State<'_, AppState>,
-) -> Result<Vec<AvailableModel>, CommandError> {
+) -> Result<AvailableModelsResult, CommandError> {
     list_available_models_inner(&state).await
 }
 
@@ -452,13 +460,14 @@ pub async fn list_available_models(
 /// enumerates models.
 ///
 /// This is what enforces the DISPLAY-SAFE invariant: it returns only
-/// [`AvailableModel`] rows built from the provider/model/capabilities/price
-/// surface, never touching `SecretStore::resolve` for the return value. A
-/// regression that leaked secret material into the result would fail
+/// [`AvailableModel`] rows and display-safe enumeration error messages built
+/// from the provider/model/capabilities/price surface, never touching
+/// `SecretStore::resolve` for the return value. A regression that leaked secret
+/// material into the result would fail
 /// `list_available_models_inner_returns_display_safe_rows` below.
 async fn list_available_models_inner(
     state: &AppState,
-) -> Result<Vec<AvailableModel>, CommandError> {
+) -> Result<AvailableModelsResult, CommandError> {
     let db = state.session_manager.db();
 
     // Auto-seed the Ollama provider-config row (idempotent) BEFORE reading the
@@ -1044,9 +1053,12 @@ async fn send_message_inner(
     let pricing = pricing_table_from_config(&app_config.pricing);
     let registry = providers::build_registry(configs.iter(), state.secret_store.as_ref())
         .map_err(|e| CommandError::internal(e.to_string()))?;
+    // Routing only needs the successful model candidates; enumeration errors are
+    // surfaced through the `list_available_models` command's UI, not routing.
     let available = list_models(&registry, &configs, &pricing)
         .await
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+        .map_err(|e| CommandError::internal(e.to_string()))?
+        .models;
     // The provably-local provider ids (from each row's concrete ProviderKind),
     // so routing enforces LocalOnly/Confidential on provable locality rather
     // than a zero price (Section 6.2 fail-closed).
@@ -2210,8 +2222,8 @@ mod tests {
     #[tokio::test]
     async fn list_available_models_inner_empty_when_no_providers() {
         let state = test_state().await;
-        let models = list_available_models_inner(&state).await.unwrap();
-        assert!(models.is_empty());
+        let result = list_available_models_inner(&state).await.unwrap();
+        assert!(result.models.is_empty());
     }
 
     /// The persisted pricing config converts into the in-memory pricing table:
@@ -2896,8 +2908,8 @@ mod tests {
         assert_eq!(secret_ref, SecretRef::new("openai"));
 
         // The model list handler body returns display-safe rows with no secret.
-        let models = list_available_models_inner(&state).await.unwrap();
-        let json = serde_json::to_string(&models).unwrap();
+        let result = list_available_models_inner(&state).await.unwrap();
+        let json = serde_json::to_string(&result).unwrap();
         assert!(
             !json.contains(plaintext),
             "list_available_models must not surface stored secret material"
@@ -3049,6 +3061,7 @@ mod tests {
         assert!(list_available_models_inner(&state)
             .await
             .unwrap()
+            .models
             .iter()
             .all(|m| m.provider_id != EMBEDDED_PROVIDER_ID));
 
@@ -3063,7 +3076,7 @@ mod tests {
 
         // The imported model now appears as a zero-priced AvailableModel under
         // the embedded provider id, so the picker groups it under Local.
-        let models = list_available_models_inner(&state).await.unwrap();
+        let models = list_available_models_inner(&state).await.unwrap().models;
         let embedded: Vec<_> = models
             .iter()
             .filter(|m| m.provider_id == EMBEDDED_PROVIDER_ID)
@@ -3154,7 +3167,21 @@ mod tests {
     async fn list_available_models_auto_seeds_ollama_provider_config() {
         let state = test_state().await;
         // Enumerate as the picker does; this must not error even with no Ollama.
-        let _ = list_available_models_inner(&state).await.unwrap();
+        let result = list_available_models_inner(&state).await.unwrap();
+        // No Ollama server is running in the test, so the auto-seeded row cannot
+        // be enumerated: its failure is surfaced as a display-safe enumeration
+        // error (instead of being silently swallowed) so the UI can explain why
+        // no local models appeared. The message never carries secret material.
+        let ollama_err = result
+            .errors
+            .iter()
+            .find(|e| e.provider_id == OLLAMA_PROVIDER_ID)
+            .expect("the unreachable seeded Ollama row must surface an enumeration error");
+        assert!(!ollama_err.message.is_empty());
+        let err_json = serde_json::to_string(&result.errors).unwrap();
+        assert!(err_json.contains("\"providerId\""));
+        assert!(!err_json.to_lowercase().contains("apikey"));
+        assert!(!err_json.to_lowercase().contains("secretref"));
         let configs = ProviderRepo::new(state.session_manager.db())
             .list()
             .await

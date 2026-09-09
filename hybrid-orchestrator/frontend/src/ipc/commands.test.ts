@@ -143,10 +143,16 @@ describe("ipc/commands wrappers", () => {
     });
   });
 
-  it("listAvailableModels invokes list_available_models", async () => {
-    invoke.mockResolvedValue([]);
-    await listAvailableModels();
+  it("listAvailableModels invokes list_available_models and returns models + errors", async () => {
+    invoke.mockResolvedValue({
+      models: [],
+      errors: [{ providerId: "ollama-local", message: "transport error" }],
+    });
+    const result = await listAvailableModels();
     expect(invoke).toHaveBeenCalledWith("list_available_models");
+    expect(result.models).toEqual([]);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].providerId).toBe("ollama-local");
   });
 
   it("getMessages forwards conversationId", async () => {

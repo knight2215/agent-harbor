@@ -168,7 +168,8 @@ async fn demo_provider_surfaces_as_available_model() {
     let pricing = PricingTable::bundled_defaults();
     let models = list_available_models(&registry, &configs, &pricing)
         .await
-        .expect("list_available_models drives the demo provider");
+        .expect("list_available_models drives the demo provider")
+        .models;
 
     let ids: Vec<&str> = models.iter().map(|m| m.model.as_str()).collect();
     assert!(
@@ -202,7 +203,8 @@ async fn demo_provider_via_insert_instance_surfaces() {
     let cfg = demo_config("demo-inserted");
     let models = list_available_models(&registry, &[cfg], &PricingTable::new())
         .await
-        .expect("list_available_models drives the inserted demo provider");
+        .expect("list_available_models drives the inserted demo provider")
+        .models;
     assert_eq!(models.len(), 2);
     assert!(models.iter().all(|m| m.provider_id == "demo-inserted"));
 }
