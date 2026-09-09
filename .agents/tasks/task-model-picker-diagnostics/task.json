@@ -1,0 +1,16 @@
+{
+  "task_id": "task-model-picker-diagnostics",
+  "status_note_ignore": "status set to completed after verification + APPROVED semantic review",
+  "task_description": "Diagnostics-first fix for the persistent 'No models available yet' with no error and no models on the user's built Windows app. Primary deliverable: make the app self-report what actually happens on the model-enumeration load path (a visible, copyable Settings 'Diagnostics' section + chat status line, fed by a new display-safe provider_diagnostics backend command). Secondary: fix the two invisible clean-empty causes traced in the load path - (backend) a configured provider row with no built instance is silently skipped in providers::list_available_models, and (frontend) the providers store load() swallows an IPC throw leaving models:[]/errors:[] with no signal - and stop a single un-buildable provider row from aborting the whole enumeration. Investigation + instrumentation, NOT another blind adapter tweak: do NOT change the Ollama IPv4 default or cloud-registration logic. Update the spec/README. Committed on branch feat/model-picker-diagnostics-selfreport; do NOT push/tag/PR.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
+  "blocked_reason": null,
+  "verification": {
+    "build": "skipped",
+    "tests": "skipped",
+    "test_quality": "pass",
+    "docker_build": "skipped",
+    "semantic_review": "v1 APPROVED (2026-09-09-185504-review.md). Four non-blocking observations; addressed #1 (drift risk) in a post-review hardening refactor (commit d006ecf) so provider_diagnostics now derives its per-provider report from the SAME shared providers::list_available_models the picker uses, making the mirror structural. #2 (send_message still fail-fast) is pre-existing and out of scope; #3/#4 are informational.",
+    "summary": "INTEGRATIONS_ONLY sandbox: cargo build/test/clippy (crates.io 403) and vitest/eslint/tsc (npm 403, node_modules not installable) cannot run offline and are deferred to GitHub CI (orchestrator drives). Offline gates that DID run and pass: cargo fmt --check for crates/providers and crates/tauri-app (both exit 0, no diff); prettier --check on frontend src (all files clean). Test-quality review: PASS. The backend regression test a_config_row_without_a_built_instance_is_recorded_as_an_error exercises the invisible-skip fix and would fail if reverted (an unbuilt row would yield 0 errors); provider_diagnostics_inner_reports_seeded_ollama_row drives the new command end-to-end asserting instanceBuilt/modelCount/error and camelCase display-safe shape; the frontend providers.test.ts rejection test mocks an IPC rejection and asserts load() does not throw and sets loadState 'failed'+lastError, which would fail against the old void-swallowing code; settings.test.tsx exercises the Diagnostics section loaded/failed/refresh paths. Note: DiagnosticsSection's mount useEffect references a component-scope run() with empty deps, which react-hooks/exhaustive-deps flags as a WARNING; the frontend lint step is `eslint .` with no --max-warnings 0, so this does not fail CI (confirmed against package.json)."
+  }
+}
