@@ -52,11 +52,21 @@ pub enum CoreEvent {
     /// Assistant`, `streaming`), so the frontend can seed a placeholder keyed on
     /// `messageId` before any delta arrives. Without it the deltas reference an
     /// id the store has never seen and are dropped.
+    ///
+    /// `text` carries the message's initial content when it is already known at
+    /// announce time. It is populated for the persisted USER message (whose full
+    /// text exists before any streaming begins) so the chat surface can show the
+    /// user's own words immediately on send, and is `None` for the assistant
+    /// reply (which arrives via subsequent [`CoreEvent::MessageDelta`] chunks).
+    /// The field is optional and omitted from the wire when absent, so the event
+    /// stays backward compatible with any consumer that predates it.
     #[serde(rename_all = "camelCase")]
     MessageStarted {
         conversation_id: Uuid,
         message_id: Uuid,
         role: Role,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
     },
     /// A chunk of streamed assistant output (Section 7.4). `delta` is the new
     /// text appended to the message identified by `messageId`.
@@ -149,18 +159,54 @@ mod tests {
 
     #[test]
     fn message_started_round_trips_camel_case() {
+        // The assistant announcement carries no `text` (it streams via deltas),
+        // so the optional field is omitted from the wire entirely.
         let ev = CoreEvent::MessageStarted {
             conversation_id: Uuid::nil(),
             message_id: Uuid::nil(),
             role: Role::Assistant,
+            text: None,
         };
         let json = serde_json::to_string(&ev).unwrap();
         assert!(json.contains("\"type\":\"messageStarted\""));
         assert!(json.contains("\"conversationId\""));
         assert!(json.contains("\"messageId\""));
         assert!(json.contains("\"role\":\"assistant\""));
+        // `skip_serializing_if = "Option::is_none"` keeps `text` off the wire
+        // when absent, so a consumer predating the field is unaffected.
+        assert!(!json.contains("\"text\""));
         let back: CoreEvent = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, CoreEvent::MessageStarted { .. }));
+        assert!(matches!(back, CoreEvent::MessageStarted { text: None, .. }));
+    }
+
+    #[test]
+    fn message_started_carries_user_text_when_present() {
+        // The persisted USER message announces its full text so the chat surface
+        // can render the user's own words immediately on send (Bug 2 fix). The
+        // camelCase `text` field then appears on the wire and round-trips.
+        let ev = CoreEvent::MessageStarted {
+            conversation_id: Uuid::nil(),
+            message_id: Uuid::nil(),
+            role: Role::User,
+            text: Some("hello".to_string()),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"role\":\"user\""));
+        assert!(json.contains("\"text\":\"hello\""));
+        let back: CoreEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            CoreEvent::MessageStarted { text: Some(t), .. } if t == "hello"
+        ));
+    }
+
+    #[test]
+    fn message_started_deserializes_without_text_field() {
+        // Backward compatibility: an event emitted before the `text` field was
+        // added (no `text` key at all) still deserializes, defaulting to None.
+        let json = r#"{"type":"messageStarted","conversationId":"00000000-0000-0000-0000-000000000000","messageId":"00000000-0000-0000-0000-000000000000","role":"assistant"}"#;
+        let back: CoreEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(back, CoreEvent::MessageStarted { text: None, .. }));
     }
 
     #[test]
@@ -203,6 +249,7 @@ mod tests {
                 conversation_id: Uuid::nil(),
                 message_id: Uuid::nil(),
                 role: Role::Assistant,
+                text: None,
             },
             CoreEvent::MessageDelta {
                 conversation_id: Uuid::nil(),

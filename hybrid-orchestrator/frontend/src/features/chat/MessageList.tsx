@@ -22,9 +22,27 @@ export function MessageList() {
   const messages = useConversationsStore((s) => s.messages);
   const openConversation = useConversationsStore((s) => s.openConversation);
   const endRef = useRef<HTMLDivElement>(null);
+  // The id this effect last loaded history for. Guards against re-running the
+  // `get_messages` reload for a conversation this surface already loaded (Bug
+  // 1 / Bug 2): every entry point that flips `activeConversationId` non-null
+  // (WelcomeScreen `openConversation`, the sidebar / History `resumeConversation`)
+  // ALREADY loads the messages, so an unconditional mount-effect reload here is
+  // redundant. Worse, when it fires right after a send it re-runs `get_messages`
+  // which can resolve mid-turn - before the assistant row (or even the user row)
+  // is persisted - and its `set({ messages })` would clobber the freshly seeded
+  // user/assistant placeholders and any accumulated deltas. Reloading ONLY on a
+  // genuine switch to an id we have not loaded yet keeps the on-demand load for
+  // a directly-activated conversation while never duplicating or blanking the
+  // create-then-open-then-send flow.
+  const loadedForRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (activeConversationId === null) return;
+    if (activeConversationId === null) {
+      loadedForRef.current = null;
+      return;
+    }
+    if (loadedForRef.current === activeConversationId) return;
+    loadedForRef.current = activeConversationId;
     void openConversation(activeConversationId);
   }, [activeConversationId, openConversation]);
 

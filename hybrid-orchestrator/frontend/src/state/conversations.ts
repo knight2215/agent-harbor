@@ -227,13 +227,24 @@ function appendDelta(messages: Message[], messageId: string, delta: string): Mes
  * surface shows the message before any delta arrives (architecture.md Section
  * 7.4). The user message lands `complete`; the assistant reply lands
  * `streaming` and accumulates deltas.
+ *
+ * `text` seeds the message content when the event carries it. The pipeline
+ * announces the persisted USER message WITH its full text (there is no user
+ * streaming), so the user's own words are visible immediately on send instead
+ * of an empty bubble that no delta ever fills (Bug 2). The assistant reply
+ * announces no text and seeds empty, then accumulates via `messageDelta`.
  */
-function placeholderMessage(conversationId: string, messageId: string, role: Role): Message {
+function placeholderMessage(
+  conversationId: string,
+  messageId: string,
+  role: Role,
+  text?: string,
+): Message {
   return {
     id: messageId,
     conversationId,
     role,
-    content: { type: "text", text: "" },
+    content: { type: "text", text: text ?? "" },
     createdAt: new Date().toISOString(),
     route: null,
     usage: null,
@@ -288,7 +299,22 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
 
   createConversation: async (title) => {
     const conversation = await createConversationCmd(title ? { title } : {});
-    set((state) => ({ conversations: [...state.conversations, conversation] }));
+    // UPSERT by id rather than a blind append (Bug 1). The core is
+    // authoritative (Section 7.3): the very same conversation also arrives
+    // through `loadConversations` when the pipeline emits `conversationUpdated`
+    // on the first message persist. A blind append plus that refetch could
+    // otherwise surface the freshly created "New Conversation" TWICE (once from
+    // the local append, once from a list that has not yet converged). Replacing
+    // the row when present - and only appending when genuinely new - keeps
+    // exactly one row for the created conversation regardless of ordering.
+    set((state) => {
+      const present = state.conversations.some((c) => c.id === conversation.id);
+      return {
+        conversations: present
+          ? state.conversations.map((c) => (c.id === conversation.id ? conversation : c))
+          : [...state.conversations, conversation],
+      };
+    });
     return conversation;
   },
 
@@ -359,7 +385,16 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
     if (source.conversationPref !== null) {
       seeded = await setConversationRouteCmd(created.id, source.conversationPref);
     }
-    set((state) => ({ conversations: [...state.conversations, seeded] }));
+    // Upsert by id (see createConversation): keep exactly one row for the new
+    // conversation even if a refetch has already surfaced it.
+    set((state) => {
+      const present = state.conversations.some((c) => c.id === seeded.id);
+      return {
+        conversations: present
+          ? state.conversations.map((c) => (c.id === seeded.id ? seeded : c))
+          : [...state.conversations, seeded],
+      };
+    });
     return seeded;
   },
 
@@ -447,7 +482,7 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
           return {
             messages: [
               ...state.messages,
-              placeholderMessage(event.conversationId, event.messageId, event.role),
+              placeholderMessage(event.conversationId, event.messageId, event.role, event.text),
             ],
           };
         });

@@ -380,13 +380,21 @@ describe("conversations store", () => {
 
     const apply = useConversationsStore.getState().applyCoreEvent;
 
-    // The persisted user message is announced first (complete placeholder).
-    apply({ type: "messageStarted", conversationId: "c-1", messageId: "u-1", role: "user" });
+    // The persisted user message is announced first (complete placeholder),
+    // carrying its text so the user's own words are visible immediately (Bug 2).
+    apply({
+      type: "messageStarted",
+      conversationId: "c-1",
+      messageId: "u-1",
+      role: "user",
+      text: "hello",
+    });
     expect(useConversationsStore.getState().messages).toHaveLength(1);
     expect(useConversationsStore.getState().messages[0]).toMatchObject({
       id: "u-1",
       role: "user",
       status: "complete",
+      content: { type: "text", text: "hello" },
     });
 
     // Then the streaming assistant placeholder, before any delta.
@@ -482,7 +490,13 @@ describe("conversations store", () => {
     useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });
     const apply = useConversationsStore.getState().applyCoreEvent;
 
-    apply({ type: "messageStarted", conversationId: "c-1", messageId: "u-1", role: "user" });
+    apply({
+      type: "messageStarted",
+      conversationId: "c-1",
+      messageId: "u-1",
+      role: "user",
+      text: "hello",
+    });
     // conversationUpdated after the user persist — must not schedule a refetch.
     apply({ type: "conversationUpdated", conversationId: "c-1" });
     apply({ type: "messageStarted", conversationId: "c-1", messageId: "a-1", role: "assistant" });
@@ -555,6 +569,104 @@ describe("conversations store", () => {
     });
     expect(result.conversationPref).toEqual({ providerId: "openai", model: "gpt-4o" });
     expect(useConversationsStore.getState().conversations.map((c) => c.id)).toContain("c-2");
+  });
+
+  it("createConversation then send invokes create_conversation exactly once (Bug 1)", async () => {
+    // Bug 1: creating a conversation and then sending a message must create
+    // exactly ONE conversation. The store's createConversation upserts the
+    // returned row (rather than blindly appending), so a subsequent
+    // loadConversations refetch - which the pipeline triggers via
+    // conversationUpdated after the first message persist - reconciles to the
+    // SAME single row instead of surfacing a duplicate "New Conversation".
+    const created = conversation("c-1", "New Conversation");
+    invoke.mockImplementation((command: string) => {
+      if (command === "create_conversation") return Promise.resolve(created);
+      if (command === "list_conversations") return Promise.resolve([created]);
+      // send_message resolves with no value; get_messages is unused here.
+      return Promise.resolve(undefined);
+    });
+
+    const store = useConversationsStore.getState();
+    await store.createConversation();
+    // The pipeline's post-persist refresh (conversationUpdated) refetches the
+    // index; the row already present must not be duplicated.
+    store.applyCoreEvent({ type: "conversationUpdated", conversationId: "c-1" });
+    await Promise.resolve();
+    await Promise.resolve();
+    // The active send path itself never creates a conversation.
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    await useConversationsStore.getState().sendMessage("hello");
+
+    const creates = invoke.mock.calls.filter((c) => c[0] === "create_conversation");
+    expect(creates).toHaveLength(1);
+    // Exactly one conversation row, no duplicate.
+    expect(useConversationsStore.getState().conversations).toHaveLength(1);
+    expect(useConversationsStore.getState().conversations[0].id).toBe("c-1");
+  });
+
+  it("createConversation upserts rather than duplicating an already-listed row (Bug 1)", async () => {
+    // If a refetch has already surfaced the conversation (e.g. a fast
+    // conversationCreated/updated event), createConversation must reconcile the
+    // existing row in place, not append a second one.
+    const created = conversation("c-1", "New Conversation");
+    useConversationsStore.setState({ conversations: [created] });
+    invoke.mockResolvedValue(created);
+    await useConversationsStore.getState().createConversation();
+    expect(useConversationsStore.getState().conversations).toHaveLength(1);
+  });
+
+  it("messageStarted for a user message seeds its text; a later reload does not blank it (Bug 2)", async () => {
+    // Bug 2: the pipeline announces the persisted USER message via messageStarted
+    // carrying its text (no user streaming). The placeholder must seed that text
+    // so the user's own words are visible immediately on send, and a subsequent
+    // get_messages reload (openConversation) that returns the persisted user row
+    // must keep the text - never blank the bubble.
+    useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });
+    const apply = useConversationsStore.getState().applyCoreEvent;
+    apply({
+      type: "messageStarted",
+      conversationId: "c-1",
+      messageId: "u-1",
+      role: "user",
+      text: "hello",
+    });
+    const seeded = useConversationsStore.getState().messages;
+    expect(seeded).toHaveLength(1);
+    expect(seeded[0]).toMatchObject({
+      id: "u-1",
+      role: "user",
+      status: "complete",
+      content: { type: "text", text: "hello" },
+    });
+
+    // A reload of the conversation returns the persisted user row with its text.
+    invoke.mockResolvedValue([
+      {
+        id: "u-1",
+        conversationId: "c-1",
+        role: "user",
+        content: { type: "text", text: "hello" },
+        createdAt: "2024-01-01T00:00:00Z",
+        route: null,
+        usage: null,
+        status: "complete",
+      } satisfies Message,
+    ]);
+    await useConversationsStore.getState().openConversation("c-1");
+    const reloaded = useConversationsStore.getState().messages;
+    expect(reloaded).toHaveLength(1);
+    expect(reloaded[0].content).toEqual({ type: "text", text: "hello" });
+  });
+
+  it("messageStarted for an assistant message seeds empty and streams via deltas", () => {
+    // The assistant announcement carries no text; it seeds an empty streaming
+    // placeholder that subsequent deltas fill.
+    useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });
+    const apply = useConversationsStore.getState().applyCoreEvent;
+    apply({ type: "messageStarted", conversationId: "c-1", messageId: "a-1", role: "assistant" });
+    const seeded = useConversationsStore.getState().messages[0];
+    expect(seeded).toMatchObject({ id: "a-1", role: "assistant", status: "streaming" });
+    expect(seeded.content).toEqual({ type: "text", text: "" });
   });
 
   it("exportConversation delegates to the export_conversation command", async () => {

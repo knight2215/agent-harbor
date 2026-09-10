@@ -422,4 +422,160 @@ describe("<App />", () => {
     unmount();
     await waitFor(() => expect(unlisten).toHaveBeenCalled());
   });
+
+  // --- FEAT-001: single conversation on first send (Bug 1) -----------------
+
+  it("Welcome -> New conversation -> send creates exactly ONE conversation and shows one row", async () => {
+    // Bug 1 repro: starting a fresh conversation from the Welcome screen and
+    // then typing the first message must create exactly ONE conversation and
+    // show exactly ONE row in the sidebar list - never a duplicate "New
+    // conversation". The flow drives the real create/open/reload + send
+    // lifecycle: WelcomeScreen.start (create_conversation + open_conversation),
+    // the MessageList mount reload (get_messages), the send (send_message), and
+    // the pipeline's conversationUpdated -> loadConversations refetch that the
+    // core emits after the first message persist.
+    //
+    // Once the conversation is created the core lists it, so the refetch
+    // triggered by conversationUpdated returns the SINGLE persisted row (the
+    // real backend behavior). Model this by returning the created conversation
+    // from list_conversations for the remainder of the flow.
+    const createdRow = {
+      id: "c-new",
+      title: "New conversation",
+      createdAt: "2024-01-01T00:00:00Z",
+      updatedAt: "2024-01-01T00:00:01Z",
+      personaId: null,
+      conversationPref: null,
+      routingMode: null,
+      privacyTags: [],
+      enabledToolServers: [],
+    };
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_conversations") return Promise.resolve([createdRow]);
+      return Promise.resolve(routeInvoke(command));
+    });
+    render(<App />);
+
+    // Welcome is shown until a conversation is active.
+    const welcome = screen.getByRole("region", { name: "Welcome" });
+    fireEvent.click(within(welcome).getByRole("button", { name: "New conversation" }));
+
+    // The chat surface appears once the created conversation is opened.
+    expect(await screen.findByRole("region", { name: "Chat" })).toBeInTheDocument();
+
+    // Type the first message and send it.
+    const input = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("send_message", {
+        conversationId: "c-new",
+        content: "hello",
+        overrideRoute: null,
+      });
+    });
+
+    // Simulate the pipeline's post-persist refresh: the core emits
+    // conversationUpdated after the first message persist, which drives the
+    // store's loadConversations refetch. list_conversations returns the SINGLE
+    // persisted conversation.
+    const handler = listen.mock.calls[0][1] as (event: { payload: unknown }) => void;
+    handler({ payload: { type: "conversationUpdated", conversationId: "c-new" } });
+
+    // Exactly one create_conversation call for the whole flow ...
+    await waitFor(() => {
+      const creates = invoke.mock.calls.filter((c) => c[0] === "create_conversation");
+      expect(creates).toHaveLength(1);
+    });
+
+    // ... and exactly ONE conversation row rendered (the sidebar Conversations
+    // sub-list). A second "New conversation" row would be the Bug 1 regression.
+    await waitFor(() => {
+      const list = screen.getByRole("list", { name: "Conversations" });
+      expect(within(list).getAllByRole("listitem")).toHaveLength(1);
+    });
+  });
+
+  it("a seeded user message survives the MessageList mount reload (not blanked)", async () => {
+    // Bug 2 lifecycle: after the user message is seeded (via messageStarted with
+    // text), the MessageList mount effect must NOT re-run its get_messages
+    // reload and clobber it. Here get_messages resolves to an EMPTY history (the
+    // real mid-turn DB state before rows converge); the guarded reload must not
+    // blank the seeded "hello" bubble. The ref guard in MessageList ensures the
+    // reload runs at most once per conversation, so a second activation-driven
+    // reload cannot wipe the live-seeded message.
+    render(<App />);
+
+    const welcome = screen.getByRole("region", { name: "Welcome" });
+    fireEvent.click(within(welcome).getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByRole("region", { name: "Chat" })).toBeInTheDocument();
+
+    // Seed the user message the way the pipeline does on send.
+    const handler = listen.mock.calls[0][1] as (event: { payload: unknown }) => void;
+    handler({
+      payload: {
+        type: "messageStarted",
+        conversationId: "c-new",
+        messageId: "u-1",
+        role: "user",
+        text: "hello",
+      },
+    });
+
+    const log = await screen.findByRole("log", { name: "Conversation messages" });
+    await waitFor(() => {
+      expect(log.querySelector('[data-role="user"]')?.textContent).toContain("hello");
+    });
+
+    // Flush any pending get_messages microtasks so a stray reload would have
+    // resolved (returning []) and blanked the bubble by now.
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(log.querySelector('[data-role="user"]')?.textContent).toContain("hello");
+  });
+
+  // --- FEAT-001: the user's own message is visible immediately (Bug 2) -----
+
+  it("renders the user's own message text immediately on send (messageStarted carries text)", async () => {
+    // Bug 2 repro: on send, the pipeline announces the persisted USER message
+    // via messageStarted carrying its text. The chat surface must render that
+    // text right away in a data-role="user" bubble instead of an empty bubble.
+    render(<App />);
+
+    const welcome = screen.getByRole("region", { name: "Welcome" });
+    fireEvent.click(within(welcome).getByRole("button", { name: "New conversation" }));
+    expect(await screen.findByRole("region", { name: "Chat" })).toBeInTheDocument();
+
+    const input = (await screen.findByLabelText("Message")) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "hello there" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("send_message", {
+        conversationId: "c-new",
+        content: "hello there",
+        overrideRoute: null,
+      });
+    });
+
+    // The core announces the persisted user message WITH its text.
+    const handler = listen.mock.calls[0][1] as (event: { payload: unknown }) => void;
+    handler({
+      payload: {
+        type: "messageStarted",
+        conversationId: "c-new",
+        messageId: "u-1",
+        role: "user",
+        text: "hello there",
+      },
+    });
+
+    // The user's own words appear in a data-role="user" bubble immediately.
+    const log = await screen.findByRole("log", { name: "Conversation messages" });
+    await waitFor(() => {
+      const userBubble = log.querySelector('[data-role="user"]');
+      expect(userBubble).not.toBeNull();
+      expect(userBubble?.textContent).toContain("hello there");
+    });
+  });
 });

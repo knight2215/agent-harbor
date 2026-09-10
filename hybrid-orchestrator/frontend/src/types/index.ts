@@ -579,7 +579,20 @@ export interface OpenedConversation {
  * (ids, deltas, statuses, rationales), never secrets or credentials.
  */
 export type CoreEvent =
-  | { type: "messageStarted"; conversationId: string; messageId: string; role: Role }
+  | {
+      type: "messageStarted";
+      conversationId: string;
+      messageId: string;
+      role: Role;
+      /**
+       * The message's initial text when it is already known at announce time.
+       * Present for the persisted USER message (so the chat surface renders the
+       * user's own words immediately on send); absent for the assistant reply,
+       * which arrives via subsequent `messageDelta` chunks. Optional so the
+       * event stays backward compatible with emitters predating the field.
+       */
+      text?: string;
+    }
   | { type: "messageDelta"; conversationId: string; messageId: string; delta: string }
   | {
       type: "messageComplete";

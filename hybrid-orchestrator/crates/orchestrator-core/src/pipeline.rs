@@ -204,10 +204,15 @@ async fn run_turn_inner(
     //    once the message is persisted (Section 8.5).
     let user_message = user_message(conversation_id, &content);
     let user_message_id = user_message.id;
+    // Announce the user message WITH its text: the full content is already known
+    // (no streaming for the user turn), so the chat surface can render the
+    // user's own words immediately on send rather than seeding an empty bubble
+    // that no delta ever fills.
     let _ = ctx.events.send(CoreEvent::MessageStarted {
         conversation_id,
         message_id: user_message_id,
         role: Role::User,
+        text: Some(content.clone()),
     });
     ctx.session_manager.append_message(user_message).await?;
     let _ = ctx
@@ -221,6 +226,8 @@ async fn run_turn_inner(
         conversation_id,
         message_id: assistant_id,
         role: Role::Assistant,
+        // The assistant reply has no text yet: it streams via MessageDelta.
+        text: None,
     });
 
     let conversation = ctx
