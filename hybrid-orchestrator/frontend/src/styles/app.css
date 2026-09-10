@@ -294,6 +294,18 @@ body {
   cursor: not-allowed;
 }
 
+/* Visible send-failure affordance: a rejected `send_message` emits no
+ * CoreEvents, so this is the only signal that a send failed. */
+.composer__send-error {
+  margin: 0;
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-danger);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-danger);
+  font-size: 13px;
+}
+
 /* --- Segmented routing-mode control --------------------------------------- */
 
 .routing-mode {

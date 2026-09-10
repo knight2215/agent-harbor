@@ -64,17 +64,25 @@ export interface MessageBubbleProps {
 
 export function MessageBubble({ message }: MessageBubbleProps) {
   const streaming = message.status === "streaming";
+  // On error, prefer the stored reason text (the messageError reducer puts the
+  // display-safe reason into the content) and fall back to a generic string
+  // only when there is no text to show.
+  const errorText =
+    message.content.type === "text" && message.content.text.length > 0
+      ? message.content.text
+      : "This message failed to generate.";
   return (
     <article className="message-bubble" data-role={message.role} data-status={message.status}>
       <header className="message-bubble__header">
         <span className="message-bubble__role">{message.role}</span>
         {message.route !== null && <RouteBadge route={message.route} />}
       </header>
-      <ContentBody content={message.content} />
-      {message.status === "error" && (
+      {message.status === "error" ? (
         <p className="message-bubble__error" role="alert">
-          This message failed to generate.
+          {errorText}
         </p>
+      ) : (
+        <ContentBody content={message.content} />
       )}
       {streaming && <StreamingIndicator />}
     </article>

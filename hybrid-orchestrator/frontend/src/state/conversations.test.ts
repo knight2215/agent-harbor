@@ -47,6 +47,8 @@ describe("conversations store", () => {
       messages: [],
       pendingOverride: null,
       pendingPermissions: [],
+      sendState: "idle",
+      sendError: null,
     });
   });
 
@@ -97,7 +99,7 @@ describe("conversations store", () => {
     expect(message.usage?.totalTokens).toBe(3);
   });
 
-  it("messageError marks the message as errored", () => {
+  it("messageError marks the message as errored and carries the reason into an empty placeholder", () => {
     useConversationsStore.setState({
       activeConversationId: "c-1",
       messages: [streamingMessage("m-1", "c-1")],
@@ -108,7 +110,47 @@ describe("conversations store", () => {
       messageId: "m-1",
       message: "boom",
     });
-    expect(useConversationsStore.getState().messages[0].status).toBe("error");
+    const message = useConversationsStore.getState().messages[0];
+    expect(message.status).toBe("error");
+    // The empty streaming placeholder now shows the display-safe reason.
+    expect(message.content).toEqual({ type: "text", text: "boom" });
+  });
+
+  it("messageError preserves an already-streamed reply's text and only flags the error", () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      messages: [
+        { ...streamingMessage("m-1", "c-1"), content: { type: "text", text: "partial reply" } },
+      ],
+    });
+    useConversationsStore.getState().applyCoreEvent({
+      type: "messageError",
+      conversationId: "c-1",
+      messageId: "m-1",
+      message: "finalize failed",
+    });
+    const message = useConversationsStore.getState().messages[0];
+    expect(message.status).toBe("error");
+    // A non-empty streamed reply is NOT clobbered by the error reason.
+    expect(message.content).toEqual({ type: "text", text: "partial reply" });
+  });
+
+  it("messageError appends a visible error bubble when the messageId was never seeded", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });
+    useConversationsStore.getState().applyCoreEvent({
+      type: "messageError",
+      conversationId: "c-1",
+      messageId: "never-seeded",
+      message: "no route available",
+    });
+    const messages = useConversationsStore.getState().messages;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      id: "never-seeded",
+      role: "assistant",
+      status: "error",
+      content: { type: "text", text: "no route available" },
+    });
   });
 
   it("ignores deltas for a non-active conversation", () => {
@@ -208,6 +250,34 @@ describe("conversations store", () => {
       content: "again",
       overrideRoute: null,
     });
+  });
+
+  it("sendMessage captures a rejected send_message into sendState/sendError", async () => {
+    invoke.mockImplementation((command: string) =>
+      command === "send_message"
+        ? Promise.reject(new Error("provider build failed"))
+        : Promise.resolve(undefined),
+    );
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    // The rejection is captured, not thrown: the Composer fires this as
+    // `void sendMessage(...)`, so an escaping rejection would be a silent no-op.
+    await useConversationsStore.getState().sendMessage("hello");
+    const state = useConversationsStore.getState();
+    expect(state.sendState).toBe("failed");
+    expect(state.sendError).toBe("provider build failed");
+  });
+
+  it("sendMessage resets sendState to idle on success and clears a prior error", async () => {
+    // Seed a prior failure, then a successful send must clear it.
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      sendState: "failed",
+      sendError: "old error",
+    });
+    await useConversationsStore.getState().sendMessage("hello");
+    const state = useConversationsStore.getState();
+    expect(state.sendState).toBe("idle");
+    expect(state.sendError).toBeNull();
   });
 
   it("stopGeneration cancels the active conversation's turn", async () => {

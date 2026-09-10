@@ -78,6 +78,8 @@ describe("<App />", () => {
       messages: [],
       pendingOverride: null,
       pendingPermissions: [],
+      sendState: "idle",
+      sendError: null,
     });
     // The providers store is also a module-level singleton. Tests below seed
     // its `models` (and some swap in a spy `load`), so reset it to the real
@@ -175,6 +177,8 @@ describe("<App />", () => {
       messages: [],
       pendingOverride: null,
       pendingPermissions: [],
+      sendState: "idle",
+      sendError: null,
     });
     useProvidersStore.setState({ models: [] });
 
@@ -199,6 +203,8 @@ describe("<App />", () => {
       messages: [],
       pendingOverride: null,
       pendingPermissions: [],
+      sendState: "idle",
+      sendError: null,
     });
     useProvidersStore.setState({ models: [] });
   });
