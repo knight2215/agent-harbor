@@ -50,7 +50,7 @@ function routeInvoke(command: string): unknown {
     case "clear_web_search_provider":
       return undefined;
     case "set_web_search_provider":
-      return { kind: "tavily", hasApiKey: true, maxResults: 5 };
+      return { kind: "tavily", hasApiKey: true, maxResults: 5, baseUrl: null };
     case "list_network_peers":
       // FEAT-006: no LAN peers configured by default.
       return [];

@@ -31,10 +31,11 @@ const KIND_LABELS: Record<WebSearchKind, string> = {
   tavily: "Tavily (recommended)",
   brave: "Brave Search",
   serpApi: "SerpApi",
+  custom: "Custom (your own endpoint)",
 };
 
-/** Dropdown order: Tavily first (the recommended default). */
-const KIND_ORDER: WebSearchKind[] = ["tavily", "brave", "serpApi"];
+/** Dropdown order: Tavily first (the recommended default), Custom last. */
+const KIND_ORDER: WebSearchKind[] = ["tavily", "brave", "serpApi", "custom"];
 
 /** The default result cap the backend applies when none is entered. */
 const DEFAULT_MAX_RESULTS = 5;
@@ -43,6 +44,9 @@ export function WebSearchSection() {
   const [kind, setKind] = useState<WebSearchKind>("tavily");
   const [secret, setSecret] = useState("");
   const [maxResults, setMaxResults] = useState<number>(DEFAULT_MAX_RESULTS);
+  // The custom endpoint URL (the user's OWN provider). Only meaningful for the
+  // `custom` kind; hydrated from config.baseUrl on mount and passed on save.
+  const [endpointUrl, setEndpointUrl] = useState("");
   // The configured provider is the backend source of truth (rehydrated on mount
   // from `get_web_search_config`), so it survives unmount/remount instead of a
   // UI-only marker.
@@ -58,6 +62,7 @@ export function WebSearchSection() {
         if (next !== null) {
           setKind(next.kind);
           setMaxResults(next.maxResults);
+          setEndpointUrl(next.baseUrl ?? "");
         }
       })
       .catch(() => setConfig(null));
@@ -69,13 +74,22 @@ export function WebSearchSection() {
       setError("An API key is required.");
       return;
     }
+    // The custom kind is the user's OWN endpoint, so its URL is required. Mirror
+    // the empty-key guard with a client-side non-empty check before saving.
+    const trimmedUrl = endpointUrl.trim();
+    if (kind === "custom" && trimmedUrl === "") {
+      setError("A search endpoint URL is required for a custom provider.");
+      return;
+    }
     // The key is stored server-side as an opaque SecretRef and never comes back;
-    // the returned view reports only kind / hasApiKey / maxResults.
-    setWebSearchProvider(kind, secret, maxResults)
+    // the returned view reports only kind / hasApiKey / maxResults / baseUrl.
+    // baseUrl is passed only for the custom kind (null otherwise).
+    setWebSearchProvider(kind, secret, maxResults, kind === "custom" ? trimmedUrl : null)
       .then((next) => {
         setConfig(next);
         setKind(next.kind);
         setMaxResults(next.maxResults);
+        setEndpointUrl(next.baseUrl ?? "");
         setSecret("");
       })
       .catch((err: unknown) => setError(String(err)));
@@ -89,6 +103,7 @@ export function WebSearchSection() {
         setSecret("");
         setKind("tavily");
         setMaxResults(DEFAULT_MAX_RESULTS);
+        setEndpointUrl("");
       })
       .catch((err: unknown) => setError(String(err)));
   };
@@ -118,6 +133,23 @@ export function WebSearchSection() {
             ))}
           </select>
         </label>
+        {kind === "custom" && (
+          <label>
+            Search endpoint URL
+            <input
+              type="url"
+              aria-label="Web search endpoint URL"
+              value={endpointUrl}
+              placeholder="https://your-search.example.com"
+              required
+              onChange={(event) => setEndpointUrl(event.target.value)}
+            />
+            <span className="settings__field-help" data-testid="web-search-endpoint-help">
+              Your own search endpoint. It must expose a Tavily-compatible JSON <code>/search</code>{" "}
+              API (a POST returning a <code>results</code> array of title / url / content).
+            </span>
+          </label>
+        )}
         <label>
           API key
           <input
@@ -157,7 +189,15 @@ export function WebSearchSection() {
             <li data-testid={`web-search-configured-${config.kind}`}>
               <span className="settings__list-label">
                 Key configured for <strong>{KIND_LABELS[config.kind]}</strong> ({config.maxResults}{" "}
-                results).
+                results)
+                {config.kind === "custom" && config.baseUrl !== null && (
+                  <>
+                    {" "}
+                    at{" "}
+                    <strong data-testid="web-search-configured-endpoint">{config.baseUrl}</strong>
+                  </>
+                )}
+                .
               </span>
               <button type="button" onClick={clear} data-testid="web-search-clear">
                 Clear

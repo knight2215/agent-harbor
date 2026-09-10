@@ -114,6 +114,15 @@ pub struct WebSearchConfig {
     /// [`DEFAULT_WEB_SEARCH_MAX_RESULTS`]).
     #[serde(default = "default_web_search_max_results")]
     pub max_results: u32,
+    /// The user-supplied custom search endpoint URL, set only when the selected
+    /// provider is the `custom` kind (the user's OWN endpoint, which speaks the
+    /// Tavily JSON `/search` contract). `None` for the preselected backends.
+    /// Additive and forward-compatible: `#[serde(default)]` so a config written
+    /// by an older build (which lacks the field) deserializes to `None`, and it
+    /// is omitted from the serialized JSON when unset. This is a display-safe URL
+    /// only; the API key never lives here (it stays in the keychain).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 impl Default for WebSearchConfig {
@@ -121,15 +130,19 @@ impl Default for WebSearchConfig {
         WebSearchConfig {
             enabled_provider: None,
             max_results: DEFAULT_WEB_SEARCH_MAX_RESULTS,
+            base_url: None,
         }
     }
 }
 
 impl WebSearchConfig {
-    /// Whether this is the untouched default (no provider selected and the
-    /// default result cap), so it can be omitted from the serialized config.
+    /// Whether this is the untouched default (no provider selected, the default
+    /// result cap, and no custom endpoint), so it can be omitted from the
+    /// serialized config.
     pub fn is_default(&self) -> bool {
-        self.enabled_provider.is_none() && self.max_results == DEFAULT_WEB_SEARCH_MAX_RESULTS
+        self.enabled_provider.is_none()
+            && self.max_results == DEFAULT_WEB_SEARCH_MAX_RESULTS
+            && self.base_url.is_none()
     }
 }
 
@@ -440,6 +453,7 @@ mod tests {
             web_search: WebSearchConfig {
                 enabled_provider: Some("tavily".to_string()),
                 max_results: 8,
+                base_url: None,
             },
             ..AppConfig::default()
         };
@@ -451,6 +465,8 @@ mod tests {
             Some("tavily")
         );
         assert_eq!(loaded.web_search.max_results, 8);
+        // A non-custom provider carries no custom endpoint URL.
+        assert!(loaded.web_search.base_url.is_none());
 
         // The web-search config serializes in camelCase (the TS mirror + the
         // provider-kind tag the command layer maps rely on it).
@@ -461,6 +477,59 @@ mod tests {
         // The API key is NEVER part of this config (it lives in the keychain).
         assert!(!json.contains("apiKey"));
         assert!(!json.contains("api_key"));
+        // The base_url is omitted when unset (additive, forward-compatible).
+        assert!(!json.contains("baseUrl"));
+    }
+
+    #[tokio::test]
+    async fn web_search_custom_base_url_round_trips_additively() {
+        // The additive `base_url` persists and rehydrates for the `custom`
+        // provider (the user's own endpoint), and serializes in camelCase.
+        let db = Db::open_in_memory().await.unwrap();
+        let cfg = AppConfig {
+            web_search: WebSearchConfig {
+                enabled_provider: Some("custom".to_string()),
+                max_results: 5,
+                base_url: Some("https://search.example.com".to_string()),
+            },
+            ..AppConfig::default()
+        };
+        cfg.save(&db).await.unwrap();
+
+        let loaded = AppConfig::load(&db).await.unwrap();
+        assert_eq!(
+            loaded.web_search.enabled_provider.as_deref(),
+            Some("custom")
+        );
+        assert_eq!(
+            loaded.web_search.base_url.as_deref(),
+            Some("https://search.example.com")
+        );
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"custom\""));
+        assert!(json.contains("\"baseUrl\""));
+        assert!(json.contains("\"https://search.example.com\""));
+    }
+
+    #[tokio::test]
+    async fn web_search_config_without_base_url_field_deserializes_to_none() {
+        // A config written by an OLDER build lacks the `base_url` field entirely;
+        // it must deserialize to None (backward compatible) rather than error.
+        let db = Db::open_in_memory().await.unwrap();
+        sqlx::query("INSERT INTO app_config (id, schema_version, data) VALUES (1, 1, ?)")
+            .bind(r#"{"schemaVersion":1,"webSearch":{"enabledProvider":"tavily","maxResults":6}}"#)
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let loaded = AppConfig::load(&db).await.unwrap();
+        assert_eq!(
+            loaded.web_search.enabled_provider.as_deref(),
+            Some("tavily")
+        );
+        assert_eq!(loaded.web_search.max_results, 6);
+        assert!(loaded.web_search.base_url.is_none());
     }
 
     #[tokio::test]

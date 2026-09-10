@@ -248,10 +248,12 @@ export interface CloudProviderConfig {
  * The selectable web-search backends (FEAT-004). Mirrors Rust
  * `providers::WebSearchKind` (`#[serde(rename_all = "camelCase")]`): `tavily`
  * (the recommended default), `brave`, and `serpApi` (the latter two are
- * scaffolded backends). A string-literal union so the Settings dropdown and the
- * command wrappers stay exact.
+ * scaffolded backends), and `custom` (the user's OWN endpoint, a
+ * Tavily-JSON-compatible service rooted at a user-entered base URL). A
+ * string-literal union so the Settings dropdown and the command wrappers stay
+ * exact.
  */
-export type WebSearchKind = "tavily" | "brave" | "serpApi";
+export type WebSearchKind = "tavily" | "brave" | "serpApi" | "custom";
 
 /**
  * A display-safe view of the configured web-search provider (FEAT-004),
@@ -264,6 +266,12 @@ export interface WebSearchConfigView {
   kind: WebSearchKind;
   hasApiKey: boolean;
   maxResults: number;
+  /**
+   * The persisted custom endpoint URL when {@link WebSearchConfigView.kind} is
+   * `custom` (the user's OWN endpoint), else `null`. Display-safe: a URL only,
+   * never the key, so the Settings section can rehydrate the entered endpoint.
+   */
+  baseUrl: string | null;
 }
 
 /**

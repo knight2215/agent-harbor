@@ -262,14 +262,22 @@ export function clearCloudProvider(kind: ProviderKind): Promise<void> {
  * overriding how many results a search requests. The plaintext key flows IN and
  * is stored server-side as an opaque {@link SecretRef} under a stable keychain
  * handle; it NEVER comes back across IPC (the returned {@link WebSearchConfigView}
- * only reports `hasApiKey`). Backed by `set_web_search_provider`.
+ * only reports `hasApiKey`). For the `custom` kind, `baseUrl` carries the user's
+ * OWN endpoint URL (required for `custom`, ignored otherwise). Backed by
+ * `set_web_search_provider`.
  */
 export function setWebSearchProvider(
   kind: WebSearchKind,
   apiKey: string,
   maxResults?: number | null,
+  baseUrl?: string | null,
 ): Promise<WebSearchConfigView> {
-  return invoke<WebSearchConfigView>("set_web_search_provider", { kind, apiKey, maxResults });
+  return invoke<WebSearchConfigView>("set_web_search_provider", {
+    kind,
+    apiKey,
+    maxResults,
+    baseUrl,
+  });
 }
 
 /**
