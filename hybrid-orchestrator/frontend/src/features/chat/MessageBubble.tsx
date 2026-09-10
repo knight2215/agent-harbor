@@ -64,11 +64,17 @@ export interface MessageBubbleProps {
 
 export function MessageBubble({ message }: MessageBubbleProps) {
   const streaming = message.status === "streaming";
-  // On error, prefer the stored reason text (the messageError reducer puts the
-  // display-safe reason into the content) and fall back to a generic string
-  // only when there is no text to show.
+  const errored = message.status === "error";
+  // On error, a non-empty text message IS its own reason (the messageError
+  // reducer puts the display-safe reason into the text), so it is rendered once
+  // as a role="alert" paragraph. A NON-text errored message (tool calls / tool
+  // results / attachments) keeps its real content visible via ContentBody, and
+  // an ADDITIONAL role="alert" line carries the generic reason so the failure
+  // is announced without hiding the content. An empty text error shows the
+  // generic string. Exactly one role="alert" element is rendered.
+  const isTextError = errored && message.content.type === "text";
   const errorText =
-    message.content.type === "text" && message.content.text.length > 0
+    isTextError && message.content.type === "text" && message.content.text.length > 0
       ? message.content.text
       : "This message failed to generate.";
   return (
@@ -77,12 +83,22 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         <span className="message-bubble__role">{message.role}</span>
         {message.route !== null && <RouteBadge route={message.route} />}
       </header>
-      {message.status === "error" ? (
+      {isTextError ? (
+        // A text error: render the reason (or generic fallback) once, as the alert.
         <p className="message-bubble__error" role="alert">
           {errorText}
         </p>
       ) : (
-        <ContentBody content={message.content} />
+        <>
+          {/* Non-error, or a non-text error: always show the real content ... */}
+          <ContentBody content={message.content} />
+          {/* ... and, for a non-text error, announce the failure alongside it. */}
+          {errored && (
+            <p className="message-bubble__error" role="alert">
+              This message failed to generate.
+            </p>
+          )}
+        </>
       )}
       {streaming && <StreamingIndicator />}
     </article>

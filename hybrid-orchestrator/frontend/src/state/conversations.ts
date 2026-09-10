@@ -206,7 +206,10 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
 
   openConversation: async (conversationId) => {
     const messages = await getMessages(conversationId);
-    set({ activeConversationId: conversationId, messages });
+    // Reset the global send status on a conversation switch so a stale
+    // "Failed to send" alert from a prior conversation never shows against the
+    // newly opened one (sendState/sendError are store-global, not per-row).
+    set({ activeConversationId: conversationId, messages, sendState: "idle", sendError: null });
   },
 
   resumeConversation: async (conversationId) => {
@@ -222,6 +225,9 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
           : [...state.conversations, conversation],
         activeConversationId: conversation.id,
         messages,
+        // Clear the global send status on the switch (see openConversation).
+        sendState: "idle",
+        sendError: null,
       };
     });
     return conversation;
@@ -249,12 +255,18 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
 
   deleteConversation: async (conversationId) => {
     await deleteConversationCmd(conversationId);
-    set((state) => ({
-      conversations: state.conversations.filter((c) => c.id !== conversationId),
-      activeConversationId:
-        state.activeConversationId === conversationId ? null : state.activeConversationId,
-      messages: state.activeConversationId === conversationId ? [] : state.messages,
-    }));
+    set((state) => {
+      const wasActive = state.activeConversationId === conversationId;
+      return {
+        conversations: state.conversations.filter((c) => c.id !== conversationId),
+        activeConversationId: wasActive ? null : state.activeConversationId,
+        messages: wasActive ? [] : state.messages,
+        // Clearing the active conversation is a switch too: drop any stale send
+        // status so it cannot surface against a different conversation.
+        sendState: wasActive ? "idle" : state.sendState,
+        sendError: wasActive ? null : state.sendError,
+      };
+    });
   },
 
   setConversationRoute: async (conversationId, route) => {

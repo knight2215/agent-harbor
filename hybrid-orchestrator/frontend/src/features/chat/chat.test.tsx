@@ -292,6 +292,28 @@ describe("chat surface", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("This message failed to generate.");
   });
 
+  it("MessageBubble keeps a non-text errored message's content visible alongside the alert", () => {
+    // A tool-call message that errors must still show its actual content (the
+    // tool name) rather than hiding it behind the generic string, and it also
+    // renders exactly ONE role=alert announcing the failure.
+    render(
+      <MessageBubble
+        message={{
+          ...textMessage("m-err3", ""),
+          status: "error",
+          content: {
+            type: "toolCalls",
+            calls: [{ id: "t1", name: "read_file", arguments: { path: "/x" } }],
+          },
+        }}
+      />,
+    );
+    // The real content is preserved (ContentBody rendered).
+    expect(screen.getByText("read_file")).toBeInTheDocument();
+    // And a single alert announces the failure (getByRole throws on multiples).
+    expect(screen.getByRole("alert")).toHaveTextContent("This message failed to generate.");
+  });
+
   it("MessageList appends a visible error bubble for a messageError with no prior placeholder", async () => {
     invoke.mockResolvedValue([]);
     useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });

@@ -67,6 +67,46 @@ describe("conversations store", () => {
     expect(useConversationsStore.getState().messages).toHaveLength(1);
   });
 
+  it("openConversation clears a stale failed send status on the switch", async () => {
+    // A prior send failed and left the global sendState/sendError set. Switching
+    // to another conversation must reset them so no stale "Failed to send" alert
+    // shows against the newly opened conversation.
+    useConversationsStore.setState({ sendState: "failed", sendError: "provider build failed" });
+    invoke.mockResolvedValue([]);
+    await useConversationsStore.getState().openConversation("c-2");
+    const state = useConversationsStore.getState();
+    expect(state.activeConversationId).toBe("c-2");
+    expect(state.sendState).toBe("idle");
+    expect(state.sendError).toBeNull();
+  });
+
+  it("resumeConversation clears a stale failed send status on the switch", async () => {
+    useConversationsStore.setState({ sendState: "failed", sendError: "provider build failed" });
+    invoke.mockResolvedValue({
+      conversation: conversation("c-2"),
+      messages: [],
+    });
+    await useConversationsStore.getState().resumeConversation("c-2");
+    const state = useConversationsStore.getState();
+    expect(state.activeConversationId).toBe("c-2");
+    expect(state.sendState).toBe("idle");
+    expect(state.sendError).toBeNull();
+  });
+
+  it("deleteConversation clears a stale failed send status when the active one is removed", async () => {
+    useConversationsStore.setState({
+      conversations: [conversation("c-1")],
+      activeConversationId: "c-1",
+      sendState: "failed",
+      sendError: "provider build failed",
+    });
+    await useConversationsStore.getState().deleteConversation("c-1");
+    const state = useConversationsStore.getState();
+    expect(state.activeConversationId).toBeNull();
+    expect(state.sendState).toBe("idle");
+    expect(state.sendError).toBeNull();
+  });
+
   it("messageDelta accumulates into the streaming message", () => {
     useConversationsStore.setState({
       activeConversationId: "c-1",
