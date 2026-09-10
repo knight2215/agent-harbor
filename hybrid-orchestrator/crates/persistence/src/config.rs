@@ -141,6 +141,59 @@ impl WebSearchConfig {
 /// core-internally at search time, mirroring the cloud-provider secret path.
 pub const WEB_SEARCH_SECRET_HANDLE: &str = "web-search";
 
+/// The default TCP port the LAN model-sharing server binds to when the user
+/// enables sharing without an explicit port (FEAT-006). Chosen to sit clear of
+/// the common local-inference ports (Ollama 11434, LM Studio 1234) so enabling
+/// the share server on a machine already running one of those does not collide.
+pub const DEFAULT_MODEL_SHARING_PORT: u16 = 11435;
+
+fn default_model_sharing_port() -> u16 {
+    DEFAULT_MODEL_SHARING_PORT
+}
+
+/// User-configured LAN model-sharing settings (FEAT-006). When `enabled`, this
+/// instance runs a small OpenAI-compatible read surface (at minimum
+/// `GET /v1/models`) bound to the LAN on `port`, re-exposing this machine's
+/// local models to peers.
+///
+/// Additive and forward-compatible like [`WebSearchConfig`]: the whole struct is
+/// `#[serde(default)]` on [`AppConfig::model_sharing`], every field defaults, and
+/// it is omitted from the serialized config when it is the default (OFF), so
+/// older configs load unchanged and older builds ignore it via the `extra`
+/// catch-all.
+///
+/// SECURITY POSTURE (Section 9.3): sharing binds to the LAN and re-exposes local
+/// models, so it is OFF BY DEFAULT and the UI states plainly that enabling it
+/// exposes this machine's local models to the local network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSharingConfig {
+    /// Whether the LAN share server is enabled. OFF by default.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The TCP port the share server binds to (default
+    /// [`DEFAULT_MODEL_SHARING_PORT`]).
+    #[serde(default = "default_model_sharing_port")]
+    pub port: u16,
+}
+
+impl Default for ModelSharingConfig {
+    fn default() -> Self {
+        ModelSharingConfig {
+            enabled: false,
+            port: DEFAULT_MODEL_SHARING_PORT,
+        }
+    }
+}
+
+impl ModelSharingConfig {
+    /// Whether this is the untouched default (disabled on the default port), so
+    /// it can be omitted from the serialized config.
+    pub fn is_default(&self) -> bool {
+        !self.enabled && self.port == DEFAULT_MODEL_SHARING_PORT
+    }
+}
+
 /// Application configuration (architecture.md Section 10.4).
 ///
 /// Known fields are typed; any unknown newer fields encountered on load are
@@ -178,6 +231,14 @@ pub struct AppConfig {
     /// [`WEB_SEARCH_SECRET_HANDLE`], never here.
     #[serde(default, skip_serializing_if = "WebSearchConfig::is_default")]
     pub web_search: WebSearchConfig,
+    /// User-configured LAN model sharing (FEAT-006). Additive and
+    /// forward-compatible: `#[serde(default)]` so older configs (and the default
+    /// OFF case) deserialize fine, and it is omitted from the serialized JSON
+    /// when it is the untouched default so older builds are unaffected. Records
+    /// only whether sharing is enabled and on which port; it never carries any
+    /// secret material.
+    #[serde(default, skip_serializing_if = "ModelSharingConfig::is_default")]
+    pub model_sharing: ModelSharingConfig,
     /// Forward-compatibility catch-all: unknown newer fields are preserved here
     /// rather than dropped (Section 10.4).
     #[serde(flatten)]
@@ -197,6 +258,7 @@ impl Default for AppConfig {
             theme: None,
             pricing: PricingConfig::default(),
             web_search: WebSearchConfig::default(),
+            model_sharing: ModelSharingConfig::default(),
             extra: BTreeMap::new(),
         }
     }
@@ -261,6 +323,7 @@ mod tests {
             theme: Some("dark".to_string()),
             pricing: PricingConfig::default(),
             web_search: WebSearchConfig::default(),
+            model_sharing: ModelSharingConfig::default(),
             extra: BTreeMap::new(),
         };
         cfg.save(&db).await.unwrap();
@@ -398,6 +461,45 @@ mod tests {
         // The API key is NEVER part of this config (it lives in the keychain).
         assert!(!json.contains("apiKey"));
         assert!(!json.contains("api_key"));
+    }
+
+    #[tokio::test]
+    async fn default_model_sharing_is_omitted_from_serialized_config() {
+        // The additive model_sharing field must not appear in the serialized
+        // JSON when it is the untouched default (OFF), so older builds (and the
+        // existing round-trip tests) are wholly unaffected by the new field.
+        let cfg = AppConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            !json.contains("modelSharing"),
+            "default model_sharing must be omitted, got: {json}"
+        );
+        assert!(!cfg.model_sharing.enabled);
+        assert_eq!(cfg.model_sharing.port, DEFAULT_MODEL_SHARING_PORT);
+    }
+
+    #[tokio::test]
+    async fn model_sharing_config_round_trips_additively() {
+        let db = Db::open_in_memory().await.unwrap();
+        let cfg = AppConfig {
+            model_sharing: ModelSharingConfig {
+                enabled: true,
+                port: 12345,
+            },
+            ..AppConfig::default()
+        };
+        cfg.save(&db).await.unwrap();
+
+        let loaded = AppConfig::load(&db).await.unwrap();
+        assert!(loaded.model_sharing.enabled);
+        assert_eq!(loaded.model_sharing.port, 12345);
+
+        // The model-sharing config serializes in camelCase (the TS mirror
+        // relies on it).
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"modelSharing\""));
+        assert!(json.contains("\"enabled\""));
+        assert!(json.contains("\"port\""));
     }
 
     #[tokio::test]

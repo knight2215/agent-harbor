@@ -14,6 +14,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use domain::file_context;
 use mcp_client::McpServerHandle;
@@ -23,14 +24,15 @@ use orchestrator_core::{
     ProviderConfig, ProviderKind, RouteSource, RoutingHint, RoutingMode, SecretRef, TurnContext,
 };
 use persistence::config::{
-    AppConfig, PricingConfig, WebSearchConfig, DEFAULT_WEB_SEARCH_MAX_RESULTS,
-    WEB_SEARCH_SECRET_HANDLE,
+    AppConfig, ModelSharingConfig, PricingConfig, WebSearchConfig, DEFAULT_MODEL_SHARING_PORT,
+    DEFAULT_WEB_SEARCH_MAX_RESULTS, WEB_SEARCH_SECRET_HANDLE,
 };
 use persistence::{McpServerRepo, ProviderRepo};
 use providers::{
     list_available_models as list_models,
     list_available_models_with_build_errors as list_models_with_build_errors,
-    AvailableModelsResult, PricingTable, TokenPrice, WebSearchKind, WebSearchOptions,
+    AvailableModelsResult, ModelShareServer, PeerDiscovery, PricingTable, ShareServerStatus,
+    SharedModel, StubPeerDiscovery, TokenPrice, WebSearchKind, WebSearchOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1895,6 +1897,502 @@ async fn run_web_search_inner(
 /// to point the Tavily adapter at a local wiremock server.
 fn web_search_base_url(state: &AppState) -> Option<&str> {
     state.web_search_base_url.as_deref()
+}
+
+// --- Local network (LAN) model sharing (FEAT-006 / Section 9.3) ------------
+
+/// The stable [`ProviderConfig::id`] prefix for a LAN peer configured through
+/// [`add_network_peer`] (FEAT-006). A peer is persisted as an OpenAI-compatible
+/// [`ProviderKind::GenericOpenAI`] row, so this prefix is what tells the peer
+/// commands (and the frontend's picker grouping) a generic-openai row is a LAN
+/// peer rather than a locally-hosted generic runtime ([`local_runtime_config_id`]
+/// = `generic-openai-local`) or a Kiro cloud provider
+/// ([`cloud_provider_config_id`] = `generic-openai-cloud`). Because the id is
+/// distinct from those fixed single-slot ids, a user can configure many peers
+/// alongside a local generic runtime and a Kiro provider without collision.
+const NETWORK_PEER_ID_PREFIX: &str = "network-peer-";
+
+/// Upper bound on a user-supplied peer label (Section 9.2 "bounds").
+const MAX_PEER_LABEL_LEN: usize = 256;
+
+/// Whether a persisted provider row is a LAN peer configured through
+/// [`add_network_peer`]: a [`ProviderKind::GenericOpenAI`] row whose id carries
+/// the [`NETWORK_PEER_ID_PREFIX`]. This is how the peer commands isolate their
+/// rows from the local-generic runtime and Kiro cloud rows (which share the
+/// GenericOpenAI kind but use fixed single-slot ids).
+fn is_network_peer(cfg: &ProviderConfig) -> bool {
+    cfg.kind == ProviderKind::GenericOpenAI && cfg.id.starts_with(NETWORK_PEER_ID_PREFIX)
+}
+
+/// Derive a stable per-peer [`ProviderConfig::id`] from the peer's base_url. A
+/// hash of the (trimmed, lowercased) base_url keeps re-adding the SAME peer
+/// idempotent (it updates the one row instead of inserting a duplicate) while
+/// letting DIFFERENT peers coexist, and keeps the id opaque + free of any
+/// user-entered label/credentials. The [`NETWORK_PEER_ID_PREFIX`] marks it as a
+/// peer for [`is_network_peer`] and the picker grouping.
+fn network_peer_id(base_url: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    base_url.trim().to_ascii_lowercase().hash(&mut hasher);
+    format!("{NETWORK_PEER_ID_PREFIX}{:016x}", hasher.finish())
+}
+
+/// A display-safe view of a configured LAN peer for the webview (FEAT-006).
+/// Carries only non-secret fields (Section 9.1): the optional API key and any
+/// resolved secret NEVER cross this boundary. `has_api_key` reports only WHETHER
+/// a key is stored (as an opaque [`SecretRef`]), never the key itself.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPeerView {
+    /// The stable per-peer config id (see [`network_peer_id`]).
+    pub id: String,
+    /// The user-entered label, or the base_url when no label was given.
+    pub label: String,
+    /// The peer's persisted OpenAI-compatible base_url.
+    pub base_url: String,
+    /// Whether an API key is stored (as an opaque `SecretRef`), never the key.
+    pub has_api_key: bool,
+    /// Optional display-safe base_url advisory (e.g. non-loopback plaintext
+    /// HTTP), surfaced only on the add path; `None` when rehydrating rows.
+    pub warning: Option<String>,
+}
+
+/// Add a LAN peer as a consumable, OpenAI-compatible provider (FEAT-006). The
+/// peer is persisted as a [`ProviderKind::GenericOpenAI`] [`ProviderConfig`] row
+/// pointed at the peer's `host:port` base_url, so its models enumerate and route
+/// EXACTLY like any provider with no pipeline change (they flow through
+/// [`list_available_models`] and the send registry build).
+///
+/// PRIVACY (Section 9.3): a peer is OFF-HOST, so it is NOT provably-local. The
+/// peer row is a `GenericOpenAI` kind with a NON-loopback base_url, so
+/// [`local_provider_ids`] (which only admits a `GenericOpenAI` row whose base_url
+/// is loopback) correctly EXCLUDES it. A LocalOnly/Confidential conversation
+/// therefore never routes to a peer.
+///
+/// `base_url` is REQUIRED and validated through the Section 9.3 posture
+/// ([`check_provider_base_url`]): a Blocked link-local/metadata target rejects;
+/// a non-loopback plaintext target returns the existing TLS warning. The optional
+/// `api_key` is stored as an opaque [`SecretRef`] and never comes back. Tauri
+/// maps the snake_case params to camelCase over the wire (`baseUrl`, `apiKey`).
+#[tauri::command]
+pub async fn add_network_peer(
+    state: tauri::State<'_, AppState>,
+    base_url: String,
+    label: Option<String>,
+    api_key: Option<String>,
+) -> Result<NetworkPeerView, CommandError> {
+    add_network_peer_and_notify(&state, &base_url, label.as_deref(), api_key.as_deref()).await
+}
+
+/// The mutation-plus-notify seam behind [`add_network_peer`]: run the
+/// [`add_network_peer_inner`] body and, only if it succeeds, emit
+/// `ProvidersChanged` so the new peer's models become enumerable immediately in
+/// the picker (mirrors `set_cloud_provider_and_notify`). Fire-and-forget.
+async fn add_network_peer_and_notify(
+    state: &AppState,
+    base_url: &str,
+    label: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<NetworkPeerView, CommandError> {
+    let view = add_network_peer_inner(state, base_url, label, api_key).await?;
+    emit_providers_changed(state);
+    Ok(view)
+}
+
+/// The full validate-then-store-then-upsert body of [`add_network_peer`],
+/// factored out for direct testing without a live Tauri `State` (the established
+/// `_inner` pattern; mirrors [`set_cloud_provider_inner`]).
+///
+/// It (1) trims and requires a non-empty `base_url` within [`MAX_BASE_URL_LEN`]
+/// and validates it via [`check_provider_base_url`] (a Blocked target errors and
+/// persists nothing; a non-loopback plaintext target yields a display-safe
+/// warning); (2) derives a stable per-peer id from the base_url; (3) stores an
+/// optional non-empty `api_key` as an opaque [`SecretRef`] under that id,
+/// deleting any prior secret on a keyless re-add so nothing is orphaned; and (4)
+/// upserts the [`ProviderConfig`] (get -> update | insert), so re-adding the same
+/// peer never duplicates the row. Returns a display-safe [`NetworkPeerView`] and
+/// NEVER the key.
+async fn add_network_peer_inner(
+    state: &AppState,
+    base_url: &str,
+    label: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<NetworkPeerView, CommandError> {
+    // (1) A peer requires an explicit reachable base_url; validate it against
+    // the Section 9.3 posture before anything is persisted.
+    let base_url = base_url.trim();
+    validate_nonempty("baseUrl", base_url, MAX_BASE_URL_LEN)?;
+    let warning = check_provider_base_url(base_url)?;
+
+    // Bound the optional label; fall back to the base_url as the display label.
+    let label = match label.map(str::trim) {
+        Some(l) if !l.is_empty() => {
+            validate_nonempty("label", l, MAX_PEER_LABEL_LEN)?;
+            l.to_string()
+        }
+        _ => base_url.to_string(),
+    };
+
+    // (2) A stable id derived from the base_url makes re-adding the same peer an
+    // idempotent upsert while letting different peers coexist.
+    let id = network_peer_id(base_url);
+
+    let repo = ProviderRepo::new(state.session_manager.db());
+    let existing = repo
+        .get(&id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // (3) Store the optional API key as an opaque SecretRef; on a keyless add,
+    // delete any prior secret so it does not linger unreferenced.
+    let api_key_ref = match api_key {
+        Some(key) if !key.is_empty() => {
+            if key.len() > MAX_SECRET_LEN {
+                return Err(CommandError::invalid(format!(
+                    "`apiKey` exceeds the maximum length of {MAX_SECRET_LEN} bytes"
+                )));
+            }
+            Some(
+                state
+                    .secret_store
+                    .store(&id, key)
+                    .map_err(|e| CommandError::internal(e.to_string()))?,
+            )
+        }
+        _ => {
+            if let Some(prior_ref) = existing.as_ref().and_then(|cfg| cfg.api_key_ref.as_ref()) {
+                state
+                    .secret_store
+                    .delete(prior_ref)
+                    .map_err(|e| CommandError::internal(e.to_string()))?;
+            }
+            None
+        }
+    };
+    let has_api_key = api_key_ref.is_some();
+
+    // (4) Upsert the peer row. The label is persisted in `extra` so it can be
+    // rehydrated by `list_network_peers` (a display-only field, never a secret).
+    let config = ProviderConfig {
+        id: id.clone(),
+        kind: ProviderKind::GenericOpenAI,
+        base_url: Some(base_url.to_string()),
+        api_key_ref,
+        extra: json!({ "label": label }),
+    };
+    if existing.is_some() {
+        repo.update(&config)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
+    } else {
+        repo.insert(&config)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
+    }
+
+    Ok(NetworkPeerView {
+        id,
+        label,
+        base_url: base_url.to_string(),
+        has_api_key,
+        warning,
+    })
+}
+
+/// The display label persisted for a peer in its config `extra`, or the base_url
+/// as a fallback when none was stored (older rows / no label). Display-only.
+fn peer_label(cfg: &ProviderConfig) -> String {
+    cfg.extra
+        .get("label")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| cfg.base_url.clone().unwrap_or_default())
+}
+
+/// List the configured LAN peers so the Network Sharing UI can rehydrate from
+/// the backend source of truth (FEAT-006). Display-safe: each row carries only
+/// id/label/baseUrl/hasApiKey (never the key), and `warning` is always `None`
+/// when rehydrating.
+#[tauri::command]
+pub async fn list_network_peers(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<NetworkPeerView>, CommandError> {
+    list_network_peers_inner(&state).await
+}
+
+/// The full body of [`list_network_peers`], factored out for direct testing. It
+/// loads every persisted [`ProviderConfig`], keeps only the LAN-peer rows
+/// ([`is_network_peer`]), and maps each to a display-safe [`NetworkPeerView`].
+async fn list_network_peers_inner(state: &AppState) -> Result<Vec<NetworkPeerView>, CommandError> {
+    let configs = ProviderRepo::new(state.session_manager.db())
+        .list()
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let views = configs
+        .into_iter()
+        .filter(is_network_peer)
+        .map(|cfg| NetworkPeerView {
+            label: peer_label(&cfg),
+            has_api_key: cfg.api_key_ref.is_some(),
+            base_url: cfg.base_url.unwrap_or_default(),
+            id: cfg.id,
+            warning: None,
+        })
+        .collect();
+    Ok(views)
+}
+
+/// Remove a configured LAN peer by its id (FEAT-006), deleting any stored secret
+/// (Section 9.1 keychain hygiene) and the row. Only a LAN-peer row is
+/// addressable; a non-peer id (or an unknown id) is a no-op after validation.
+#[tauri::command]
+pub async fn remove_network_peer(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), CommandError> {
+    remove_network_peer_and_notify(&state, &id).await
+}
+
+/// The mutation-plus-notify seam behind [`remove_network_peer`]: run the
+/// [`remove_network_peer_inner`] body and, only on success, emit
+/// `ProvidersChanged` so the model selector drops the removed peer's models.
+async fn remove_network_peer_and_notify(state: &AppState, id: &str) -> Result<(), CommandError> {
+    remove_network_peer_inner(state, id).await?;
+    emit_providers_changed(state);
+    Ok(())
+}
+
+/// The full body of [`remove_network_peer`], factored out for direct testing. It
+/// validates the id, confirms the row is a LAN peer (rejecting a non-peer id so
+/// this command cannot delete a local runtime or cloud provider), deletes any
+/// stored secret before the row, then deletes the row; a missing secret/row is a
+/// no-op.
+async fn remove_network_peer_inner(state: &AppState, id: &str) -> Result<(), CommandError> {
+    let id = id.trim();
+    validate_nonempty("id", id, MAX_PROVIDER_ID_LEN)?;
+    let repo = ProviderRepo::new(state.session_manager.db());
+    let existing = repo
+        .get(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    match existing {
+        // Only a LAN-peer row is removable through this command; refuse to touch
+        // a local-runtime or cloud row that happens to share the id space.
+        Some(cfg) if is_network_peer(&cfg) => {
+            if let Some(secret_ref) = cfg.api_key_ref.as_ref() {
+                state
+                    .secret_store
+                    .delete(secret_ref)
+                    .map_err(|e| CommandError::internal(e.to_string()))?;
+            }
+            repo.delete(id)
+                .await
+                .map_err(|e| CommandError::internal(e.to_string()))
+        }
+        Some(_) => Err(CommandError::invalid(
+            "the given id is not a network peer and cannot be removed here",
+        )),
+        // An unknown id is a no-op (idempotent remove).
+        None => Ok(()),
+    }
+}
+
+/// A display-safe view of the LAN model-sharing settings (FEAT-006), returned by
+/// `set_model_sharing` / `get_model_sharing`. Carries the persisted enabled/port
+/// plus a VISIBLE `status` string describing the current serve state (running,
+/// disabled, or a non-fatal reason the port could not be bound) so the UI never
+/// shows a silent success/hang.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSharingView {
+    /// Whether LAN sharing is enabled.
+    pub enabled: bool,
+    /// The configured share-server port.
+    pub port: u16,
+    /// A display-safe status describing the serve state (e.g. "Sharing on port
+    /// 11435", "Sharing is off", or a non-fatal bind-failure reason).
+    pub status: String,
+}
+
+/// Render the display-safe [`ModelSharingView::status`] for a config + serve
+/// outcome. Keeps the visible-status wording in one place.
+fn model_sharing_status(config: &ModelSharingConfig, bind: Option<&ShareServerStatus>) -> String {
+    if !config.enabled {
+        return "Sharing is off. Your local models are not exposed to the network.".to_string();
+    }
+    match bind {
+        Some(ShareServerStatus::Running { port }) => {
+            format!("Sharing your local models on the network (port {port}).")
+        }
+        Some(ShareServerStatus::Unavailable { port, reason }) => format!(
+            "Sharing could not start on port {port}: {reason}. \
+             Pick a different port and try again."
+        ),
+        None => {
+            format!("Sharing is enabled on port {}.", config.port)
+        }
+    }
+}
+
+/// Enable/disable LAN model sharing on a configurable port (FEAT-006). Persists
+/// the additive [`ModelSharingConfig`] and, when enabling, attempts to bind the
+/// share server, returning a VISIBLE status: a bind failure degrades to a
+/// non-fatal message (never a silent hang). The share server re-exposes THIS
+/// instance's local models over an OpenAI-compatible read surface.
+///
+/// SECURITY POSTURE (Section 9.3): sharing binds to the LAN and re-exposes local
+/// models, so it is OFF by default and the UI states this exposes local models to
+/// the local network. Binding to a real LAN interface + peer reachability is
+/// USER-ONLY (the sandbox has no cross-machine network). Tauri maps the port
+/// param over the wire.
+#[tauri::command]
+pub async fn set_model_sharing(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+    port: Option<u16>,
+) -> Result<ModelSharingView, CommandError> {
+    set_model_sharing_inner(&state, enabled, port).await
+}
+
+/// The full persist-then-bind body of [`set_model_sharing`], factored out for
+/// direct testing. It persists the additive [`ModelSharingConfig`] then, when
+/// enabling, attempts a VISIBLE bind (never blocks), mapping the outcome to the
+/// display-safe status. The models the server would expose are gathered from the
+/// on-host local providers via [`local_shared_models`].
+async fn set_model_sharing_inner(
+    state: &AppState,
+    enabled: bool,
+    port: Option<u16>,
+) -> Result<ModelSharingView, CommandError> {
+    let db = state.session_manager.db();
+    let mut config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    let port = match port {
+        // Port 0 is not a stable published port; reject it so the UI shows a
+        // clear error rather than an OS-assigned ephemeral port.
+        Some(0) => return Err(CommandError::invalid("`port` must be between 1 and 65535")),
+        Some(p) => p,
+        None => config.model_sharing.port,
+    };
+    config.model_sharing = ModelSharingConfig { enabled, port };
+    config
+        .save(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // When enabling, attempt a VISIBLE bind so a taken port degrades to a
+    // non-fatal status instead of a silent hang. The full serving loop is
+    // user-only; this seam only surfaces the bind outcome.
+    let bind = if enabled {
+        let models = local_shared_models(state).await?;
+        Some(ModelShareServer::new(port, models).try_bind())
+    } else {
+        None
+    };
+
+    let status = model_sharing_status(&config.model_sharing, bind.as_ref());
+    Ok(ModelSharingView {
+        enabled,
+        port,
+        status,
+    })
+}
+
+/// Report the current LAN model-sharing settings so the Network Sharing UI can
+/// rehydrate (FEAT-006). Does NOT (re)bind the server; it reports the persisted
+/// enabled/port plus a display-safe status.
+#[tauri::command]
+pub async fn get_model_sharing(
+    state: tauri::State<'_, AppState>,
+) -> Result<ModelSharingView, CommandError> {
+    get_model_sharing_inner(&state).await
+}
+
+/// The full body of [`get_model_sharing`], factored out for direct testing.
+async fn get_model_sharing_inner(state: &AppState) -> Result<ModelSharingView, CommandError> {
+    let db = state.session_manager.db();
+    let config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    // Reporting does not (re)bind; the status reflects only the persisted state.
+    let status = model_sharing_status(&config.model_sharing, None);
+    Ok(ModelSharingView {
+        enabled: config.model_sharing.enabled,
+        port: config.model_sharing.port,
+        status,
+    })
+}
+
+/// Gather the ON-HOST local models this instance would re-expose to peers when
+/// sharing is enabled (FEAT-006). It enumerates via [`list_available_models_inner`]
+/// and keeps only the provably-local provider ids ([`local_provider_ids`]), so a
+/// LAN peer (off-host) is NEVER re-shared onward and cloud models are never
+/// exposed. Display-safe: the shared entries carry only model ids.
+async fn local_shared_models(state: &AppState) -> Result<Vec<SharedModel>, CommandError> {
+    let configs = ProviderRepo::new(state.session_manager.db())
+        .list()
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let local_ids = local_provider_ids(&configs);
+    let available = list_available_models_inner(state).await?;
+    let models = available
+        .models
+        .into_iter()
+        .filter(|m| local_ids.contains(&m.provider_id))
+        .map(|m| SharedModel::new(m.model))
+        .collect();
+    Ok(models)
+}
+
+/// A display-safe discovered LAN peer (FEAT-006), returned by
+/// `discover_network_peers`. Carries only a label + base URL the user can
+/// one-click Add as a consume peer; never any secret.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredPeerView {
+    /// A human-friendly label for the discovered peer.
+    pub label: String,
+    /// The peer's OpenAI-compatible base URL to Add.
+    pub base_url: String,
+}
+
+/// The bounded timeout applied to a discovery probe (FEAT-006). Kept short so
+/// the Network Sharing UI's "Discover peers" button never hangs.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+/// Discover LAN peers advertising an OpenAI-compatible endpoint (FEAT-006). Runs
+/// the peer-discovery seam with a bounded timeout and returns display-safe
+/// results the user can one-click Add. Non-fatal: discovery being unavailable
+/// (or finding nothing) returns an EMPTY list rather than an error, and the UI
+/// shows a "no peers found / discovery unavailable" notice.
+///
+/// Live discovery is USER-ONLY: the in-sandbox implementation
+/// ([`StubPeerDiscovery`]) returns empty without error; the real mDNS/UDP probe
+/// is a documented follow-up (no new crate dependency is added in-sandbox).
+#[tauri::command]
+pub async fn discover_network_peers(
+    _state: tauri::State<'_, AppState>,
+) -> Result<Vec<DiscoveredPeerView>, CommandError> {
+    discover_network_peers_inner().await
+}
+
+/// The full body of [`discover_network_peers`], factored out for direct testing.
+/// It maps the discovery seam's [`providers::DiscoveredPeer`]s onto display-safe
+/// [`DiscoveredPeerView`]s. The stub returns empty in-sandbox, exercising the
+/// non-fatal empty path the UI surfaces.
+async fn discover_network_peers_inner() -> Result<Vec<DiscoveredPeerView>, CommandError> {
+    let discovery = StubPeerDiscovery;
+    let peers = discovery.discover(DISCOVERY_TIMEOUT);
+    Ok(peers
+        .into_iter()
+        .map(|p| DiscoveredPeerView {
+            label: p.label,
+            base_url: p.base_url,
+        })
+        .collect())
 }
 
 // --- Message pipeline (P4.6 / Section 2.2 / 8.1) ---------------------------
@@ -5951,5 +6449,245 @@ mod tests {
         let listing = list_repo_files_inner(root, &display).unwrap();
         assert!(listing.truncated);
         assert_eq!(listing.files.len(), file_context::MAX_REPO_ENTRIES);
+    }
+
+    // --- LAN model sharing (FEAT-006) --------------------------------------
+
+    /// `add_network_peer_inner` persists a peer as a GenericOpenAI row with the
+    /// network-peer id prefix, shows it in `list_network_peers_inner`, and
+    /// reflects `has_api_key`. A stored key is kept only as an opaque SecretRef
+    /// (never returned) and is resolvable through the internal seam.
+    #[tokio::test]
+    async fn add_network_peer_persists_lists_and_reflects_has_api_key() {
+        let state = test_state().await;
+
+        // A keyless peer at a remote TLS base_url: persists + lists.
+        let view = add_network_peer_inner(
+            &state,
+            "https://192.168.1.50:11435/v1",
+            Some("Studio box"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(view.id.starts_with(NETWORK_PEER_ID_PREFIX));
+        assert_eq!(view.label, "Studio box");
+        assert_eq!(view.base_url, "https://192.168.1.50:11435/v1");
+        assert!(!view.has_api_key);
+        // Remote TLS => accepted silently, no warning.
+        assert!(view.warning.is_none());
+
+        let peers = list_network_peers_inner(&state).await.unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].id, view.id);
+        assert_eq!(peers[0].label, "Studio box");
+        assert!(!peers[0].has_api_key);
+
+        // A keyed peer stores the key as a SecretRef (never returned) resolvable
+        // only via the internal seam.
+        let keyed = add_network_peer_inner(
+            &state,
+            "https://10.0.0.7:11435/v1",
+            None,
+            Some("peer-secret-key"),
+        )
+        .await
+        .unwrap();
+        assert!(keyed.has_api_key);
+        // No label given -> the base_url is the display label.
+        assert_eq!(keyed.label, "https://10.0.0.7:11435/v1");
+        assert_eq!(
+            state
+                .secret_store
+                .resolve(&SecretRef::new(keyed.id.as_str()))
+                .unwrap(),
+            "peer-secret-key"
+        );
+        // The serialized view NEVER carries the key.
+        let json = serde_json::to_string(&keyed).unwrap();
+        assert!(!json.contains("peer-secret-key"));
+
+        // Re-adding the SAME base_url is an idempotent upsert (no duplicate row).
+        let readd =
+            add_network_peer_inner(&state, "https://10.0.0.7:11435/v1", Some("renamed"), None)
+                .await
+                .unwrap();
+        assert_eq!(readd.id, keyed.id);
+        // The keyless re-add cleared the prior secret so nothing is orphaned.
+        assert!(!readd.has_api_key);
+        assert!(matches!(
+            state
+                .secret_store
+                .resolve(&SecretRef::new(keyed.id.as_str())),
+            Err(SecretError::NotFound(_))
+        ));
+        let peers = list_network_peers_inner(&state).await.unwrap();
+        assert_eq!(peers.len(), 2);
+    }
+
+    /// A peer at a blocked link-local/metadata base_url is REJECTED and nothing
+    /// is persisted (the Section 9.3 posture, reused via check_provider_base_url).
+    #[tokio::test]
+    async fn add_network_peer_rejects_blocked_base_url() {
+        let state = test_state().await;
+        let err = add_network_peer_inner(&state, "http://169.254.169.254/v1", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+        assert!(list_network_peers_inner(&state).await.unwrap().is_empty());
+    }
+
+    /// A peer at a non-loopback PLAINTEXT base_url is accepted but carries the
+    /// existing TLS advisory (parity with set_local_runtime / set_cloud_provider).
+    #[tokio::test]
+    async fn add_network_peer_warns_on_non_loopback_plaintext() {
+        let state = test_state().await;
+        let view = add_network_peer_inner(&state, "http://192.168.1.50:11435/v1", None, None)
+            .await
+            .unwrap();
+        let warning = view
+            .warning
+            .expect("plaintext non-loopback yields a warning");
+        assert!(warning.contains("plaintext"));
+        // Persisted despite the advisory (non-blocking).
+        assert_eq!(list_network_peers_inner(&state).await.unwrap().len(), 1);
+    }
+
+    /// A LAN peer is OFF-HOST: it must NOT satisfy the LocalOnly/Confidential
+    /// privacy gate. A peer is a GenericOpenAI row at a NON-loopback base_url, so
+    /// `local_provider_ids` (which admits GenericOpenAI only at loopback)
+    /// EXCLUDES it. This pins the documented privacy decision.
+    #[tokio::test]
+    async fn network_peer_is_excluded_from_local_provider_ids() {
+        let state = test_state().await;
+        let view = add_network_peer_inner(&state, "https://192.168.1.50:11435/v1", None, None)
+            .await
+            .unwrap();
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let local = local_provider_ids(&configs);
+        assert!(
+            !local.contains(&view.id),
+            "a LAN peer is off-host and must never be treated as provably-local"
+        );
+    }
+
+    /// `remove_network_peer_inner` deletes both the stored secret and the row,
+    /// is idempotent for an unknown id, and refuses to remove a non-peer row.
+    #[tokio::test]
+    async fn remove_network_peer_deletes_secret_and_row() {
+        let state = test_state().await;
+        let view = add_network_peer_inner(
+            &state,
+            "https://10.0.0.7:11435/v1",
+            None,
+            Some("peer-secret-key"),
+        )
+        .await
+        .unwrap();
+        assert!(view.has_api_key);
+
+        remove_network_peer_inner(&state, &view.id).await.unwrap();
+        assert!(list_network_peers_inner(&state).await.unwrap().is_empty());
+        // The secret is gone from the store.
+        assert!(matches!(
+            state
+                .secret_store
+                .resolve(&SecretRef::new(view.id.as_str())),
+            Err(SecretError::NotFound(_))
+        ));
+        // Removing an unknown id is a no-op (idempotent).
+        remove_network_peer_inner(&state, &view.id).await.unwrap();
+
+        // A non-peer row (a cloud provider) cannot be removed through this path.
+        set_cloud_provider_inner(&state, ProviderKind::OpenAI, "sk-test", None)
+            .await
+            .unwrap();
+        let err = remove_network_peer_inner(&state, "openai-cloud")
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+    }
+
+    /// `set_model_sharing_inner` persists the additive config and returns a
+    /// VISIBLE status; `get_model_sharing_inner` rehydrates it. Disabling reports
+    /// the off status; enabling on an ephemeral port reports a running status.
+    #[tokio::test]
+    async fn model_sharing_persists_and_reports_visible_status() {
+        let state = test_state().await;
+
+        // Default (unconfigured) -> off.
+        let got = get_model_sharing_inner(&state).await.unwrap();
+        assert!(!got.enabled);
+        assert_eq!(got.port, DEFAULT_MODEL_SHARING_PORT);
+        assert!(got.status.to_lowercase().contains("off"));
+
+        // Enable on an ephemeral port (0 is rejected; use a high port). Binding
+        // to a real LAN interface is user-only, but the seam must return a
+        // visible status without hanging.
+        let err = set_model_sharing_inner(&state, true, Some(0))
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        let view = set_model_sharing_inner(&state, true, Some(11500))
+            .await
+            .unwrap();
+        assert!(view.enabled);
+        assert_eq!(view.port, 11500);
+        assert!(!view.status.is_empty());
+
+        // Rehydrate: enabled + port persisted.
+        let got = get_model_sharing_inner(&state).await.unwrap();
+        assert!(got.enabled);
+        assert_eq!(got.port, 11500);
+
+        // Disable -> off status, port retained.
+        let view = set_model_sharing_inner(&state, false, None).await.unwrap();
+        assert!(!view.enabled);
+        assert_eq!(view.port, 11500);
+        assert!(view.status.to_lowercase().contains("off"));
+    }
+
+    /// The model-sharing status wording reflects each serve outcome, including a
+    /// non-fatal port-unavailable reason (never a silent hang).
+    #[test]
+    fn model_sharing_status_wording_is_visible_and_non_fatal() {
+        let disabled = ModelSharingConfig {
+            enabled: false,
+            port: 11435,
+        };
+        assert!(model_sharing_status(&disabled, None)
+            .to_lowercase()
+            .contains("off"));
+
+        let enabled = ModelSharingConfig {
+            enabled: true,
+            port: 11435,
+        };
+        let running =
+            model_sharing_status(&enabled, Some(&ShareServerStatus::Running { port: 11435 }));
+        assert!(running.contains("11435"));
+
+        let unavailable = model_sharing_status(
+            &enabled,
+            Some(&ShareServerStatus::Unavailable {
+                port: 11435,
+                reason: "address already in use".to_string(),
+            }),
+        );
+        assert!(unavailable.contains("address already in use"));
+        assert!(unavailable.contains("11435"));
+    }
+
+    /// `discover_network_peers_inner` maps the discovery seam's results to
+    /// display-safe views. The in-sandbox stub returns EMPTY without error,
+    /// exercising the non-fatal empty path the UI surfaces.
+    #[tokio::test]
+    async fn discover_network_peers_maps_results_and_is_non_fatal_when_empty() {
+        let peers = discover_network_peers_inner().await.unwrap();
+        assert!(peers.is_empty());
     }
 }

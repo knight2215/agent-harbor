@@ -44,6 +44,12 @@ import {
   getWebSearchConfig,
   clearWebSearchProvider,
   runWebSearch,
+  addNetworkPeer,
+  listNetworkPeers,
+  removeNetworkPeer,
+  setModelSharing,
+  getModelSharing,
+  discoverNetworkPeers,
 } from "./commands";
 import type { McpServerInput } from "../types";
 
@@ -379,5 +385,52 @@ describe("ipc/commands wrappers", () => {
     invoke.mockResolvedValue([{ title: "T", url: "https://ex.com", snippet: "s" }]);
     await expect(runWebSearch("rust async")).resolves.toMatchObject([{ title: "T" }]);
     expect(invoke).toHaveBeenCalledWith("run_web_search", { query: "rust async" });
+  });
+
+  // --- Local network (LAN) model sharing (FEAT-006) ------------------------
+
+  it("addNetworkPeer forwards baseUrl/label/apiKey", async () => {
+    invoke.mockResolvedValue({
+      id: "network-peer-1",
+      label: "box",
+      baseUrl: "http://192.168.1.5:11435/v1",
+      hasApiKey: false,
+      warning: null,
+    });
+    await addNetworkPeer("http://192.168.1.5:11435/v1", "box", null);
+    expect(invoke).toHaveBeenCalledWith("add_network_peer", {
+      baseUrl: "http://192.168.1.5:11435/v1",
+      label: "box",
+      apiKey: null,
+    });
+  });
+
+  it("listNetworkPeers invokes list_network_peers", async () => {
+    invoke.mockResolvedValue([]);
+    await listNetworkPeers();
+    expect(invoke).toHaveBeenCalledWith("list_network_peers");
+  });
+
+  it("removeNetworkPeer forwards the id", async () => {
+    await removeNetworkPeer("network-peer-1");
+    expect(invoke).toHaveBeenCalledWith("remove_network_peer", { id: "network-peer-1" });
+  });
+
+  it("setModelSharing forwards enabled + port", async () => {
+    invoke.mockResolvedValue({ enabled: true, port: 11435, status: "Sharing on port 11435." });
+    await setModelSharing(true, 11435);
+    expect(invoke).toHaveBeenCalledWith("set_model_sharing", { enabled: true, port: 11435 });
+  });
+
+  it("getModelSharing invokes get_model_sharing", async () => {
+    invoke.mockResolvedValue({ enabled: false, port: 11435, status: "Sharing is off." });
+    await getModelSharing();
+    expect(invoke).toHaveBeenCalledWith("get_model_sharing");
+  });
+
+  it("discoverNetworkPeers invokes discover_network_peers", async () => {
+    invoke.mockResolvedValue([]);
+    await discoverNetworkPeers();
+    expect(invoke).toHaveBeenCalledWith("discover_network_peers");
   });
 });

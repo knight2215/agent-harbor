@@ -4,6 +4,7 @@ import type {
   AvailableModelsResult,
   CloudProviderConfig,
   Conversation,
+  DiscoveredPeerView,
   EmbeddedModelStatus,
   EmbeddedModelView,
   ExportFormat,
@@ -15,6 +16,8 @@ import type {
   McpServerInput,
   Message,
   ModelParameters,
+  ModelSharingView,
+  NetworkPeerView,
   OpenedConversation,
   PermissionDecision,
   PermissionMode,
@@ -298,6 +301,86 @@ export function clearWebSearchProvider(): Promise<void> {
  */
 export function runWebSearch(query: string): Promise<WebSearchResultView[]> {
   return invoke<WebSearchResultView[]>("run_web_search", { query });
+}
+
+// --- Local network (LAN) model sharing (FEAT-006 / Section 9.3) -------------
+
+/**
+ * Add a LAN peer as a consumable, OpenAI-compatible provider (FEAT-006): the
+ * peer is persisted as a generic OpenAI-compatible {@link CloudProviderConfig}-
+ * style provider row pointed at its `host:port` `baseUrl`, so its models
+ * enumerate and route exactly like any provider. `baseUrl` is REQUIRED and
+ * validated through the Section 9.3 base-url posture: a blocked link-local /
+ * metadata target REJECTS this call, while an accepted plaintext non-loopback
+ * target resolves with a non-null {@link NetworkPeerView.warning}. `label` is
+ * optional (the base URL is used when omitted); the optional `apiKey` flows IN
+ * and is stored as an opaque {@link SecretRef} that NEVER comes back.
+ *
+ * PRIVACY (Section 9.3): a LAN peer is OFF-HOST, so it does NOT satisfy a
+ * LocalOnly/Confidential privacy tag; such conversations never route to a peer.
+ * Backed by `add_network_peer`.
+ */
+export function addNetworkPeer(
+  baseUrl: string,
+  label: string | null,
+  apiKey: string | null,
+): Promise<NetworkPeerView> {
+  return invoke<NetworkPeerView>("add_network_peer", { baseUrl, label, apiKey });
+}
+
+/**
+ * List the configured LAN peers so the Network Sharing UI can rehydrate from the
+ * backend source of truth. DISPLAY-SAFE: each row carries only
+ * id/label/baseUrl/hasApiKey, never the key. Backed by `list_network_peers`.
+ */
+export function listNetworkPeers(): Promise<NetworkPeerView[]> {
+  return invoke<NetworkPeerView[]>("list_network_peers");
+}
+
+/**
+ * Remove a configured LAN peer by its id (deleting any stored secret + the row).
+ * Removing an unknown id is a no-op. Backed by `remove_network_peer`.
+ */
+export function removeNetworkPeer(id: string): Promise<void> {
+  return invoke<void>("remove_network_peer", { id });
+}
+
+/**
+ * Enable or disable LAN model sharing on an optional `port` (FEAT-006). When
+ * enabling, this instance runs a small OpenAI-compatible read surface bound to
+ * the LAN that re-exposes THIS machine's local models to peers. The returned
+ * {@link ModelSharingView.status} is a VISIBLE description of the serve state (a
+ * bind failure degrades to a non-fatal reason, never a silent hang).
+ *
+ * SECURITY: sharing exposes this machine's local models to the local network, so
+ * it is OFF by default and the UI states this. Live LAN binding + peer
+ * reachability are user-only. Backed by `set_model_sharing`.
+ */
+export function setModelSharing(
+  enabled: boolean,
+  port: number | null,
+): Promise<ModelSharingView> {
+  return invoke<ModelSharingView>("set_model_sharing", { enabled, port });
+}
+
+/**
+ * Report the current LAN model-sharing settings so the Network Sharing UI can
+ * rehydrate. Does NOT (re)bind the server. Backed by `get_model_sharing`.
+ */
+export function getModelSharing(): Promise<ModelSharingView> {
+  return invoke<ModelSharingView>("get_model_sharing");
+}
+
+/**
+ * Discover LAN peers advertising an OpenAI-compatible endpoint (FEAT-006),
+ * returning display-safe results the user can one-click Add. Non-fatal:
+ * discovery being unavailable (or finding nothing) returns an EMPTY list rather
+ * than an error, and the UI shows a "no peers found / discovery unavailable"
+ * notice. Live discovery is user-only (the in-sandbox implementation returns
+ * empty). Backed by `discover_network_peers`.
+ */
+export function discoverNetworkPeers(): Promise<DiscoveredPeerView[]> {
+  return invoke<DiscoveredPeerView[]>("discover_network_peers");
 }
 
 // --- Message pipeline (P4.6 / Section 8.1) ----------------------------------

@@ -1056,6 +1056,25 @@ body {
   color: var(--ah-text-muted);
 }
 
+/* --- Network sharing (FEAT-006) ------------------------------------------- */
+
+/* Sub-section heading within a settings panel (Network Sharing groups peers,
+   discovery, and the share toggle). */
+.settings__subsection-title {
+  margin: var(--ah-space-4) 0 var(--ah-space-1);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ah-text);
+}
+
+/* Inline checkbox + label row for the share toggle. */
+.settings__toggle-label {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--ah-space-2);
+  color: var(--ah-text);
+}
+
 .settings__section-error {
   margin: 0;
   color: var(--ah-danger);

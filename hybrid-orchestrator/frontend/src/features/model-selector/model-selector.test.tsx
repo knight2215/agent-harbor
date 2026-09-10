@@ -167,6 +167,41 @@ describe("model selector", () => {
     ).toHaveTextContent("free");
   });
 
+  it("ProviderModelPicker shows a distinct Network group for a LAN peer (FEAT-006)", () => {
+    // A LAN peer's models carry the `network-peer-` provider-id prefix the
+    // backend stamps, so they must land in their own Network group - not misfiled
+    // under Local (even though a keyless peer's models are zero-priced) or Cloud.
+    render(
+      <ProviderModelPicker
+        models={[
+          model("network-peer-abc123", "qwen3:8b", true),
+          model("ollama-local", "llama3.1:8b", true),
+          model("openai", "gpt-4o", false),
+        ]}
+        value={null}
+        onChange={vi.fn()}
+      />,
+    );
+
+    const network = screen.getByRole("region", { name: "Network" });
+    const local = screen.getByRole("region", { name: "Local" });
+    const cloud = screen.getByRole("region", { name: "Cloud" });
+
+    // The peer's model is under Network...
+    expect(
+      within(network).getByRole("button", { name: /network-peer-abc123 \/ qwen3:8b/ }),
+    ).toBeInTheDocument();
+    // ...and NOT double-counted under Local despite its zero price.
+    expect(
+      within(local).queryByRole("button", { name: /network-peer-abc123 \/ qwen3:8b/ }),
+    ).toBeNull();
+    // On-host Local + Cloud still group correctly.
+    expect(
+      within(local).getByRole("button", { name: /ollama-local \/ llama3\.1:8b/ }),
+    ).toBeInTheDocument();
+    expect(within(cloud).getByRole("button", { name: /openai \/ gpt-4o/ })).toBeInTheDocument();
+  });
+
   it("RoutingModeToggle: renders four segmented positions", () => {
     useConversationsStore.setState({
       conversations: [conversation("c-1")],

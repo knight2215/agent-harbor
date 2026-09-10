@@ -279,6 +279,49 @@ export interface WebSearchResultView {
 }
 
 /**
+ * A display-safe view of one configured LAN peer (FEAT-006), returned by the
+ * `add_network_peer` / `list_network_peers` commands. Mirrors Rust
+ * `commands::NetworkPeerView`. A peer is an OpenAI-compatible provider on the
+ * local network whose models enumerate + route like any provider. `hasApiKey`
+ * reports only WHETHER a key is stored (as an opaque {@link SecretRef}), never
+ * the key itself; `warning` carries the optional display-safe base-url advisory
+ * from the backend's `check_provider_base_url` validation (null when there is
+ * none), surfaced only on Add.
+ */
+export interface NetworkPeerView {
+  id: string;
+  label: string;
+  baseUrl: string;
+  hasApiKey: boolean;
+  warning: string | null;
+}
+
+/**
+ * A display-safe view of the LAN model-sharing settings (FEAT-006), returned by
+ * the `set_model_sharing` / `get_model_sharing` commands. Mirrors Rust
+ * `commands::ModelSharingView`. `status` is a display-safe, VISIBLE description
+ * of the serve state (running, off, or a non-fatal bind-failure reason) so the
+ * UI never shows a silent success/hang. Sharing is OFF by default and exposes
+ * this machine's local models to the local network when enabled.
+ */
+export interface ModelSharingView {
+  enabled: boolean;
+  port: number;
+  status: string;
+}
+
+/**
+ * A display-safe discovered LAN peer (FEAT-006), returned by
+ * `discover_network_peers`. Mirrors Rust `commands::DiscoveredPeerView`. Carries
+ * only a label + base URL the user can one-click Add as a consume peer, never
+ * any secret.
+ */
+export interface DiscoveredPeerView {
+  label: string;
+  baseUrl: string;
+}
+
+/**
  * Per-model capability descriptor. Mirrors Rust `providers::Capabilities`
  * (architecture.md Section 4.1). Rust uses `#[serde(rename_all = "camelCase")]`,
  * so `json_mode` -> `jsonMode` and `max_context` -> `maxContext`.

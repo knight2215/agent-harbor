@@ -51,6 +51,27 @@ function routeInvoke(command: string): unknown {
       return undefined;
     case "set_web_search_provider":
       return { kind: "tavily", hasApiKey: true, maxResults: 5 };
+    case "list_network_peers":
+      // FEAT-006: no LAN peers configured by default.
+      return [];
+    case "add_network_peer":
+      return {
+        id: "network-peer-0000",
+        label: "peer",
+        baseUrl: "http://192.168.1.50:11435/v1",
+        hasApiKey: false,
+        warning: null,
+      };
+    case "remove_network_peer":
+      return undefined;
+    case "discover_network_peers":
+      // FEAT-006: discovery returns empty in-sandbox (non-fatal empty path).
+      return [];
+    case "get_model_sharing":
+      // FEAT-006: sharing OFF by default.
+      return { enabled: false, port: 11435, status: "Sharing is off." };
+    case "set_model_sharing":
+      return { enabled: true, port: 11435, status: "Sharing on port 11435." };
     case "embedded_model_status":
       return { loadedModelId: null, registeredCount: 0 };
     case "provider_diagnostics":
