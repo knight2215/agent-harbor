@@ -1,0 +1,28 @@
+{
+  "id": "FEAT-005",
+  "type": "docs",
+  "description": "Update the architecture spec to reflect the redesigned chat surface, welcome screen + nav restructure, and the three new functionality features (attach/upload, repository context, pluggable web search). This keeps .kiro/specs/hybrid-orchestrator/architecture.md the source of truth and records the concrete mechanisms + the error->warning-icon->modal UX + secret handling. Do this LAST so it documents what actually shipped.",
+  "status": "pending",
+  "steps": [
+    "Edit .kiro/specs/hybrid-orchestrator/architecture.md Section 8.1 (Chat interface): document the bottom-anchored composer with compact inline controls (inline model selector, inline routing-mode control, 'Why this model?' info icon, Attach/Repository/Web-search toggle icons, Send/Stop, Refresh icon), and that the always-on provider-enumeration error text is replaced by a warning-icon->small-modal (icon shown only when errors exist; modal lists ProviderEnumerationError entries + lastError). Note the new default landing = Welcome screen (large logo + New conversation) rendered when no conversation is active, and that Conversations are nested under the Chat nav item. Preserve the existing Section 8.1 bullets about Enter/Shift+Enter and no-silent-no-op (they still hold).",
+    "Edit Section 8.2 (Model selector) to reflect that the routing-mode control and model picker now live INLINE in the composer (compact), that the rationale is an info icon, and that the enumeration errors surface via the warning-icon->modal near the composer (Diagnostics panel unchanged).",
+    "Add a new subsection (e.g. 8.1.x or a new 8.6 'Message context inputs: attachments, repository, web search') documenting: (a) ATTACH - native dialog via tauri-plugin-dialog; read_text_file / read_file_base64 commands; vision-capability gate for images with a visible unsupported notice; per-file + total byte caps; context prepended into the message content String; cleared after one turn. (b) REPOSITORY - list_repo_files with filtering (.git/node_modules/target/etc), entry cap + truncated flag, user selects a bounded subset within a total size cap. (c) WEB SEARCH - pluggable WebSearchProvider trait + WebSearchKind enum, Tavily default (with the rationale for choosing it), key stored via SecretStore under a stable handle and never returned across IPC, additive AppConfig.web_search, Settings 'Web Search' section, run_web_search command, composer 🌐 toggle, and the invariant that an unconfigured/failed search shows a visible non-fatal notice and still sends (no silent hang). Clearly flag web search as needing the user's key + live verification.",
+    "List every NEW command in the appropriate place (mirroring how existing commands are listed in Section 8): read_text_file, read_file_base64, list_repo_files, set_web_search_provider, get_web_search_config, clear_web_search_provider, run_web_search - each with its camelCase IPC shape and that it is registered in generate_handler! + has an IPC wrapper + a TS type.",
+    "Update the Section 9 security notes if needed: the web-search key follows the Section 9.1 keychain-by-reference invariant (plaintext in, only a SecretRef stored, resolved core-internally at search time, never crosses IPC); file reads are bounded/display-safe. If the coder recorded a secret-persistence follow-up (in-memory vs keychain), note it as a known issue / follow-up rather than a fix in this task.",
+    "If tasks.md has a natural place, add a short phase note referencing this task (optional, additive) - but do not restructure tasks.md.",
+    "Do NOT use em dashes in the prose. Match the existing spec's flat-prose style and heading conventions."
+  ],
+  "acceptance_criteria": [
+    "architecture.md Section 8.1/8.2 describe the bottom-anchored composer with inline controls, the info-icon rationale, and the warning-icon->modal error UX, plus the Welcome screen + Chat-nested Conversations.",
+    "A subsection documents the concrete mechanism for attach, repository context, and web search (Tavily default + pluggable + Settings-configurable + keychain-stored key + visible non-fatal fallback).",
+    "Every new command is listed with its camelCase shape and its registration/IPC/type requirements noted.",
+    "Security notes cover the web-search key (keychain-by-reference) and bounded file reads; any secret-persistence follow-up is recorded as a known issue, not silently fixed.",
+    "Prose uses no em dashes and matches the existing spec style."
+  ],
+  "verification": [
+    "Re-read the edited spec sections and confirm they accurately describe the shipped FEAT-002/003/004 behavior (cross-check against the actual code), that all new commands are listed, and that there are no em dashes.",
+    "Confirm the doc changes are consistent with the code (command names, capability-gate behavior, fallback-and-still-send invariant)."
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

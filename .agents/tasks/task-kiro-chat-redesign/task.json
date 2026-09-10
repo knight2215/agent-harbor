@@ -1,0 +1,7 @@
+{
+  "task_id": "task-kiro-chat-redesign",
+  "task_description": "Redesign the Agent Harbor chat surface to a Kiro-style bottom-anchored composer with inline controls (model selector, routing mode, 'why this model?' info icon, attach/repository/web-search icons, error->warning-icon->modal); add a welcome-screen landing + nest Conversations under the Chat nav item; and build three REAL context features (attach/upload incl. images with a vision gate, repository context, pluggable web search with Tavily default + Settings-configurable + keychain-stored key). Additionally, per explicit user request, incorporate local network (LAN) model sharing (consume LAN peers' models + a share/serve toggle + discovery seam), which was never previously implemented. Deliver on ONE feature branch off main; do NOT push/tag/PR. Update the architecture spec. INTEGRATIONS_ONLY sandbox: cannot build tauri-app or hit live network; web-search and LAN live behavior are user-only, everything else is CI/host-verifiable.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004", "FEAT-006", "FEAT-005"],
+  "blocked_reason": null
+}
