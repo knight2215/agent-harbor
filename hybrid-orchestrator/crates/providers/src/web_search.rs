@@ -14,6 +14,9 @@
 //!     JSON API, and a free tier). [`WebSearchKind::Brave`] and
 //!     [`WebSearchKind::SerpApi`] are scaffolded so the pluggability is real
 //!     (their `build` returns an [`WebSearchError::Unsupported`] until wired).
+//!     [`WebSearchKind::Custom`] lets a user supply their OWN Tavily-compatible
+//!     endpoint (a user-entered `base_url`) instead of picking only from the
+//!     preselected backends.
 //!   - [`TavilyProvider`]: the working default. It POSTs to a CONFIGURABLE
 //!     `base_url` (default [`TAVILY_DEFAULT_BASE_URL`]) so the unit tests can
 //!     point it at a local `wiremock` MockServer (no live network).
@@ -104,7 +107,9 @@ impl WebSearchError {
 
 /// The selectable web-search backends (FEAT-004). Serialized in camelCase to
 /// match the TS string-literal union the frontend mirrors (`tavily` / `brave` /
-/// `serpApi`). [`WebSearchKind::Tavily`] is the recommended default.
+/// `serpApi` / `custom`). [`WebSearchKind::Tavily`] is the recommended default,
+/// and [`WebSearchKind::Custom`] lets a user point web search at their OWN
+/// Tavily-compatible endpoint (a user-supplied `base_url`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WebSearchKind {
@@ -115,6 +120,12 @@ pub enum WebSearchKind {
     Brave,
     /// SerpApi (scaffolded; not yet implemented).
     SerpApi,
+    /// A user-supplied custom endpoint (the user's OWN search provider). It
+    /// speaks the same simple Tavily JSON `/search` contract (the de-facto
+    /// minimal shape) and is rooted at a user-entered `base_url`, so a user can
+    /// point web search at any Tavily-compatible service instead of picking only
+    /// from the preselected backends.
+    Custom,
 }
 
 impl WebSearchKind {
@@ -128,15 +139,18 @@ impl WebSearchKind {
             WebSearchKind::Tavily => "tavily",
             WebSearchKind::Brave => "brave",
             WebSearchKind::SerpApi => "serpApi",
+            WebSearchKind::Custom => "custom",
         }
     }
 
     /// Build the configured [`WebSearchProvider`] for this kind with the given
     /// API key and base URL (`None` uses the kind's default endpoint).
     ///
-    /// Only [`WebSearchKind::Tavily`] is implemented; the scaffolded kinds
-    /// return [`WebSearchError::Unsupported`] so the pluggability seam is real
-    /// while the additional adapters are added later.
+    /// [`WebSearchKind::Tavily`] and [`WebSearchKind::Custom`] are implemented;
+    /// the scaffolded kinds return [`WebSearchError::Unsupported`] so the
+    /// pluggability seam is real while the additional adapters are added later.
+    /// [`WebSearchKind::Custom`] REQUIRES a non-empty `base_url` (the user's own
+    /// endpoint) and returns [`WebSearchError::Config`] when it is missing.
     pub fn build(
         &self,
         api_key: &str,
@@ -149,6 +163,17 @@ impl WebSearchKind {
             WebSearchKind::Tavily => Ok(Box::new(TavilyProvider::new(api_key, base_url))),
             WebSearchKind::Brave => Err(WebSearchError::Unsupported("brave".to_string())),
             WebSearchKind::SerpApi => Err(WebSearchError::Unsupported("serpApi".to_string())),
+            WebSearchKind::Custom => {
+                // The custom kind is a Tavily-JSON-compatible provider rooted at
+                // the user's OWN endpoint, so it MUST carry a non-empty
+                // base_url; without one there is nowhere to search.
+                let base_url = base_url.filter(|u| !u.trim().is_empty()).ok_or_else(|| {
+                    WebSearchError::Config(
+                        "a custom web-search endpoint URL is required".to_string(),
+                    )
+                })?;
+                Ok(Box::new(TavilyProvider::new(api_key, Some(base_url))))
+            }
         }
     }
 }
@@ -272,8 +297,9 @@ mod tests {
         assert_eq!(WebSearchKind::DEFAULT, WebSearchKind::Tavily);
         assert_eq!(WebSearchKind::Tavily.as_str(), "tavily");
         assert_eq!(WebSearchKind::SerpApi.as_str(), "serpApi");
+        assert_eq!(WebSearchKind::Custom.as_str(), "custom");
         // The serde tag must match the TS string-literal union the frontend
-        // mirrors (`tavily` / `brave` / `serpApi`).
+        // mirrors (`tavily` / `brave` / `serpApi` / `custom`).
         assert_eq!(
             serde_json::to_string(&WebSearchKind::Tavily).unwrap(),
             "\"tavily\""
@@ -281,6 +307,10 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&WebSearchKind::SerpApi).unwrap(),
             "\"serpApi\""
+        );
+        assert_eq!(
+            serde_json::to_string(&WebSearchKind::Custom).unwrap(),
+            "\"custom\""
         );
     }
 
@@ -298,6 +328,18 @@ mod tests {
 
         // Tavily builds a usable provider.
         assert!(WebSearchKind::Tavily.build("k", None).is_ok());
+
+        // Custom builds a usable (Tavily-JSON-compatible) provider ONLY when a
+        // non-empty base_url (the user's own endpoint) is supplied; without one
+        // it is a display-safe config error (never echoes the key).
+        assert!(WebSearchKind::Custom
+            .build("k", Some("https://search.example.com"))
+            .is_ok());
+        let err = WebSearchKind::Custom.build("k", None).unwrap_err();
+        assert!(matches!(err, WebSearchError::Config(_)));
+        // A blank/whitespace base_url is treated as missing for Custom.
+        let err = WebSearchKind::Custom.build("k", Some("   ")).unwrap_err();
+        assert!(matches!(err, WebSearchError::Config(_)));
     }
 
     #[test]

@@ -810,10 +810,15 @@ describe("WebSearchSection", () => {
     window.localStorage.clear();
   });
 
-  const view = (kind: WebSearchConfigView["kind"], maxResults: number): WebSearchConfigView => ({
+  const view = (
+    kind: WebSearchConfigView["kind"],
+    maxResults: number,
+    baseUrl: string | null = null,
+  ): WebSearchConfigView => ({
     kind,
     hasApiKey: true,
     maxResults,
+    baseUrl,
   });
 
   it("rehydrates the configured provider from get_web_search_config on mount", async () => {
@@ -851,6 +856,7 @@ describe("WebSearchSection", () => {
         kind: "tavily",
         apiKey: "tvly-secret-key",
         maxResults: 5,
+        baseUrl: null,
       });
     });
     // The configured line appears and the key input is cleared (write-only).
@@ -878,6 +884,109 @@ describe("WebSearchSection", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("web-search-configured-tavily")).not.toBeInTheDocument();
     });
+  });
+
+  it("reveals the endpoint URL field only when the Custom provider is selected", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_web_search_config") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    render(<WebSearchSection />);
+
+    // Wait for the mount read to settle, then confirm the endpoint field is
+    // hidden for the default (Tavily) provider.
+    await screen.findByLabelText("Web search provider");
+    expect(screen.queryByLabelText("Web search endpoint URL")).not.toBeInTheDocument();
+
+    // Selecting Custom reveals the endpoint URL input (stable aria-label).
+    fireEvent.change(screen.getByLabelText("Web search provider"), {
+      target: { value: "custom" },
+    });
+    expect(screen.getByLabelText("Web search endpoint URL")).toBeInTheDocument();
+  });
+
+  it("saves a custom provider with its endpoint URL as baseUrl", async () => {
+    invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "get_web_search_config") return Promise.resolve(null);
+      if (cmd === "set_web_search_provider") {
+        return Promise.resolve(
+          view(
+            (args?.kind as WebSearchConfigView["kind"]) ?? "custom",
+            5,
+            (args?.baseUrl as string | null) ?? null,
+          ),
+        );
+      }
+      return Promise.resolve(null);
+    });
+    render(<WebSearchSection />);
+
+    // Select Custom, enter the endpoint + key, and save.
+    fireEvent.change(await screen.findByLabelText("Web search provider"), {
+      target: { value: "custom" },
+    });
+    fireEvent.change(screen.getByLabelText("Web search endpoint URL"), {
+      target: { value: "https://search.example.com" },
+    });
+    fireEvent.change(screen.getByLabelText("Web search API key"), {
+      target: { value: "custom-secret-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_web_search_provider", {
+        kind: "custom",
+        apiKey: "custom-secret-key",
+        maxResults: 5,
+        baseUrl: "https://search.example.com",
+      });
+    });
+    // The configured line shows the custom endpoint, and the key never renders.
+    expect(await screen.findByTestId("web-search-configured-custom")).toBeInTheDocument();
+    expect(screen.getByTestId("web-search-configured-endpoint")).toHaveTextContent(
+      "https://search.example.com",
+    );
+    expect(screen.queryByText("custom-secret-key")).not.toBeInTheDocument();
+  });
+
+  it("blocks saving a custom provider with an empty endpoint URL", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_web_search_config") return Promise.resolve(null);
+      return Promise.resolve(null);
+    });
+    render(<WebSearchSection />);
+
+    fireEvent.change(await screen.findByLabelText("Web search provider"), {
+      target: { value: "custom" },
+    });
+    // Provide a key but leave the endpoint empty.
+    fireEvent.change(screen.getByLabelText("Web search API key"), {
+      target: { value: "custom-secret-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    // A client-side validation error is shown and no save is attempted.
+    expect(await screen.findByRole("alert")).toHaveTextContent("A search endpoint URL is required");
+    expect(invoke).not.toHaveBeenCalledWith("set_web_search_provider", expect.anything());
+  });
+
+  it("rehydrates a configured custom endpoint on mount", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_web_search_config") {
+        return Promise.resolve(view("custom", 3, "https://my-endpoint.example"));
+      }
+      return Promise.resolve(null);
+    });
+    render(<WebSearchSection />);
+
+    // The configured line + prefilled endpoint field both show the saved URL.
+    expect(await screen.findByTestId("web-search-configured-custom")).toBeInTheDocument();
+    expect(screen.getByTestId("web-search-configured-endpoint")).toHaveTextContent(
+      "https://my-endpoint.example",
+    );
+    expect(screen.getByLabelText("Web search endpoint URL")).toHaveValue(
+      "https://my-endpoint.example",
+    );
   });
 });
 

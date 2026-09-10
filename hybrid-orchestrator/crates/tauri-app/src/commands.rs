@@ -1646,12 +1646,16 @@ const MAX_WEB_SEARCH_RESULTS: u32 = 20;
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebSearchConfigView {
-    /// The selected provider kind (Tavily / Brave / SerpApi).
+    /// The selected provider kind (Tavily / Brave / SerpApi / Custom).
     pub kind: WebSearchKind,
     /// Whether an API key is stored (as an opaque `SecretRef`), never the key.
     pub has_api_key: bool,
     /// How many results a search requests.
     pub max_results: u32,
+    /// The persisted custom endpoint URL when the selected kind is `custom`
+    /// (the user's OWN endpoint), else `None`. Display-safe: a URL only, never
+    /// the key, so the section can rehydrate the entered endpoint.
+    pub base_url: Option<String>,
 }
 
 /// A display-safe web-search result row (FEAT-004), returned by `run_web_search`
@@ -1693,8 +1697,9 @@ pub async fn set_web_search_provider(
     kind: WebSearchKind,
     api_key: String,
     max_results: Option<u32>,
+    base_url: Option<String>,
 ) -> Result<WebSearchConfigView, CommandError> {
-    set_web_search_provider_inner(&state, kind, &api_key, max_results).await
+    set_web_search_provider_inner(&state, kind, &api_key, max_results, base_url.as_deref()).await
 }
 
 /// The full validate-then-store-then-persist body of [`set_web_search_provider`],
@@ -1703,15 +1708,21 @@ pub async fn set_web_search_provider(
 ///
 /// It (1) requires a non-empty `api_key` within [`MAX_SECRET_LEN`]; (2) clamps
 /// `max_results` into `[1, MAX_WEB_SEARCH_RESULTS]`, defaulting to
-/// [`DEFAULT_WEB_SEARCH_MAX_RESULTS`]; (3) stores the key through the same
-/// secret store as `set_cloud_provider`, keeping only the opaque handle; and
-/// (4) persists the selected kind + cap into the additive [`WebSearchConfig`].
-/// It returns a display-safe [`WebSearchConfigView`] and NEVER the key.
+/// [`DEFAULT_WEB_SEARCH_MAX_RESULTS`]; (3) for the [`WebSearchKind::Custom`] kind
+/// validates the user-supplied `base_url` (non-empty, bounded length) through
+/// the SAME base-url posture check the network-peer / local-runtime write paths
+/// use ([`check_provider_base_url`], rejecting Blocked link-local/metadata
+/// targets and warning on non-loopback plaintext HTTP); (4) stores the key
+/// through the same secret store as `set_cloud_provider`, keeping only the
+/// opaque handle; and (5) persists the selected kind + cap (+ custom base_url)
+/// into the additive [`WebSearchConfig`]. It returns a display-safe
+/// [`WebSearchConfigView`] and NEVER the key.
 async fn set_web_search_provider_inner(
     state: &AppState,
     kind: WebSearchKind,
     api_key: &str,
     max_results: Option<u32>,
+    base_url: Option<&str>,
 ) -> Result<WebSearchConfigView, CommandError> {
     // (1) A configured provider always needs a key; reject empty/oversized.
     if api_key.is_empty() {
@@ -1728,14 +1739,32 @@ async fn set_web_search_provider_inner(
         .unwrap_or(DEFAULT_WEB_SEARCH_MAX_RESULTS)
         .clamp(1, MAX_WEB_SEARCH_RESULTS);
 
-    // (3) Store the key as an opaque SecretRef under the stable handle; only the
+    // (3) The Custom kind (the user's OWN endpoint) REQUIRES a base_url; it is
+    // validated against the SAME Section 9.3 posture as the network-peer /
+    // local-runtime write paths (Blocked link-local/metadata targets rejected,
+    // non-loopback plaintext HTTP warned) before anything is stored. Non-custom
+    // kinds ignore any supplied base_url and persist None.
+    let persisted_base_url = if kind == WebSearchKind::Custom {
+        let url = base_url.map(str::trim).unwrap_or_default();
+        validate_nonempty("baseUrl", url, MAX_BASE_URL_LEN)?;
+        // Posture check: a Blocked target errors before persisting anything. The
+        // returned advisory (e.g. plaintext non-loopback HTTP) is intentionally
+        // not surfaced by this view; the posture rejection is the hard gate.
+        let _warning = check_provider_base_url(url)?;
+        Some(url.to_string())
+    } else {
+        None
+    };
+
+    // (4) Store the key as an opaque SecretRef under the stable handle; only the
     // handle is persisted (in the keychain), never here.
     state
         .secret_store
         .store(WEB_SEARCH_SECRET_HANDLE, api_key)
         .map_err(|e| CommandError::internal(e.to_string()))?;
 
-    // (4) Persist the selection + cap into the additive AppConfig field.
+    // (5) Persist the selection + cap (+ custom base_url) into the additive
+    // AppConfig field.
     let db = state.session_manager.db();
     let mut config = AppConfig::load(db)
         .await
@@ -1743,6 +1772,7 @@ async fn set_web_search_provider_inner(
     config.web_search = WebSearchConfig {
         enabled_provider: Some(kind.as_str().to_string()),
         max_results,
+        base_url: persisted_base_url.clone(),
     };
     config
         .save(db)
@@ -1753,6 +1783,7 @@ async fn set_web_search_provider_inner(
         kind,
         has_api_key: true,
         max_results,
+        base_url: persisted_base_url,
     })
 }
 
@@ -1792,6 +1823,7 @@ async fn get_web_search_config_inner(
         kind,
         has_api_key,
         max_results: config.web_search.max_results,
+        base_url: config.web_search.base_url.clone(),
     }))
 }
 
@@ -1868,11 +1900,22 @@ async fn run_web_search_inner(
         .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
         .map_err(|_| CommandError::invalid("web search is not configured (no API key stored)"))?;
 
+    // Resolve the endpoint the provider is built against. Precedence: (1) the
+    // test override (`AppState.web_search_base_url`, only ever set in tests to
+    // point at a local wiremock server); else (2) the PERSISTED custom endpoint
+    // when the configured kind needs one (the `custom` kind, the user's OWN
+    // endpoint); else (3) `None` so the kind uses its built-in default. Building
+    // `custom` with `None` is a display-safe config error, so an unconfigured
+    // custom endpoint surfaces clearly rather than silently.
+    let effective_base_url = web_search_base_url(state)
+        .or(config.web_search.base_url.as_deref())
+        .filter(|u| !u.is_empty());
+
     // Build the configured provider (base_url None -> the kind's default
     // endpoint) and run the search. `WebSearchError` is display-safe and never
     // carries the key.
     let provider = kind
-        .build(&api_key, web_search_base_url(state))
+        .build(&api_key, effective_base_url)
         .map_err(|e| CommandError::internal(e.to_string()))?;
     let opts = WebSearchOptions {
         max_results: config.web_search.max_results,
@@ -5414,12 +5457,15 @@ mod tests {
             WebSearchKind::Tavily,
             plaintext,
             Some(50), // over the cap -> clamped to MAX_WEB_SEARCH_RESULTS
+            None,
         )
         .await
         .unwrap();
         assert_eq!(view.kind, WebSearchKind::Tavily);
         assert!(view.has_api_key);
         assert_eq!(view.max_results, MAX_WEB_SEARCH_RESULTS);
+        // A non-custom provider carries no custom endpoint URL.
+        assert!(view.base_url.is_none());
 
         // The view (and its serialized form) never carries the key. The
         // secret-hygiene check is that the key VALUE is absent; the DTO
@@ -5449,15 +5495,16 @@ mod tests {
     async fn set_web_search_provider_inner_rejects_invalid_input() {
         let state = test_state().await;
 
-        let err = set_web_search_provider_inner(&state, WebSearchKind::Tavily, "", None)
+        let err = set_web_search_provider_inner(&state, WebSearchKind::Tavily, "", None, None)
             .await
             .unwrap_err();
         assert!(matches!(err.code, ErrorCode::InvalidArgument));
 
         let too_long = "x".repeat(MAX_SECRET_LEN + 1);
-        let err = set_web_search_provider_inner(&state, WebSearchKind::Tavily, &too_long, None)
-            .await
-            .unwrap_err();
+        let err =
+            set_web_search_provider_inner(&state, WebSearchKind::Tavily, &too_long, None, None)
+                .await
+                .unwrap_err();
         assert!(matches!(err.code, ErrorCode::InvalidArgument));
 
         // Nothing was stored or persisted for the rejected calls.
@@ -5478,7 +5525,7 @@ mod tests {
         // Unconfigured -> None.
         assert!(get_web_search_config_inner(&state).await.unwrap().is_none());
 
-        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-key", Some(7))
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-key", Some(7), None)
             .await
             .unwrap();
 
@@ -5489,6 +5536,89 @@ mod tests {
         assert_eq!(view.kind, WebSearchKind::Tavily);
         assert!(view.has_api_key);
         assert_eq!(view.max_results, 7);
+        assert!(view.base_url.is_none());
+    }
+
+    /// A Custom provider persists + rehydrates its user-supplied endpoint URL
+    /// (the user's OWN search provider), and clearing resets `base_url` to None.
+    #[tokio::test]
+    async fn set_and_get_web_search_custom_endpoint_round_trips() {
+        let state = test_state().await;
+
+        // The Custom kind requires a base_url and persists it display-safely.
+        let view = set_web_search_provider_inner(
+            &state,
+            WebSearchKind::Custom,
+            "custom-key",
+            Some(4),
+            Some("https://search.example.com"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.kind, WebSearchKind::Custom);
+        assert!(view.has_api_key);
+        assert_eq!(view.base_url.as_deref(), Some("https://search.example.com"));
+
+        // The persisted config carries the endpoint; the key is never in it.
+        let cfg = AppConfig::load(state.session_manager.db()).await.unwrap();
+        assert_eq!(cfg.web_search.enabled_provider.as_deref(), Some("custom"));
+        assert_eq!(
+            cfg.web_search.base_url.as_deref(),
+            Some("https://search.example.com")
+        );
+
+        // Rehydration surfaces the same endpoint.
+        let rehydrated = get_web_search_config_inner(&state)
+            .await
+            .unwrap()
+            .expect("configured custom web search must rehydrate");
+        assert_eq!(rehydrated.kind, WebSearchKind::Custom);
+        assert_eq!(
+            rehydrated.base_url.as_deref(),
+            Some("https://search.example.com")
+        );
+
+        // Clearing resets base_url to None.
+        clear_web_search_provider_inner(&state).await.unwrap();
+        let cfg = AppConfig::load(state.session_manager.db()).await.unwrap();
+        assert!(cfg.web_search.base_url.is_none());
+        assert!(cfg.web_search.enabled_provider.is_none());
+    }
+
+    /// The Custom kind REJECTS an empty base_url (the user's endpoint is
+    /// required) and a Blocked (link-local/metadata) target, persisting nothing.
+    #[tokio::test]
+    async fn set_web_search_custom_rejects_missing_or_blocked_endpoint() {
+        let state = test_state().await;
+
+        // Missing / empty endpoint -> invalid argument, nothing persisted.
+        let err =
+            set_web_search_provider_inner(&state, WebSearchKind::Custom, "k", None, Some("  "))
+                .await
+                .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+        let err = set_web_search_provider_inner(&state, WebSearchKind::Custom, "k", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // A Blocked link-local/metadata target is rejected by the SAME posture
+        // check the network-peer / local-runtime write paths use.
+        let err = set_web_search_provider_inner(
+            &state,
+            WebSearchKind::Custom,
+            "k",
+            None,
+            Some("http://169.254.169.254/latest"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // Nothing was stored or persisted for the rejected calls.
+        let cfg = AppConfig::load(state.session_manager.db()).await.unwrap();
+        assert!(cfg.web_search.enabled_provider.is_none());
+        assert!(cfg.web_search.base_url.is_none());
     }
 
     /// `clear_web_search_provider_inner` deletes the stored secret AND resets the
@@ -5496,7 +5626,7 @@ mod tests {
     #[tokio::test]
     async fn clear_web_search_provider_inner_removes_secret_and_config() {
         let state = test_state().await;
-        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-key", None)
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-key", None, None)
             .await
             .unwrap();
 
@@ -5555,9 +5685,15 @@ mod tests {
         );
         state.web_search_base_url = Some(server.uri());
 
-        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-secret-key", Some(2))
-            .await
-            .unwrap();
+        set_web_search_provider_inner(
+            &state,
+            WebSearchKind::Tavily,
+            "tvly-secret-key",
+            Some(2),
+            None,
+        )
+        .await
+        .unwrap();
 
         let results = run_web_search_inner(&state, "rust async").await.unwrap();
         assert_eq!(results.len(), 2);
@@ -5593,7 +5729,7 @@ mod tests {
         );
         state.web_search_base_url = Some(server.uri());
 
-        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-secret-key", None)
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-secret-key", None, None)
             .await
             .unwrap();
 
@@ -5602,6 +5738,54 @@ mod tests {
         // The display-safe error keeps the status but never the key.
         assert!(err.message.contains("401"));
         assert!(!err.message.contains("tvly-secret-key"));
+    }
+
+    /// `run_web_search_inner` builds the Custom provider against the PERSISTED
+    /// endpoint URL (the user's OWN endpoint) when NO test override is set,
+    /// proving the persisted `base_url` is threaded through the search path.
+    #[tokio::test]
+    async fn run_web_search_inner_uses_persisted_custom_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    {"title": "C1", "url": "https://c.example", "content": "custom snippet"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        // NO `web_search_base_url` override: the persisted custom endpoint must
+        // be what the provider is built against. `test_state()` leaves the
+        // override as None.
+        let state = test_state().await;
+        assert!(state.web_search_base_url.is_none());
+
+        // Persist a Custom provider whose endpoint IS the mock server. The mock
+        // server binds to loopback (127.0.0.1), which the posture check accepts
+        // silently, so the save succeeds and the endpoint persists.
+        set_web_search_provider_inner(
+            &state,
+            WebSearchKind::Custom,
+            "custom-secret-key",
+            Some(1),
+            Some(&server.uri()),
+        )
+        .await
+        .unwrap();
+
+        let results = run_web_search_inner(&state, "own provider").await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].title, "C1");
+        assert_eq!(results[0].url, "https://c.example");
+
+        // Display-safe: the results never carry the key.
+        let json = serde_json::to_string(&results).unwrap();
+        assert!(!json.contains("custom-secret-key"));
     }
 
     /// A persisted GenericOpenAI row with a loopback base_url is classified

@@ -357,8 +357,8 @@ describe("ipc/commands wrappers", () => {
 
   // --- Web search (FEAT-004) ---------------------------------------------
 
-  it("setWebSearchProvider forwards kind + apiKey + maxResults and returns the view", async () => {
-    invoke.mockResolvedValue({ kind: "tavily", hasApiKey: true, maxResults: 5 });
+  it("setWebSearchProvider forwards kind + apiKey + maxResults + baseUrl and returns the view", async () => {
+    invoke.mockResolvedValue({ kind: "tavily", hasApiKey: true, maxResults: 5, baseUrl: null });
     await expect(setWebSearchProvider("tavily", "tvly-key", 5)).resolves.toMatchObject({
       kind: "tavily",
       hasApiKey: true,
@@ -367,6 +367,25 @@ describe("ipc/commands wrappers", () => {
       kind: "tavily",
       apiKey: "tvly-key",
       maxResults: 5,
+      baseUrl: undefined,
+    });
+  });
+
+  it("setWebSearchProvider forwards a custom endpoint as baseUrl", async () => {
+    invoke.mockResolvedValue({
+      kind: "custom",
+      hasApiKey: true,
+      maxResults: 5,
+      baseUrl: "https://search.example.com",
+    });
+    await expect(
+      setWebSearchProvider("custom", "custom-key", 5, "https://search.example.com"),
+    ).resolves.toMatchObject({ kind: "custom", baseUrl: "https://search.example.com" });
+    expect(invoke).toHaveBeenCalledWith("set_web_search_provider", {
+      kind: "custom",
+      apiKey: "custom-key",
+      maxResults: 5,
+      baseUrl: "https://search.example.com",
     });
   });
 

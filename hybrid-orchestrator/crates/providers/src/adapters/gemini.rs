@@ -875,6 +875,80 @@ mod tests {
         assert_eq!(GeminiFactory.kind(), ProviderKind::Gemini);
     }
 
+    /// Regression for Gemini auth-key DIAGNOSABILITY (FEAT-003). Google's AI
+    /// Studio "auth keys" are bound to a service account and restricted to the
+    /// Gemini API; a dormant/unrestricted key is rejected with an HTTP 401/403.
+    /// This proves a REJECTED key (401 from `list_models`) and a MISSING key
+    /// (no `api_key_ref`) surface as DISTINCT, display-safe, key-free errors, so
+    /// the picker's enumeration-error modal and the Diagnostics panel can tell
+    /// them apart without ever echoing the key.
+    #[tokio::test]
+    async fn list_models_rejected_key_is_distinct_and_key_free() {
+        let server = MockServer::start().await;
+        // Gemini rejects the auth key: 401 on the `/v1beta/models` listing. The
+        // real API delivers the key in the `x-goog-api-key` header (asserted
+        // here), so it can never be reflected onto the URL, and the error body
+        // Google returns does not contain the submitted key.
+        Mock::given(method("GET"))
+            .and(header("x-goog-api-key", "AIza-rejected"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "error": {
+                    "code": 401,
+                    "message": "API key not valid. Please pass a valid API key.",
+                    "status": "UNAUTHENTICATED"
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = GeminiAdapter::new("gemini", server.uri(), "AIza-rejected", None);
+        let rejected = adapter
+            .list_models()
+            .await
+            .expect_err("a 401 must surface as an error");
+
+        // A rejected key maps to HttpStatus with the numeric status preserved so
+        // Diagnostics can show "http status 401: ...". This is DISTINCT from the
+        // missing-key Auth error below.
+        match &rejected {
+            ProviderError::HttpStatus { status, .. } => assert_eq!(*status, 401),
+            other => panic!("expected HttpStatus(401) for a rejected key, got {other:?}"),
+        }
+        // Display is used verbatim as the per-provider enumeration message
+        // ({providerId, message}) rendered by EnumerationErrorModal and
+        // DiagnosticsSection: it must be key-free (the key lives only in the
+        // request header, never in the URL or Google's error body).
+        let rejected_display = rejected.to_string();
+        assert!(
+            !rejected_display.contains("AIza-rejected"),
+            "rejected-key error leaked the api key: {rejected_display}"
+        );
+
+        // The MISSING-key path: build_gemini with no api_key_ref yields an Auth
+        // error, a DIFFERENT variant with a different Display prefix, so the two
+        // failure modes are diagnosably distinct in the UI.
+        let store = InMemorySecretStore::new();
+        let cfg = ProviderConfig {
+            id: "gemini".to_string(),
+            kind: ProviderKind::Gemini,
+            base_url: None,
+            api_key_ref: None,
+            extra: Value::Null,
+        };
+        let missing = build_gemini(&cfg, &store).expect_err("missing key must error");
+        match &missing {
+            ProviderError::Auth(_) => {}
+            other => panic!("expected Auth error for a missing key, got {other:?}"),
+        }
+
+        // Rejected (HttpStatus) and missing (Auth) are distinguishable: different
+        // variants AND different Display strings, and neither echoes a key.
+        assert!(!matches!(missing, ProviderError::HttpStatus { .. }));
+        assert_ne!(rejected_display, missing.to_string());
+        assert!(rejected_display.starts_with("http status 401"));
+        assert!(missing.to_string().starts_with("auth error"));
+    }
+
     #[test]
     fn factory_requires_api_key() {
         let store = InMemorySecretStore::new();

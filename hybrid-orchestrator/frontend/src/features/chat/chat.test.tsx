@@ -161,6 +161,34 @@ describe("chat surface", () => {
     expect(screen.getByText("hi there")).toBeInTheDocument();
   });
 
+  it("renders the user's own 'hello' in a data-role='user' bubble after send (Bug 2)", async () => {
+    // Bug 2: the user's message text is announced via messageStarted{role:user,
+    // text} and must render in the user bubble immediately - not as an empty
+    // bubble. get_messages returns [] (the mid-turn DB state) so the ONLY source
+    // of the text is the seeded placeholder; the reload must not blank it.
+    invoke.mockResolvedValue([]);
+    useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });
+    render(<MessageList />);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("get_messages", { conversationId: "c-1" });
+    });
+
+    useConversationsStore.getState().applyCoreEvent({
+      type: "messageStarted",
+      conversationId: "c-1",
+      messageId: "u-1",
+      role: "user",
+      text: "hello",
+    });
+
+    const log = await screen.findByRole("log", { name: "Conversation messages" });
+    await waitFor(() => {
+      const userBubble = log.querySelector('[data-role="user"]');
+      expect(userBubble).not.toBeNull();
+      expect(userBubble?.textContent).toContain("hello");
+    });
+  });
+
   it("MessageList streams via delta then finalizes on complete, toggling StreamingIndicator", async () => {
     invoke.mockResolvedValue([{ ...textMessage("m-1", ""), status: "streaming", route: null }]);
     useConversationsStore.setState({ activeConversationId: "c-1" });
