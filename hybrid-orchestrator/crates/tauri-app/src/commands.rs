@@ -5421,10 +5421,13 @@ mod tests {
         assert!(view.has_api_key);
         assert_eq!(view.max_results, MAX_WEB_SEARCH_RESULTS);
 
-        // The view (and its serialized form) never carries the key.
+        // The view (and its serialized form) never carries the key. The
+        // secret-hygiene check is that the key VALUE is absent; the DTO
+        // legitimately carries a `hasApiKey` boolean (an intentional,
+        // non-sensitive presence marker), so a field-name substring assertion
+        // would collide with it and is deliberately not used here.
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains(plaintext));
-        assert!(!json.to_lowercase().contains("apikey"));
 
         // The config persisted the selection + cap; the key is reachable ONLY
         // via the internal resolve seam under the stable handle.
