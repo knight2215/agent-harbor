@@ -17,11 +17,13 @@ import { DiagnosticsSection } from "./DiagnosticsSection";
 import { LocalRuntimesSection } from "./LocalRuntimesSection";
 import { ProviderKeysSection } from "./ProviderKeysSection";
 import { RoutingSection } from "./RoutingSection";
+import { WebSearchSection } from "./WebSearchSection";
 
 /** The Settings sub-sections, in display order. */
 type SettingsSection =
   | "providers"
   | "localRuntimes"
+  | "webSearch"
   | "tools"
   | "agents"
   | "routing"
@@ -32,6 +34,7 @@ type SettingsSection =
 const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string }> = [
   { id: "providers", label: "Providers & Keys" },
   { id: "localRuntimes", label: "Local Runtimes" },
+  { id: "webSearch", label: "Web Search" },
   { id: "tools", label: "MCP / Tools" },
   { id: "agents", label: "Agents" },
   { id: "routing", label: "Routing" },
@@ -61,6 +64,7 @@ export function Settings() {
 
       {section === "providers" && <ProviderKeysSection />}
       {section === "localRuntimes" && <LocalRuntimesSection />}
+      {section === "webSearch" && <WebSearchSection />}
       {section === "tools" && <ToolManager />}
       {section === "agents" && <AgentEditor />}
       {section === "routing" && <RoutingSection />}

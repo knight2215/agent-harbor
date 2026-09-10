@@ -80,6 +80,67 @@ impl PricingConfig {
     }
 }
 
+/// The default `max_results` for a web search (FEAT-004). Bounds how many hits
+/// the composer injects as context before the model answers.
+pub const DEFAULT_WEB_SEARCH_MAX_RESULTS: u32 = 5;
+
+fn default_web_search_max_results() -> u32 {
+    DEFAULT_WEB_SEARCH_MAX_RESULTS
+}
+
+/// User-configured web-search settings that live in the versioned app config
+/// (FEAT-004). Additive and forward-compatible like [`PricingConfig`]: the whole
+/// struct is `#[serde(default)]` on [`AppConfig::web_search`], every field
+/// defaults, and it is omitted from the serialized config when it is the default
+/// (so older configs load unchanged and older builds ignore it via the `extra`
+/// catch-all).
+///
+/// SECRET HYGIENE (Section 9.1): the API KEY is NOT stored here. It is written to
+/// the OS keychain under [`WEB_SEARCH_SECRET_HANDLE`] and referenced only by that
+/// stable handle; this config records only the selected provider and result cap.
+/// The presence of a stored key is reported by the command view's `hasApiKey`
+/// (resolved core-internally), never by this struct.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchConfig {
+    /// The selected provider kind serialized as its camelCase tag (`tavily` /
+    /// `brave` / `serpApi`), or `None` when web search is unconfigured. Kept as
+    /// a `String` here so `persistence` does not depend on the `providers`
+    /// crate (which is crates.io-only / CI-built); the command layer maps it to
+    /// `providers::WebSearchKind`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled_provider: Option<String>,
+    /// How many results to request per search (default
+    /// [`DEFAULT_WEB_SEARCH_MAX_RESULTS`]).
+    #[serde(default = "default_web_search_max_results")]
+    pub max_results: u32,
+}
+
+impl Default for WebSearchConfig {
+    fn default() -> Self {
+        WebSearchConfig {
+            enabled_provider: None,
+            max_results: DEFAULT_WEB_SEARCH_MAX_RESULTS,
+        }
+    }
+}
+
+impl WebSearchConfig {
+    /// Whether this is the untouched default (no provider selected and the
+    /// default result cap), so it can be omitted from the serialized config.
+    pub fn is_default(&self) -> bool {
+        self.enabled_provider.is_none() && self.max_results == DEFAULT_WEB_SEARCH_MAX_RESULTS
+    }
+}
+
+/// The stable keychain handle under which the web-search API key is stored
+/// (FEAT-004). A single handle (rather than a per-kind one) keeps clearing the
+/// key simple: swapping providers overwrites the one entry, and
+/// `clear_web_search_provider` deletes exactly this handle. The key is written
+/// via `SecretStore::store(WEB_SEARCH_SECRET_HANDLE, plaintext)` and resolved
+/// core-internally at search time, mirroring the cloud-provider secret path.
+pub const WEB_SEARCH_SECRET_HANDLE: &str = "web-search";
+
 /// Application configuration (architecture.md Section 10.4).
 ///
 /// Known fields are typed; any unknown newer fields encountered on load are
@@ -109,6 +170,14 @@ pub struct AppConfig {
     /// single source `providers::list_available_models` and the cost signal read.
     #[serde(default, skip_serializing_if = "PricingConfig::is_empty")]
     pub pricing: PricingConfig,
+    /// User-configured web search (FEAT-004). Additive and forward-compatible:
+    /// `#[serde(default)]` so older configs (and the default case) deserialize
+    /// fine, and it is omitted from the serialized JSON when it is the untouched
+    /// default so older builds are unaffected. Records only the selected
+    /// provider + result cap; the API key lives in the keychain under
+    /// [`WEB_SEARCH_SECRET_HANDLE`], never here.
+    #[serde(default, skip_serializing_if = "WebSearchConfig::is_default")]
+    pub web_search: WebSearchConfig,
     /// Forward-compatibility catch-all: unknown newer fields are preserved here
     /// rather than dropped (Section 10.4).
     #[serde(flatten)]
@@ -127,6 +196,7 @@ impl Default for AppConfig {
             active_routing_policy: None,
             theme: None,
             pricing: PricingConfig::default(),
+            web_search: WebSearchConfig::default(),
             extra: BTreeMap::new(),
         }
     }
@@ -190,6 +260,7 @@ mod tests {
             active_routing_policy: Some("complexity".to_string()),
             theme: Some("dark".to_string()),
             pricing: PricingConfig::default(),
+            web_search: WebSearchConfig::default(),
             extra: BTreeMap::new(),
         };
         cfg.save(&db).await.unwrap();
@@ -282,6 +353,51 @@ mod tests {
         assert!(json.contains("\"openAI\""));
         assert!(json.contains("\"lmStudio\""));
         assert!(json.contains("\"inputPerMtok\""));
+    }
+
+    #[tokio::test]
+    async fn default_web_search_is_omitted_from_serialized_config() {
+        // The additive web_search field must not appear in the serialized JSON
+        // when it is the untouched default, so older builds (and the existing
+        // round-trip tests) are wholly unaffected by the new field.
+        let cfg = AppConfig::default();
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(
+            !json.contains("webSearch"),
+            "default web_search must be omitted, got: {json}"
+        );
+        assert_eq!(cfg.web_search.max_results, DEFAULT_WEB_SEARCH_MAX_RESULTS);
+        assert!(cfg.web_search.enabled_provider.is_none());
+    }
+
+    #[tokio::test]
+    async fn web_search_config_round_trips_additively() {
+        let db = Db::open_in_memory().await.unwrap();
+        let cfg = AppConfig {
+            web_search: WebSearchConfig {
+                enabled_provider: Some("tavily".to_string()),
+                max_results: 8,
+            },
+            ..AppConfig::default()
+        };
+        cfg.save(&db).await.unwrap();
+
+        let loaded = AppConfig::load(&db).await.unwrap();
+        assert_eq!(
+            loaded.web_search.enabled_provider.as_deref(),
+            Some("tavily")
+        );
+        assert_eq!(loaded.web_search.max_results, 8);
+
+        // The web-search config serializes in camelCase (the TS mirror + the
+        // provider-kind tag the command layer maps rely on it).
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"webSearch\""));
+        assert!(json.contains("\"enabledProvider\""));
+        assert!(json.contains("\"tavily\""));
+        // The API key is NEVER part of this config (it lives in the keychain).
+        assert!(!json.contains("apiKey"));
+        assert!(!json.contains("api_key"));
     }
 
     #[tokio::test]

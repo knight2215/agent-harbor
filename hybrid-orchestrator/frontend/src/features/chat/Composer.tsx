@@ -33,7 +33,7 @@
 import { useState } from "react";
 import type { KeyboardEvent } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { listRepoFiles, readFileBase64, readTextFile } from "../../ipc/commands";
+import { listRepoFiles, readFileBase64, readTextFile, runWebSearch } from "../../ipc/commands";
 import { useConversationsStore } from "../../state/conversations";
 import type { Attachment } from "../../state/conversations";
 import { useProvidersStore } from "../../state/providers";
@@ -44,7 +44,12 @@ import {
   InlineModelControl,
   RoutingModeToggle,
 } from "../model-selector";
-import { assembleContent, effectiveModelSupportsVision, totalBytes } from "./attachmentContext";
+import {
+  assembleContent,
+  assembleWebSearchContent,
+  effectiveModelSupportsVision,
+  totalBytes,
+} from "./attachmentContext";
 import { RepoPicker } from "./RepoPicker";
 
 /** File extensions offered as "text" in the attach dialog filter. */
@@ -232,14 +237,30 @@ export function Composer() {
     }
   };
 
-  const submit = () => {
+  const submit = async () => {
     const content = draft.trim();
     if (content.length === 0 || disabled) return;
     // Prepend the bounded, delimited context block from the one-turn
     // attachments; the store clears them after a successful send.
-    const assembled = assembleContent(attachments, content);
-    void sendMessage(assembled);
+    let assembled = assembleContent(attachments, content);
+    // Clear the draft immediately so the input frees up while any web search
+    // runs; the assembled content is already captured above.
     setDraft("");
+    // Web search (FEAT-004): when the 🌐 toggle is ON, run a search for the raw
+    // draft BEFORE sending and prepend the results as context. On failure OR
+    // when unconfigured, show a VISIBLE non-fatal notice and STILL send the
+    // plain message - never hang, never silently drop.
+    if (webSearchEnabled) {
+      setNotice(null);
+      try {
+        const results = await runWebSearch(content);
+        assembled = assembleWebSearchContent(results, assembled);
+      } catch (err: unknown) {
+        const reason = err instanceof Error ? err.message : String(err);
+        setNotice(`Web search unavailable: ${reason}. Sending without web results.`);
+      }
+    }
+    void sendMessage(assembled);
   };
 
   // Enter-to-send / Shift+Enter-newline (Issue 1). Guard IME composition so a
@@ -251,7 +272,7 @@ export function Composer() {
     if (event.nativeEvent.isComposing || event.keyCode === 229) return;
     if (event.shiftKey) return;
     event.preventDefault();
-    submit();
+    void submit();
   };
 
   const chipLabel = (attachment: Attachment): string => {
@@ -265,7 +286,7 @@ export function Composer() {
       className="composer"
       onSubmit={(event) => {
         event.preventDefault();
-        submit();
+        void submit();
       }}
     >
       {sendState === "failed" && (

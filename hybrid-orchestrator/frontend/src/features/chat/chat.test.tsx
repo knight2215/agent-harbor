@@ -413,6 +413,72 @@ describe("chat surface", () => {
     expect(toggle).toHaveAttribute("aria-pressed", "true");
   });
 
+  // --- FEAT-004 web search: inject-on-success / notice-and-still-send -------
+
+  it("Composer with the web-search toggle ON injects results as context before sending", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1", webSearchEnabled: true });
+    invoke.mockImplementation((command: string) => {
+      if (command === "run_web_search") {
+        return Promise.resolve([
+          { title: "Async Rust", url: "https://ex.com/async", snippet: "a guide" },
+        ]);
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Composer />);
+
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "how does async work" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    // The search runs for the raw draft ...
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("run_web_search", { query: "how does async work" });
+    });
+    // ... and the results are prepended as a delimited context block before the
+    // user's message, which is preserved in full.
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "send_message");
+      expect(call).toBeTruthy();
+      const content = (call?.[1] as { content: string }).content;
+      expect(content).toContain("Web search results");
+      expect(content).toContain("Async Rust");
+      expect(content).toContain("https://ex.com/async");
+      expect(content).toContain("how does async work");
+    });
+    // No failure notice is shown on the success path.
+    expect(screen.queryByTestId("composer-notice")).toBeNull();
+  });
+
+  it("Composer shows a non-fatal notice and STILL sends when web search fails/unconfigured", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1", webSearchEnabled: true });
+    invoke.mockImplementation((command: string) =>
+      command === "run_web_search"
+        ? Promise.reject(new Error("web search is not configured"))
+        : Promise.resolve(undefined),
+    );
+    render(<Composer />);
+
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "latest rust news" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    // A VISIBLE non-fatal notice (role=status) explains the degradation.
+    const notice = await screen.findByTestId("composer-notice");
+    expect(notice).toHaveAttribute("role", "status");
+    expect(notice).toHaveTextContent(/Web search unavailable/i);
+    expect(notice).toHaveTextContent(/Sending without web results/i);
+
+    // The PLAIN message is still sent (no web results block, never dropped).
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "send_message");
+      expect(call).toBeTruthy();
+      const content = (call?.[1] as { content: string }).content;
+      expect(content).toBe("latest rust news");
+      expect(content).not.toContain("Web search results");
+    });
+  });
+
   it("Composer Refresh models icon re-enumerates via the providers store load()", () => {
     useConversationsStore.setState({ activeConversationId: "c-1" });
     const load = vi.fn();

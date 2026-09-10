@@ -27,6 +27,9 @@ import type {
   RoutingMode,
   SecretRef,
   ToolDescriptorView,
+  WebSearchConfigView,
+  WebSearchKind,
+  WebSearchResultView,
 } from "../types";
 
 /**
@@ -246,6 +249,55 @@ export function listCloudProviders(): Promise<CloudProviderConfig[]> {
  */
 export function clearCloudProvider(kind: ProviderKind): Promise<void> {
   return invoke<void>("clear_cloud_provider", { kind });
+}
+
+// --- Web search (FEAT-004 / Section 8.1 web-search toggle) ------------------
+
+/**
+ * Configure the web-search provider (FEAT-004): pick a {@link WebSearchKind}
+ * (Tavily is the recommended default) and enter its API key, optionally
+ * overriding how many results a search requests. The plaintext key flows IN and
+ * is stored server-side as an opaque {@link SecretRef} under a stable keychain
+ * handle; it NEVER comes back across IPC (the returned {@link WebSearchConfigView}
+ * only reports `hasApiKey`). Backed by `set_web_search_provider`.
+ */
+export function setWebSearchProvider(
+  kind: WebSearchKind,
+  apiKey: string,
+  maxResults?: number | null,
+): Promise<WebSearchConfigView> {
+  return invoke<WebSearchConfigView>("set_web_search_provider", { kind, apiKey, maxResults });
+}
+
+/**
+ * Return the configured web-search provider so the Settings section can
+ * rehydrate from the backend source of truth, or `null` when web search is
+ * unconfigured. DISPLAY-SAFE: reports only kind / hasApiKey / maxResults, never
+ * the key. Backed by `get_web_search_config`.
+ */
+export function getWebSearchConfig(): Promise<WebSearchConfigView | null> {
+  return invoke<WebSearchConfigView | null>("get_web_search_config");
+}
+
+/**
+ * Clear the configured web-search provider, deleting the stored key from the OS
+ * keychain and resetting the selection. Clearing when nothing is configured is a
+ * no-op. Backed by `clear_web_search_provider`.
+ */
+export function clearWebSearchProvider(): Promise<void> {
+  return invoke<void>("clear_web_search_provider");
+}
+
+/**
+ * Run a web search for `query` and return display-safe results (FEAT-004),
+ * which the composer injects as a bounded context block before the model
+ * answers when the 🌐 toggle is ON. REJECTS with a clear error when web search
+ * is unconfigured (no provider/key) so the composer can show a VISIBLE
+ * non-fatal notice and STILL send the plain message. DISPLAY-SAFE: results carry
+ * only title/url/snippet, never the key. Backed by `run_web_search`.
+ */
+export function runWebSearch(query: string): Promise<WebSearchResultView[]> {
+  return invoke<WebSearchResultView[]>("run_web_search", { query });
 }
 
 // --- Message pipeline (P4.6 / Section 8.1) ----------------------------------

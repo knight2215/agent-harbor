@@ -40,6 +40,10 @@ import {
   readTextFile,
   readFileBase64,
   listRepoFiles,
+  setWebSearchProvider,
+  getWebSearchConfig,
+  clearWebSearchProvider,
+  runWebSearch,
 } from "./commands";
 import type { McpServerInput } from "../types";
 
@@ -343,5 +347,37 @@ describe("ipc/commands wrappers", () => {
     });
     await expect(listRepoFiles("/tmp/repo")).resolves.toMatchObject({ truncated: false });
     expect(invoke).toHaveBeenCalledWith("list_repo_files", { dir: "/tmp/repo" });
+  });
+
+  // --- Web search (FEAT-004) ---------------------------------------------
+
+  it("setWebSearchProvider forwards kind + apiKey + maxResults and returns the view", async () => {
+    invoke.mockResolvedValue({ kind: "tavily", hasApiKey: true, maxResults: 5 });
+    await expect(setWebSearchProvider("tavily", "tvly-key", 5)).resolves.toMatchObject({
+      kind: "tavily",
+      hasApiKey: true,
+    });
+    expect(invoke).toHaveBeenCalledWith("set_web_search_provider", {
+      kind: "tavily",
+      apiKey: "tvly-key",
+      maxResults: 5,
+    });
+  });
+
+  it("getWebSearchConfig invokes get_web_search_config", async () => {
+    invoke.mockResolvedValue(null);
+    await expect(getWebSearchConfig()).resolves.toBeNull();
+    expect(invoke).toHaveBeenCalledWith("get_web_search_config");
+  });
+
+  it("clearWebSearchProvider invokes clear_web_search_provider", async () => {
+    await clearWebSearchProvider();
+    expect(invoke).toHaveBeenCalledWith("clear_web_search_provider");
+  });
+
+  it("runWebSearch forwards the query and returns display-safe results", async () => {
+    invoke.mockResolvedValue([{ title: "T", url: "https://ex.com", snippet: "s" }]);
+    await expect(runWebSearch("rust async")).resolves.toMatchObject([{ title: "T" }]);
+    expect(invoke).toHaveBeenCalledWith("run_web_search", { query: "rust async" });
   });
 });

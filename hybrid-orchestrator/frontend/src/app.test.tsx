@@ -39,6 +39,18 @@ function routeInvoke(command: string): unknown {
     case "list_local_runtimes":
     case "list_embedded_models":
       return [];
+    case "run_web_search":
+      // FEAT-004: the composer calls this when the 🌐 toggle is ON. Default to
+      // no results so the plain message is sent unchanged.
+      return [];
+    case "get_web_search_config":
+      // FEAT-004: unconfigured by default (the WebSearchSection reads this on
+      // mount, and the composer path never depends on it).
+      return null;
+    case "clear_web_search_provider":
+      return undefined;
+    case "set_web_search_provider":
+      return { kind: "tavily", hasApiKey: true, maxResults: 5 };
     case "embedded_model_status":
       return { loadedModelId: null, registeredCount: 0 };
     case "provider_diagnostics":

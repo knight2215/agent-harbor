@@ -17,6 +17,7 @@ pub mod capability;
 pub mod contract;
 pub mod crypto;
 pub mod registry;
+pub mod web_search;
 
 pub mod adapters {
     //! Provider adapter implementations.
@@ -86,6 +87,15 @@ pub use adapters::embedded::{EmbeddedFactory, EmbeddedProvider};
 pub use adapters::anthropic::AnthropicFactory;
 pub use adapters::bedrock::BedrockFactory;
 pub use adapters::gemini::GeminiFactory;
+
+// Pluggable web search (FEAT-004): the `WebSearchProvider` trait, the selectable
+// `WebSearchKind` enum (Tavily default), the working Tavily adapter, and the
+// display-safe result/error/options types. Consumed by the tauri-app web-search
+// commands and unit-tested offline with wiremock (no live network).
+pub use web_search::{
+    TavilyProvider, WebSearchError, WebSearchKind, WebSearchOptions, WebSearchProvider,
+    WebSearchResult, TAVILY_DEFAULT_BASE_URL,
+};
 
 // Re-export the reused domain types so downstream crates can refer to them
 // through this crate's surface (single source of truth remains `domain`).

@@ -245,6 +245,40 @@ export interface CloudProviderConfig {
 }
 
 /**
+ * The selectable web-search backends (FEAT-004). Mirrors Rust
+ * `providers::WebSearchKind` (`#[serde(rename_all = "camelCase")]`): `tavily`
+ * (the recommended default), `brave`, and `serpApi` (the latter two are
+ * scaffolded backends). A string-literal union so the Settings dropdown and the
+ * command wrappers stay exact.
+ */
+export type WebSearchKind = "tavily" | "brave" | "serpApi";
+
+/**
+ * A display-safe view of the configured web-search provider (FEAT-004),
+ * returned by the `set_web_search_provider` / `get_web_search_config` commands.
+ * Mirrors Rust `commands::WebSearchConfigView`. `hasApiKey` reports only WHETHER
+ * a key is stored (as an opaque {@link SecretRef}), never the key itself; the
+ * key NEVER crosses IPC.
+ */
+export interface WebSearchConfigView {
+  kind: WebSearchKind;
+  hasApiKey: boolean;
+  maxResults: number;
+}
+
+/**
+ * A display-safe web-search result row (FEAT-004), returned by `run_web_search`
+ * and injected as context before the model answers. Mirrors Rust
+ * `commands::WebSearchResultView`. Carries only public result fields
+ * (title/url/snippet), never the API key.
+ */
+export interface WebSearchResultView {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+/**
  * Per-model capability descriptor. Mirrors Rust `providers::Capabilities`
  * (architecture.md Section 4.1). Rust uses `#[serde(rename_all = "camelCase")]`,
  * so `json_mode` -> `jsonMode` and `max_context` -> `maxContext`.

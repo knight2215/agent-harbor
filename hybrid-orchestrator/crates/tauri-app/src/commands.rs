@@ -22,12 +22,15 @@ use orchestrator_core::{
     McpTransport, Message, ModelParameters, PermissionGate, PermissionMode, PrivacyTag,
     ProviderConfig, ProviderKind, RouteSource, RoutingHint, RoutingMode, SecretRef, TurnContext,
 };
-use persistence::config::{AppConfig, PricingConfig};
+use persistence::config::{
+    AppConfig, PricingConfig, WebSearchConfig, DEFAULT_WEB_SEARCH_MAX_RESULTS,
+    WEB_SEARCH_SECRET_HANDLE,
+};
 use persistence::{McpServerRepo, ProviderRepo};
 use providers::{
     list_available_models as list_models,
     list_available_models_with_build_errors as list_models_with_build_errors,
-    AvailableModelsResult, PricingTable, TokenPrice,
+    AvailableModelsResult, PricingTable, TokenPrice, WebSearchKind, WebSearchOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1624,6 +1627,274 @@ async fn clear_cloud_provider_inner(
     repo.delete(id)
         .await
         .map_err(|e| CommandError::internal(e.to_string()))
+}
+
+// --- Web search (FEAT-004 / Section 8.1 web-search toggle) -----------------
+
+/// Maximum accepted `max_results` for a web search. Guards the provider request
+/// against an unbounded fan-out (Section 9.2 "bounds"); the composer only ever
+/// injects a handful of results as context.
+const MAX_WEB_SEARCH_RESULTS: u32 = 20;
+
+/// A display-safe view of the configured web-search provider (FEAT-004),
+/// returned by `set_web_search_provider` / `get_web_search_config`. It carries
+/// only non-secret fields (Section 9.1): the plaintext API key and any resolved
+/// secret NEVER cross this boundary. `has_api_key` reports only WHETHER a key is
+/// stored (as an opaque `SecretRef`), never the key itself.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchConfigView {
+    /// The selected provider kind (Tavily / Brave / SerpApi).
+    pub kind: WebSearchKind,
+    /// Whether an API key is stored (as an opaque `SecretRef`), never the key.
+    pub has_api_key: bool,
+    /// How many results a search requests.
+    pub max_results: u32,
+}
+
+/// A display-safe web-search result row (FEAT-004), returned by `run_web_search`
+/// and injected as context before the model answers. Carries only public result
+/// fields (title/url/snippet), never the API key.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchResultView {
+    /// The result title / page headline.
+    pub title: String,
+    /// The result URL.
+    pub url: String,
+    /// A short snippet / summary.
+    pub snippet: String,
+}
+
+/// Parse the persisted `enabled_provider` string into a [`WebSearchKind`], or
+/// `None` when web search is unconfigured (no provider selected). An unknown
+/// value (written by a newer build) is treated as unconfigured rather than an
+/// error so an older build degrades gracefully.
+fn parse_web_search_kind(stored: Option<&str>) -> Option<WebSearchKind> {
+    match stored {
+        Some(s) => serde_json::from_value(serde_json::Value::String(s.to_string())).ok(),
+        None => None,
+    }
+}
+
+/// Configure the web-search provider (FEAT-004): validate the kind + key, store
+/// the key as an opaque [`SecretRef`] under the stable [`WEB_SEARCH_SECRET_HANDLE`]
+/// (mirroring `set_cloud_provider`'s secret handling), persist the selection +
+/// result cap into the additive [`WebSearchConfig`], and return a display-safe
+/// [`WebSearchConfigView`] that NEVER carries the key.
+///
+/// Tauri maps the snake_case params to camelCase over the wire (`apiKey`,
+/// `maxResults`).
+#[tauri::command]
+pub async fn set_web_search_provider(
+    state: tauri::State<'_, AppState>,
+    kind: WebSearchKind,
+    api_key: String,
+    max_results: Option<u32>,
+) -> Result<WebSearchConfigView, CommandError> {
+    set_web_search_provider_inner(&state, kind, &api_key, max_results).await
+}
+
+/// The full validate-then-store-then-persist body of [`set_web_search_provider`],
+/// factored out so it can be driven directly in tests without a live Tauri
+/// `State` (the established `_inner` testability pattern).
+///
+/// It (1) requires a non-empty `api_key` within [`MAX_SECRET_LEN`]; (2) clamps
+/// `max_results` into `[1, MAX_WEB_SEARCH_RESULTS]`, defaulting to
+/// [`DEFAULT_WEB_SEARCH_MAX_RESULTS`]; (3) stores the key through the same
+/// secret store as `set_cloud_provider`, keeping only the opaque handle; and
+/// (4) persists the selected kind + cap into the additive [`WebSearchConfig`].
+/// It returns a display-safe [`WebSearchConfigView`] and NEVER the key.
+async fn set_web_search_provider_inner(
+    state: &AppState,
+    kind: WebSearchKind,
+    api_key: &str,
+    max_results: Option<u32>,
+) -> Result<WebSearchConfigView, CommandError> {
+    // (1) A configured provider always needs a key; reject empty/oversized.
+    if api_key.is_empty() {
+        return Err(CommandError::invalid("`apiKey` must not be empty"));
+    }
+    if api_key.len() > MAX_SECRET_LEN {
+        return Err(CommandError::invalid(format!(
+            "`apiKey` exceeds the maximum length of {MAX_SECRET_LEN} bytes"
+        )));
+    }
+
+    // (2) Clamp the result cap into a sane bound.
+    let max_results = max_results
+        .unwrap_or(DEFAULT_WEB_SEARCH_MAX_RESULTS)
+        .clamp(1, MAX_WEB_SEARCH_RESULTS);
+
+    // (3) Store the key as an opaque SecretRef under the stable handle; only the
+    // handle is persisted (in the keychain), never here.
+    state
+        .secret_store
+        .store(WEB_SEARCH_SECRET_HANDLE, api_key)
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // (4) Persist the selection + cap into the additive AppConfig field.
+    let db = state.session_manager.db();
+    let mut config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    config.web_search = WebSearchConfig {
+        enabled_provider: Some(kind.as_str().to_string()),
+        max_results,
+    };
+    config
+        .save(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    Ok(WebSearchConfigView {
+        kind,
+        has_api_key: true,
+        max_results,
+    })
+}
+
+/// Return the configured web-search provider so the Settings section can
+/// rehydrate from the backend source of truth, or `null` when web search is
+/// unconfigured. Display-safe: reports only kind / `hasApiKey` / `maxResults`,
+/// never the key. Backed by `get_web_search_config`.
+#[tauri::command]
+pub async fn get_web_search_config(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<WebSearchConfigView>, CommandError> {
+    get_web_search_config_inner(&state).await
+}
+
+/// The full body of [`get_web_search_config`], factored out for direct testing.
+/// Loads the [`WebSearchConfig`], maps the stored provider string to a
+/// [`WebSearchKind`] (unconfigured -> `None`), and reports whether a key is
+/// stored under the stable handle. Never returns the key.
+async fn get_web_search_config_inner(
+    state: &AppState,
+) -> Result<Option<WebSearchConfigView>, CommandError> {
+    let db = state.session_manager.db();
+    let config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let kind = match parse_web_search_kind(config.web_search.enabled_provider.as_deref()) {
+        Some(k) => k,
+        None => return Ok(None),
+    };
+    // `has_api_key` reflects whether a secret is stored under the stable handle;
+    // the plaintext is reachable only via the core-internal resolve seam.
+    let has_api_key = state
+        .secret_store
+        .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+        .is_ok();
+    Ok(Some(WebSearchConfigView {
+        kind,
+        has_api_key,
+        max_results: config.web_search.max_results,
+    }))
+}
+
+/// Clear the configured web-search provider: delete the stored key from the
+/// keychain (Section 9.1 hygiene) and reset the [`WebSearchConfig`] to its
+/// default (unconfigured). Clearing when nothing is configured is a no-op.
+/// Backed by `clear_web_search_provider`.
+#[tauri::command]
+pub async fn clear_web_search_provider(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    clear_web_search_provider_inner(&state).await
+}
+
+/// The full body of [`clear_web_search_provider`], factored out for direct
+/// testing. Deletes the secret under the stable handle (idempotent) and resets
+/// the config's web-search field to default.
+async fn clear_web_search_provider_inner(state: &AppState) -> Result<(), CommandError> {
+    state
+        .secret_store
+        .delete(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let db = state.session_manager.db();
+    let mut config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    config.web_search = WebSearchConfig::default();
+    config
+        .save(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))
+}
+
+/// Run a web search for `query` and return display-safe results (FEAT-004). It
+/// loads the [`WebSearchConfig`], resolves the API key CORE-INTERNALLY via the
+/// secret store, builds the configured [`providers::WebSearchProvider`], runs the
+/// search, and maps the hits into [`WebSearchResultView`]s.
+///
+/// It returns a CLEAR [`CommandError`] when web search is unconfigured (no
+/// provider selected or no stored key) so the composer can show a VISIBLE
+/// non-fatal notice and STILL send the plain message (never a silent hang). A
+/// provider failure surfaces as a display-safe error that never carries the key.
+/// Backed by `run_web_search`.
+#[tauri::command]
+pub async fn run_web_search(
+    state: tauri::State<'_, AppState>,
+    query: String,
+) -> Result<Vec<WebSearchResultView>, CommandError> {
+    run_web_search_inner(&state, &query).await
+}
+
+/// The full body of [`run_web_search`], factored out for direct testing against
+/// a wiremock-backed provider `base_url`.
+async fn run_web_search_inner(
+    state: &AppState,
+    query: &str,
+) -> Result<Vec<WebSearchResultView>, CommandError> {
+    validate_nonempty("query", query, MAX_MESSAGE_LEN)?;
+
+    let db = state.session_manager.db();
+    let config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // Unconfigured -> a CLEAR invalid-argument error the composer turns into a
+    // visible non-fatal notice while STILL sending the plain message.
+    let kind = parse_web_search_kind(config.web_search.enabled_provider.as_deref())
+        .ok_or_else(|| CommandError::invalid("web search is not configured"))?;
+
+    // Resolve the key CORE-INTERNALLY (the single plaintext seam); a missing key
+    // is treated as unconfigured with the same clear message.
+    let api_key = state
+        .secret_store
+        .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+        .map_err(|_| CommandError::invalid("web search is not configured (no API key stored)"))?;
+
+    // Build the configured provider (base_url None -> the kind's default
+    // endpoint) and run the search. `WebSearchError` is display-safe and never
+    // carries the key.
+    let provider = kind
+        .build(&api_key, web_search_base_url(state))
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let opts = WebSearchOptions {
+        max_results: config.web_search.max_results,
+    };
+    let results = provider
+        .search(query, opts)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    Ok(results
+        .into_iter()
+        .map(|r| WebSearchResultView {
+            title: r.title,
+            url: r.url,
+            snippet: r.snippet,
+        })
+        .collect())
+}
+
+/// The web-search provider base URL override, if any. Production uses the
+/// provider's built-in default (`None`); tests set `AppState.web_search_base_url`
+/// to point the Tavily adapter at a local wiremock server.
+fn web_search_base_url(state: &AppState) -> Option<&str> {
+    state.web_search_base_url.as_deref()
 }
 
 // --- Message pipeline (P4.6 / Section 2.2 / 8.1) ---------------------------
@@ -4626,6 +4897,209 @@ mod tests {
             .await
             .unwrap();
         assert!(configs.is_empty());
+    }
+
+    // --- Web search (FEAT-004) ---------------------------------------------
+
+    /// `set_web_search_provider_inner` persists the selection + clamped cap,
+    /// stores the key as an opaque `SecretRef` under the stable handle, and
+    /// returns a display-safe view with `hasApiKey = true` that NEVER echoes the
+    /// key.
+    #[tokio::test]
+    async fn set_web_search_provider_inner_persists_without_echoing_key() {
+        let state = test_state().await;
+        let plaintext = "tvly-do-not-leak-1234";
+
+        let view = set_web_search_provider_inner(
+            &state,
+            WebSearchKind::Tavily,
+            plaintext,
+            Some(50), // over the cap -> clamped to MAX_WEB_SEARCH_RESULTS
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.kind, WebSearchKind::Tavily);
+        assert!(view.has_api_key);
+        assert_eq!(view.max_results, MAX_WEB_SEARCH_RESULTS);
+
+        // The view (and its serialized form) never carries the key.
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains(plaintext));
+        assert!(!json.to_lowercase().contains("apikey"));
+
+        // The config persisted the selection + cap; the key is reachable ONLY
+        // via the internal resolve seam under the stable handle.
+        let cfg = AppConfig::load(state.session_manager.db()).await.unwrap();
+        assert_eq!(cfg.web_search.enabled_provider.as_deref(), Some("tavily"));
+        assert_eq!(cfg.web_search.max_results, MAX_WEB_SEARCH_RESULTS);
+        assert_eq!(
+            state
+                .secret_store
+                .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+                .unwrap(),
+            plaintext
+        );
+    }
+
+    /// The handler REJECTS invalid input before touching the store/config: an
+    /// empty key and an over-long key both error, and nothing is persisted.
+    #[tokio::test]
+    async fn set_web_search_provider_inner_rejects_invalid_input() {
+        let state = test_state().await;
+
+        let err = set_web_search_provider_inner(&state, WebSearchKind::Tavily, "", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        let too_long = "x".repeat(MAX_SECRET_LEN + 1);
+        let err = set_web_search_provider_inner(&state, WebSearchKind::Tavily, &too_long, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // Nothing was stored or persisted for the rejected calls.
+        assert!(state
+            .secret_store
+            .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+            .is_err());
+        let cfg = AppConfig::load(state.session_manager.db()).await.unwrap();
+        assert!(cfg.web_search.enabled_provider.is_none());
+    }
+
+    /// `get_web_search_config_inner` returns `None` when unconfigured and
+    /// rehydrates the display-safe view (with `hasApiKey`) after a set.
+    #[tokio::test]
+    async fn get_web_search_config_inner_rehydrates() {
+        let state = test_state().await;
+
+        // Unconfigured -> None.
+        assert!(get_web_search_config_inner(&state).await.unwrap().is_none());
+
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-key", Some(7))
+            .await
+            .unwrap();
+
+        let view = get_web_search_config_inner(&state)
+            .await
+            .unwrap()
+            .expect("configured web search must rehydrate");
+        assert_eq!(view.kind, WebSearchKind::Tavily);
+        assert!(view.has_api_key);
+        assert_eq!(view.max_results, 7);
+    }
+
+    /// `clear_web_search_provider_inner` deletes the stored secret AND resets the
+    /// config to default (unconfigured), and is idempotent.
+    #[tokio::test]
+    async fn clear_web_search_provider_inner_removes_secret_and_config() {
+        let state = test_state().await;
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-key", None)
+            .await
+            .unwrap();
+
+        clear_web_search_provider_inner(&state).await.unwrap();
+
+        // Secret gone, config reset, and get -> None.
+        assert!(state
+            .secret_store
+            .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+            .is_err());
+        let cfg = AppConfig::load(state.session_manager.db()).await.unwrap();
+        assert!(cfg.web_search.enabled_provider.is_none());
+        assert!(get_web_search_config_inner(&state).await.unwrap().is_none());
+
+        // Clearing again is a no-op (idempotent).
+        clear_web_search_provider_inner(&state).await.unwrap();
+    }
+
+    /// `run_web_search_inner` returns a CLEAR invalid-argument error when web
+    /// search is unconfigured, so the composer shows a visible non-fatal notice
+    /// and STILL sends the plain message.
+    #[tokio::test]
+    async fn run_web_search_inner_unconfigured_errors_clearly() {
+        let state = test_state().await;
+        let err = run_web_search_inner(&state, "anything").await.unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+        assert!(err.message.to_lowercase().contains("not configured"));
+    }
+
+    /// `run_web_search_inner` happy path: with a configured Tavily provider and
+    /// the `web_search_base_url` pointed at a local wiremock server, it resolves
+    /// the key core-internally, runs the search, and returns display-safe
+    /// results that never echo the key.
+    #[tokio::test]
+    async fn run_web_search_inner_returns_results_via_mock_provider() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    {"title": "T1", "url": "https://a.example", "content": "snippet one"},
+                    {"title": "T2", "url": "https://b.example", "content": "snippet two"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        // Build state with the base_url override pointed at the mock server.
+        let db = Db::open_in_memory().await.unwrap();
+        let (mut state, _rx) = AppState::new(
+            SessionManager::new(db),
+            Arc::new(InMemorySecretStore::new()),
+        );
+        state.web_search_base_url = Some(server.uri());
+
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-secret-key", Some(2))
+            .await
+            .unwrap();
+
+        let results = run_web_search_inner(&state, "rust async").await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "T1");
+        assert_eq!(results[0].url, "https://a.example");
+        assert_eq!(results[0].snippet, "snippet one");
+
+        // Display-safe: the results never carry the key.
+        let json = serde_json::to_string(&results).unwrap();
+        assert!(!json.contains("tvly-secret-key"));
+    }
+
+    /// `run_web_search_inner` maps a provider failure (a non-200 from the mock)
+    /// into a display-safe error that never carries the key.
+    #[tokio::test]
+    async fn run_web_search_inner_provider_failure_is_display_safe() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string("unauthorized: tvly-secret-key"),
+            )
+            .mount(&server)
+            .await;
+
+        let db = Db::open_in_memory().await.unwrap();
+        let (mut state, _rx) = AppState::new(
+            SessionManager::new(db),
+            Arc::new(InMemorySecretStore::new()),
+        );
+        state.web_search_base_url = Some(server.uri());
+
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-secret-key", None)
+            .await
+            .unwrap();
+
+        let err = run_web_search_inner(&state, "q").await.unwrap_err();
+        assert!(matches!(err.code, ErrorCode::Internal));
+        // The display-safe error keeps the status but never the key.
+        assert!(err.message.contains("401"));
+        assert!(!err.message.contains("tvly-secret-key"));
     }
 
     /// A persisted GenericOpenAI row with a loopback base_url is classified

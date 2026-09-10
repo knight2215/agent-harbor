@@ -16,7 +16,7 @@
 // image bytes to a vision model is a documented follow-up.
 
 import type { Attachment } from "../../state/conversations";
-import type { AvailableModel, ManualRoute } from "../../types";
+import type { AvailableModel, ManualRoute, WebSearchResultView } from "../../types";
 
 /**
  * Whether the model effective for the NEXT turn supports vision, so the composer
@@ -110,4 +110,45 @@ export function assembleContent(attachments: Attachment[], draft: string): strin
     ? `${block}\n\n_(some attached context was omitted to stay within the size limit)_`
     : block;
   return draft.length > 0 ? `${withMarker}\n\n${draft}` : withMarker;
+}
+
+/**
+ * Prepend a bounded, clearly-delimited "Web search results" block to `content`
+ * (FEAT-004). Called by the composer when the 🌐 toggle is ON and a search
+ * succeeded, BEFORE the message is sent, so the model answers with the fetched
+ * results as context. The pipeline treats `content` as a plain String, so this
+ * rides inside the existing turn with no change to `run_turn` / `send_message`.
+ *
+ * The block is capped at {@link MAX_CONTEXT_BYTES} using the SAME
+ * add-until-it-would-exceed approach as {@link assembleContent}: results are
+ * appended in order until the next one would exceed the cap, at which point a
+ * truncation marker is added and the rest are dropped. The user's `content` is
+ * ALWAYS preserved in full (it is appended after the block). An empty result
+ * list returns `content` unchanged so an empty search never adds noise.
+ */
+export function assembleWebSearchContent(results: WebSearchResultView[], content: string): string {
+  const list = Array.isArray(results) ? results : [];
+  if (list.length === 0) {
+    return content;
+  }
+  const sections: string[] = [];
+  let used = 0;
+  let truncated = false;
+  for (const result of list) {
+    const section = `- ${result.title}\n  ${result.url}\n  ${result.snippet}`;
+    const sectionBytes = byteLength(section);
+    if (used + sectionBytes > MAX_CONTEXT_BYTES) {
+      truncated = true;
+      break;
+    }
+    sections.push(section);
+    used += sectionBytes;
+  }
+  const header =
+    "Web search results for this message (use them to inform your answer, and cite URLs when relevant):";
+  const block = [header, ...sections].join("\n\n");
+  const withMarker = truncated
+    ? `${block}\n\n_(some web results were omitted to stay within the size limit)_`
+    : block;
+  return content.length > 0 ? `${withMarker}\n\n${content}` : withMarker;
 }

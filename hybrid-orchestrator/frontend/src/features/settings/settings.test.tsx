@@ -47,6 +47,10 @@ describe("Settings", () => {
           providers: [],
         });
       }
+      // FEAT-004: the Web Search section reads this on mount; unconfigured.
+      if (cmd === "get_web_search_config") {
+        return Promise.resolve(null);
+      }
       return Promise.resolve([]);
     });
     render(<Settings />);
@@ -59,6 +63,10 @@ describe("Settings", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Local Runtimes" }));
     expect(await screen.findByRole("region", { name: "Local Runtimes" })).toBeInTheDocument();
+
+    // FEAT-004: the Web Search section is registered and renders by name.
+    fireEvent.click(screen.getByRole("button", { name: "Web Search" }));
+    expect(await screen.findByRole("region", { name: "Web Search" })).toBeInTheDocument();
     // The informational note for genuinely-future runtimes is present and
     // labeled, and it no longer claims Ollama (shipped) is "coming soon" nor
     // that the embedded engine is unavailable.
@@ -767,6 +775,92 @@ describe("LocalRuntimesSection OpenAI-compatible runtimes", () => {
     // The configured line is removed after the refreshed list comes back empty.
     await waitFor(() => {
       expect(screen.queryByTestId("local-runtime-configured-lmStudio")).not.toBeInTheDocument();
+    });
+  });
+});
+
+import { WebSearchSection } from "./WebSearchSection";
+import type { WebSearchConfigView } from "../../types";
+
+// FEAT-004: the Web Search settings section saves / clears / rehydrates the
+// configured provider through the web-search commands. Every mounting test
+// mocks `get_web_search_config` (read on mount) with a well-formed shape; the
+// key is write-only (never displayed) and every input has an explicit
+// aria-label (help-text-wrapping bug guard).
+describe("WebSearchSection", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    invoke.mockResolvedValue(null);
+    window.localStorage.clear();
+  });
+
+  const view = (kind: WebSearchConfigView["kind"], maxResults: number): WebSearchConfigView => ({
+    kind,
+    hasApiKey: true,
+    maxResults,
+  });
+
+  it("rehydrates the configured provider from get_web_search_config on mount", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_web_search_config") return Promise.resolve(view("tavily", 7));
+      return Promise.resolve(null);
+    });
+    render(<WebSearchSection />);
+
+    // The configured line rehydrates with the provider label + result count.
+    expect(await screen.findByTestId("web-search-configured-tavily")).toBeInTheDocument();
+    // Every input is reachable by its explicit accessible name.
+    expect(screen.getByLabelText("Web search provider")).toBeInTheDocument();
+    expect(screen.getByLabelText("Web search API key")).toBeInTheDocument();
+    expect(screen.getByLabelText("Web search max results")).toHaveValue(7);
+  });
+
+  it("saves the provider + key and never displays the key", async () => {
+    invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "get_web_search_config") return Promise.resolve(null);
+      if (cmd === "set_web_search_provider") {
+        return Promise.resolve(view((args?.kind as WebSearchConfigView["kind"]) ?? "tavily", 5));
+      }
+      return Promise.resolve(null);
+    });
+    render(<WebSearchSection />);
+
+    // Enter a key and save.
+    const keyInput = screen.getByLabelText("Web search API key") as HTMLInputElement;
+    fireEvent.change(keyInput, { target: { value: "tvly-secret-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_web_search_provider", {
+        kind: "tavily",
+        apiKey: "tvly-secret-key",
+        maxResults: 5,
+      });
+    });
+    // The configured line appears and the key input is cleared (write-only).
+    expect(await screen.findByTestId("web-search-configured-tavily")).toBeInTheDocument();
+    expect((screen.getByLabelText("Web search API key") as HTMLInputElement).value).toBe("");
+    // The key is a password input and is never rendered as visible text.
+    expect(keyInput.type).toBe("password");
+    expect(screen.queryByText("tvly-secret-key")).not.toBeInTheDocument();
+  });
+
+  it("clears the configured provider", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_web_search_config") return Promise.resolve(view("tavily", 5));
+      if (cmd === "clear_web_search_provider") return Promise.resolve(undefined);
+      return Promise.resolve(null);
+    });
+    render(<WebSearchSection />);
+
+    const clear = await screen.findByTestId("web-search-clear");
+    fireEvent.click(clear);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("clear_web_search_provider");
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("web-search-configured-tavily")).not.toBeInTheDocument();
     });
   });
 });
