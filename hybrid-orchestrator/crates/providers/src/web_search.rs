@@ -156,8 +156,13 @@ impl WebSearchKind {
 /// The pluggable web-search contract (FEAT-004). Implementors run a query and
 /// return normalized [`WebSearchResult`]s; failures are display-safe and never
 /// carry the API key.
+///
+/// `Debug` is a supertrait so `Box<dyn WebSearchProvider>` is `Debug` (which
+/// `WebSearchKind::build(...).unwrap_err()` relies on in tests). Implementors
+/// that hold a secret MUST provide a REDACTING `Debug` impl so the key is never
+/// exposed via `Debug` (see [`TavilyProvider`]).
 #[async_trait]
-pub trait WebSearchProvider: Send + Sync {
+pub trait WebSearchProvider: std::fmt::Debug + Send + Sync {
     /// Run a search for `query`, returning up to `opts.max_results` results. An
     /// empty results list is a successful empty `Vec`, not an error.
     async fn search(
@@ -171,10 +176,23 @@ pub trait WebSearchProvider: Send + Sync {
 /// `{base_url}/search` with a JSON body `{ api_key, query, max_results }` and
 /// parses the `results` array (`title` / `url` / `content`) into
 /// [`WebSearchResult`]s.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TavilyProvider {
     client: HttpSseClient,
     api_key: String,
+}
+
+// A REDACTING `Debug` impl: `WebSearchProvider` requires `Debug`, but
+// `TavilyProvider` holds the API key. A derived `Debug` would print the key, so
+// we implement it by hand and redact the secret (SECRET HYGIENE, Section 9.1 /
+// 9.2). The key value is NEVER written.
+impl std::fmt::Debug for TavilyProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TavilyProvider")
+            .field("client", &self.client)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl TavilyProvider {
