@@ -1080,6 +1080,295 @@ body {
   color: var(--ah-danger);
 }
 
+/* --- Agents (persona editor) ---------------------------------------------- */
+
+/*
+ * The Agents section reuses the AgentEditor surface (PersonaList + PersonaEditor)
+ * rather than a thin settings wrapper, so it does not naturally pick up the
+ * .settings__panel / .settings-form treatment the other sections share. These
+ * rules give it the SAME harbor-blue themed look using the SAME tokens, so the
+ * form matches Providers & Keys / Web Search in both light and dark themes.
+ */
+
+/* The panel: a two-column layout with the persona list beside the editor,
+   wrapped in the shared panel surface/border/padding. */
+.agent-editor {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  gap: var(--ah-space-5);
+  align-items: start;
+  min-width: 0;
+  padding: var(--ah-space-5);
+  background: var(--ah-surface);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+}
+
+/* Persona list column. */
+.persona-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+  min-width: 0;
+}
+
+.persona-list__new {
+  align-self: stretch;
+  padding: var(--ah-space-2) var(--ah-space-4);
+  border: none;
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-accent);
+  color: var(--ah-accent-contrast);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.persona-list__new:hover {
+  background: var(--ah-accent-strong);
+}
+
+.persona-list__empty {
+  margin: 0;
+  color: var(--ah-text-muted);
+}
+
+.persona-list ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+}
+
+.persona-list__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ah-space-2);
+}
+
+/* The persona name button (selectable row) and the Delete affordance. */
+.persona-list__item button {
+  padding: var(--ah-space-1) var(--ah-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--ah-radius-sm);
+  background: transparent;
+  color: var(--ah-text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.persona-list__item button:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.persona-list__item button:hover {
+  background: var(--ah-surface-hover);
+  color: var(--ah-text);
+}
+
+.persona-list__item button[data-selected="true"] {
+  background: var(--ah-accent-soft);
+  color: var(--ah-accent);
+  font-weight: 600;
+}
+
+/* Editor column: mirrors .settings-form (same tokens/spacing). */
+.persona-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-3);
+  min-width: 0;
+  max-width: 480px;
+}
+
+.persona-editor__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+  color: var(--ah-text-muted);
+}
+
+.persona-editor input,
+.persona-editor select,
+.persona-editor textarea,
+.model-parameters input,
+.model-parameters textarea {
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text);
+  font: inherit;
+}
+
+.persona-editor textarea,
+.model-parameters textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+/* Model parameters fieldset/legend. */
+.model-parameters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-3);
+  margin: 0;
+  padding: var(--ah-space-4);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface-2);
+}
+
+.model-parameters legend {
+  padding: 0 var(--ah-space-2);
+  font-weight: 600;
+  color: var(--ah-text);
+}
+
+.model-parameters__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+  color: var(--ah-text-muted);
+}
+
+/* Default route picker. */
+.default-route-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+}
+
+.default-route-picker__header {
+  display: flex;
+  align-items: center;
+  gap: var(--ah-space-2);
+  flex-wrap: wrap;
+}
+
+.default-route-picker__label {
+  font-weight: 600;
+  color: var(--ah-text);
+}
+
+.default-route-picker__current {
+  color: var(--ah-text-muted);
+  font-family: var(--ah-font-mono);
+  font-size: 12px;
+}
+
+.default-route-picker__header button {
+  padding: var(--ah-space-1) var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.default-route-picker__header button:hover {
+  background: var(--ah-surface-hover);
+}
+
+/* Routing hint radiogroup (segmented buttons). */
+.routing-hint {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ah-space-1);
+  padding: var(--ah-space-1);
+  background: var(--ah-surface-2);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+}
+
+.routing-hint button {
+  padding: var(--ah-space-1) var(--ah-space-3);
+  border: none;
+  border-radius: var(--ah-radius-sm);
+  background: transparent;
+  color: var(--ah-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.routing-hint button:hover {
+  color: var(--ah-text);
+}
+
+.routing-hint button[data-active="true"] {
+  background: var(--ah-accent-soft);
+  color: var(--ah-accent);
+  font-weight: 600;
+}
+
+/* Allowed tool servers fieldset. */
+.allowed-tools {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+  margin: 0;
+  padding: var(--ah-space-4);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface-2);
+}
+
+.allowed-tools legend {
+  padding: 0 var(--ah-space-2);
+  font-weight: 600;
+  color: var(--ah-text);
+}
+
+.allowed-tools__item {
+  display: flex;
+  align-items: center;
+  gap: var(--ah-space-2);
+  color: var(--ah-text);
+}
+
+.allowed-tools__empty {
+  margin: 0;
+  color: var(--ah-text-muted);
+}
+
+/* Inline validation error alert. */
+.persona-editor__error {
+  margin: 0;
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-danger);
+  border-radius: var(--ah-radius-sm);
+  color: var(--ah-danger);
+}
+
+/* Save / Create persona action row. */
+.persona-editor__actions {
+  display: flex;
+  gap: var(--ah-space-2);
+  flex-wrap: wrap;
+}
+
+.persona-editor__actions button {
+  align-self: flex-start;
+  padding: var(--ah-space-2) var(--ah-space-4);
+  border: none;
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-accent);
+  color: var(--ah-accent-contrast);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.persona-editor__actions button:hover {
+  background: var(--ah-accent-strong);
+}
+
 /* --- Appearance / theme toggle -------------------------------------------- */
 
 .theme-toggle {
@@ -1485,6 +1774,10 @@ body {
   }
 
   .settings {
+    grid-template-columns: 1fr;
+  }
+
+  .agent-editor {
     grid-template-columns: 1fr;
   }
 }
