@@ -10,6 +10,15 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => undefined),
 }));
 
+// The Composer's Attach / Repository controls open the native dialog via
+// `@tauri-apps/plugin-dialog`; mock `open()` so tests drive it without a live
+// Tauri runtime (the settings.test.tsx pattern). Each test overrides the return
+// value for the path(s) or folder it exercises.
+const dialogOpen = vi.fn();
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: (...args: unknown[]) => dialogOpen(...args),
+}));
+
 import { useConversationsStore } from "../../state/conversations";
 import { useProvidersStore } from "../../state/providers";
 import { Composer } from "./Composer";
@@ -46,23 +55,43 @@ function model(providerId: string, id: string, local: boolean): AvailableModel {
   };
 }
 
+/** A model with the `vision` capability, for the image-attach vision gate. */
+function visionModel(providerId: string, id: string): AvailableModel {
+  const base = model(providerId, id, false);
+  return { ...base, capabilities: { ...base.capabilities, vision: true } };
+}
+
+// The providers store is a module-level singleton; capture its REAL load() once
+// before any test swaps in a spy so resetStores() can restore it (a leaked spy
+// would otherwise persist across tests, since the Composer now calls load()).
+const realProvidersLoad = useProvidersStore.getState().load;
+
 function resetStores() {
   useConversationsStore.setState({
     conversations: [],
     activeConversationId: null,
     messages: [],
     pendingOverride: null,
+    webSearchEnabled: false,
+    attachments: [],
     pendingPermissions: [],
     sendState: "idle",
     sendError: null,
   });
-  useProvidersStore.setState({ models: [] });
+  useProvidersStore.setState({
+    models: [],
+    errors: [],
+    loadState: "idle",
+    lastError: null,
+    load: realProvidersLoad,
+  });
 }
 
 describe("chat surface", () => {
   beforeEach(() => {
     invoke.mockReset();
     invoke.mockResolvedValue(undefined);
+    dialogOpen.mockReset();
     resetStores();
   });
 
@@ -356,6 +385,275 @@ describe("chat surface", () => {
     fireEvent.click(screen.getByRole("button", { name: "Stop" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("stop_generation", { conversationId: "c-1" });
+    });
+  });
+
+  it("Composer exposes the Attach / Repository / Web-search icon affordances", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<Composer />);
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add repository context" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Toggle web search" })).toBeInTheDocument();
+    // A small Refresh-models icon lives in the composer control row.
+    expect(screen.getByRole("button", { name: "Refresh models" })).toBeInTheDocument();
+  });
+
+  it("Composer web-search toggle flips the shared store flag (aria-pressed)", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1", webSearchEnabled: false });
+    render(<Composer />);
+    const toggle = screen.getByRole("button", { name: "Toggle web search" });
+    // Off by default.
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(useConversationsStore.getState().webSearchEnabled).toBe(false);
+
+    fireEvent.click(toggle);
+    // The real on/off flag in the conversations store is flipped (FEAT-004
+    // consumes it); aria-pressed reflects the new state.
+    expect(useConversationsStore.getState().webSearchEnabled).toBe(true);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+  });
+
+  // --- FEAT-004 web search: inject-on-success / notice-and-still-send -------
+
+  it("Composer with the web-search toggle ON injects results as context before sending", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1", webSearchEnabled: true });
+    invoke.mockImplementation((command: string) => {
+      if (command === "run_web_search") {
+        return Promise.resolve([
+          { title: "Async Rust", url: "https://ex.com/async", snippet: "a guide" },
+        ]);
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Composer />);
+
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "how does async work" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    // The search runs for the raw draft ...
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("run_web_search", { query: "how does async work" });
+    });
+    // ... and the results are prepended as a delimited context block before the
+    // user's message, which is preserved in full.
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "send_message");
+      expect(call).toBeTruthy();
+      const content = (call?.[1] as { content: string }).content;
+      expect(content).toContain("Web search results");
+      expect(content).toContain("Async Rust");
+      expect(content).toContain("https://ex.com/async");
+      expect(content).toContain("how does async work");
+    });
+    // No failure notice is shown on the success path.
+    expect(screen.queryByTestId("composer-notice")).toBeNull();
+  });
+
+  it("Composer shows a non-fatal notice and STILL sends when web search fails/unconfigured", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1", webSearchEnabled: true });
+    invoke.mockImplementation((command: string) =>
+      command === "run_web_search"
+        ? Promise.reject(new Error("web search is not configured"))
+        : Promise.resolve(undefined),
+    );
+    render(<Composer />);
+
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "latest rust news" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    // A VISIBLE non-fatal notice (role=status) explains the degradation.
+    const notice = await screen.findByTestId("composer-notice");
+    expect(notice).toHaveAttribute("role", "status");
+    expect(notice).toHaveTextContent(/Web search unavailable/i);
+    expect(notice).toHaveTextContent(/Sending without web results/i);
+
+    // The PLAIN message is still sent (no web results block, never dropped).
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "send_message");
+      expect(call).toBeTruthy();
+      const content = (call?.[1] as { content: string }).content;
+      expect(content).toBe("latest rust news");
+      expect(content).not.toContain("Web search results");
+    });
+  });
+
+  it("Composer Refresh models icon re-enumerates via the providers store load()", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    const load = vi.fn();
+    useProvidersStore.setState({ load });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+    expect(load).toHaveBeenCalled();
+    // The next beforeEach -> resetStores() restores the real load(), so the
+    // seeded spy does not leak into sibling tests.
+  });
+
+  // --- FEAT-003 attach / repository context --------------------------------
+
+  it("Composer attaches a text file (chip) and prepends its content on send", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    dialogOpen.mockResolvedValue("/tmp/notes.txt");
+    invoke.mockImplementation((command: string) => {
+      if (command === "read_text_file") {
+        return Promise.resolve({
+          path: "/tmp/notes.txt",
+          name: "notes.txt",
+          byteLen: 11,
+          text: "hello world",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Composer />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach file" }));
+    // A removable chip appears once the read resolves.
+    await screen.findByRole("button", { name: "Remove attachment notes.txt" });
+    await waitFor(() => {
+      expect(useConversationsStore.getState().attachments).toHaveLength(1);
+    });
+
+    // Sending prepends the file's content (fenced block) to the trimmed draft.
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "summarize this" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "send_message");
+      expect(call).toBeTruthy();
+      const content = (call?.[1] as { content: string }).content;
+      expect(content).toContain("### Attached file: notes.txt");
+      expect(content).toContain("hello world");
+      expect(content).toContain("summarize this");
+    });
+  });
+
+  it("Composer attaches an image when the selected model supports vision", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    useProvidersStore.setState({ models: [visionModel("openai", "gpt-4o")] });
+    dialogOpen.mockResolvedValue("/tmp/pic.png");
+    invoke.mockImplementation((command: string) => {
+      if (command === "read_file_base64") {
+        return Promise.resolve({
+          path: "/tmp/pic.png",
+          name: "pic.png",
+          mimeType: "image/png",
+          base64: "Zm9v",
+          byteLen: 3,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Composer />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach file" }));
+    await screen.findByRole("button", { name: "Remove attachment pic.png" });
+    await waitFor(() => {
+      const atts = useConversationsStore.getState().attachments;
+      expect(atts).toHaveLength(1);
+      expect(atts[0].kind).toBe("image");
+    });
+  });
+
+  it("Composer shows a notice and does NOT attach an image for a non-vision model", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    // A model WITHOUT vision (the default `model()` helper sets vision: false).
+    useProvidersStore.setState({ models: [model("openai", "gpt-3.5", false)] });
+    dialogOpen.mockResolvedValue("/tmp/pic.png");
+    const readSpy = vi.fn();
+    invoke.mockImplementation((command: string) => {
+      if (command === "read_file_base64") {
+        readSpy();
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Composer />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach file" }));
+    // The visible non-fatal notice appears and no image is attached.
+    const notice = await screen.findByTestId("composer-notice");
+    expect(notice).toHaveTextContent("This model doesn't support images");
+    expect(useConversationsStore.getState().attachments).toHaveLength(0);
+    // The image read command is never even called for a non-vision model.
+    expect(readSpy).not.toHaveBeenCalled();
+  });
+
+  it("Composer removes a chip when its remove button is clicked", async () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      attachments: [{ kind: "text", name: "a.txt", path: "/tmp/a.txt", byteLen: 5, text: "hello" }],
+    });
+    render(<Composer />);
+    const remove = screen.getByRole("button", { name: "Remove attachment a.txt" });
+    fireEvent.click(remove);
+    await waitFor(() => {
+      expect(useConversationsStore.getState().attachments).toHaveLength(0);
+    });
+  });
+
+  it("Composer clears attachments after a successful send", async () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      attachments: [{ kind: "text", name: "a.txt", path: "/tmp/a.txt", byteLen: 5, text: "hello" }],
+    });
+    invoke.mockResolvedValue(undefined);
+    render(<Composer />);
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "go" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      expect(useConversationsStore.getState().attachments).toHaveLength(0);
+    });
+  });
+
+  it("Composer repository picker respects the cap and includes selected content on send", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    dialogOpen.mockResolvedValue("/tmp/repo");
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_repo_files") {
+        return Promise.resolve({
+          dir: "/tmp/repo",
+          files: [
+            { relPath: "src/main.rs", byteLen: 12 },
+            { relPath: "README.md", byteLen: 4 },
+          ],
+          truncated: false,
+        });
+      }
+      if (command === "read_text_file") {
+        return Promise.resolve({
+          path: "/tmp/repo/src/main.rs",
+          name: "src/main.rs",
+          byteLen: 12,
+          text: "fn main() {}",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Composer />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add repository context" }));
+    // The picker lists the files with a running budget signal.
+    await screen.findByTestId("repo-picker-budget");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include src/main.rs" }));
+    fireEvent.click(screen.getByRole("button", { name: /Include 1 file/ }));
+
+    await waitFor(() => {
+      const atts = useConversationsStore.getState().attachments;
+      expect(atts).toHaveLength(1);
+      expect(atts[0].kind).toBe("repo");
+    });
+
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "review" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "send_message");
+      const content = (call?.[1] as { content: string }).content;
+      expect(content).toContain("### Repository file: src/main.rs");
+      expect(content).toContain("fn main() {}");
+      expect(content).toContain("review");
     });
   });
 

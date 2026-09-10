@@ -12,20 +12,27 @@
 //! only a [`SecretRef`] handle. `SecretStore::resolve` (the single plaintext
 //! seam) is never surfaced here.
 
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use domain::file_context;
 use mcp_client::McpServerHandle;
 use orchestrator_core::{
     run_turn, AgentPersona, Conversation, ConversationInit, Decision, ManualRoute, McpServerConfig,
     McpTransport, Message, ModelParameters, PermissionGate, PermissionMode, PrivacyTag,
     ProviderConfig, ProviderKind, RouteSource, RoutingHint, RoutingMode, SecretRef, TurnContext,
 };
-use persistence::config::{AppConfig, PricingConfig};
+use persistence::config::{
+    AppConfig, ModelSharingConfig, PricingConfig, WebSearchConfig, DEFAULT_WEB_SEARCH_MAX_RESULTS,
+    WEB_SEARCH_SECRET_HANDLE,
+};
 use persistence::{McpServerRepo, ProviderRepo};
 use providers::{
     list_available_models as list_models,
     list_available_models_with_build_errors as list_models_with_build_errors,
-    AvailableModelsResult, PricingTable, TokenPrice,
+    AvailableModelsResult, ModelShareServer, PeerDiscovery, PricingTable, ShareServerStatus,
+    SharedModel, StubPeerDiscovery, TokenPrice, WebSearchKind, WebSearchOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -1624,6 +1631,770 @@ async fn clear_cloud_provider_inner(
         .map_err(|e| CommandError::internal(e.to_string()))
 }
 
+// --- Web search (FEAT-004 / Section 8.1 web-search toggle) -----------------
+
+/// Maximum accepted `max_results` for a web search. Guards the provider request
+/// against an unbounded fan-out (Section 9.2 "bounds"); the composer only ever
+/// injects a handful of results as context.
+const MAX_WEB_SEARCH_RESULTS: u32 = 20;
+
+/// A display-safe view of the configured web-search provider (FEAT-004),
+/// returned by `set_web_search_provider` / `get_web_search_config`. It carries
+/// only non-secret fields (Section 9.1): the plaintext API key and any resolved
+/// secret NEVER cross this boundary. `has_api_key` reports only WHETHER a key is
+/// stored (as an opaque `SecretRef`), never the key itself.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchConfigView {
+    /// The selected provider kind (Tavily / Brave / SerpApi).
+    pub kind: WebSearchKind,
+    /// Whether an API key is stored (as an opaque `SecretRef`), never the key.
+    pub has_api_key: bool,
+    /// How many results a search requests.
+    pub max_results: u32,
+}
+
+/// A display-safe web-search result row (FEAT-004), returned by `run_web_search`
+/// and injected as context before the model answers. Carries only public result
+/// fields (title/url/snippet), never the API key.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchResultView {
+    /// The result title / page headline.
+    pub title: String,
+    /// The result URL.
+    pub url: String,
+    /// A short snippet / summary.
+    pub snippet: String,
+}
+
+/// Parse the persisted `enabled_provider` string into a [`WebSearchKind`], or
+/// `None` when web search is unconfigured (no provider selected). An unknown
+/// value (written by a newer build) is treated as unconfigured rather than an
+/// error so an older build degrades gracefully.
+fn parse_web_search_kind(stored: Option<&str>) -> Option<WebSearchKind> {
+    match stored {
+        Some(s) => serde_json::from_value(serde_json::Value::String(s.to_string())).ok(),
+        None => None,
+    }
+}
+
+/// Configure the web-search provider (FEAT-004): validate the kind + key, store
+/// the key as an opaque [`SecretRef`] under the stable [`WEB_SEARCH_SECRET_HANDLE`]
+/// (mirroring `set_cloud_provider`'s secret handling), persist the selection +
+/// result cap into the additive [`WebSearchConfig`], and return a display-safe
+/// [`WebSearchConfigView`] that NEVER carries the key.
+///
+/// Tauri maps the snake_case params to camelCase over the wire (`apiKey`,
+/// `maxResults`).
+#[tauri::command]
+pub async fn set_web_search_provider(
+    state: tauri::State<'_, AppState>,
+    kind: WebSearchKind,
+    api_key: String,
+    max_results: Option<u32>,
+) -> Result<WebSearchConfigView, CommandError> {
+    set_web_search_provider_inner(&state, kind, &api_key, max_results).await
+}
+
+/// The full validate-then-store-then-persist body of [`set_web_search_provider`],
+/// factored out so it can be driven directly in tests without a live Tauri
+/// `State` (the established `_inner` testability pattern).
+///
+/// It (1) requires a non-empty `api_key` within [`MAX_SECRET_LEN`]; (2) clamps
+/// `max_results` into `[1, MAX_WEB_SEARCH_RESULTS]`, defaulting to
+/// [`DEFAULT_WEB_SEARCH_MAX_RESULTS`]; (3) stores the key through the same
+/// secret store as `set_cloud_provider`, keeping only the opaque handle; and
+/// (4) persists the selected kind + cap into the additive [`WebSearchConfig`].
+/// It returns a display-safe [`WebSearchConfigView`] and NEVER the key.
+async fn set_web_search_provider_inner(
+    state: &AppState,
+    kind: WebSearchKind,
+    api_key: &str,
+    max_results: Option<u32>,
+) -> Result<WebSearchConfigView, CommandError> {
+    // (1) A configured provider always needs a key; reject empty/oversized.
+    if api_key.is_empty() {
+        return Err(CommandError::invalid("`apiKey` must not be empty"));
+    }
+    if api_key.len() > MAX_SECRET_LEN {
+        return Err(CommandError::invalid(format!(
+            "`apiKey` exceeds the maximum length of {MAX_SECRET_LEN} bytes"
+        )));
+    }
+
+    // (2) Clamp the result cap into a sane bound.
+    let max_results = max_results
+        .unwrap_or(DEFAULT_WEB_SEARCH_MAX_RESULTS)
+        .clamp(1, MAX_WEB_SEARCH_RESULTS);
+
+    // (3) Store the key as an opaque SecretRef under the stable handle; only the
+    // handle is persisted (in the keychain), never here.
+    state
+        .secret_store
+        .store(WEB_SEARCH_SECRET_HANDLE, api_key)
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // (4) Persist the selection + cap into the additive AppConfig field.
+    let db = state.session_manager.db();
+    let mut config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    config.web_search = WebSearchConfig {
+        enabled_provider: Some(kind.as_str().to_string()),
+        max_results,
+    };
+    config
+        .save(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    Ok(WebSearchConfigView {
+        kind,
+        has_api_key: true,
+        max_results,
+    })
+}
+
+/// Return the configured web-search provider so the Settings section can
+/// rehydrate from the backend source of truth, or `null` when web search is
+/// unconfigured. Display-safe: reports only kind / `hasApiKey` / `maxResults`,
+/// never the key. Backed by `get_web_search_config`.
+#[tauri::command]
+pub async fn get_web_search_config(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<WebSearchConfigView>, CommandError> {
+    get_web_search_config_inner(&state).await
+}
+
+/// The full body of [`get_web_search_config`], factored out for direct testing.
+/// Loads the [`WebSearchConfig`], maps the stored provider string to a
+/// [`WebSearchKind`] (unconfigured -> `None`), and reports whether a key is
+/// stored under the stable handle. Never returns the key.
+async fn get_web_search_config_inner(
+    state: &AppState,
+) -> Result<Option<WebSearchConfigView>, CommandError> {
+    let db = state.session_manager.db();
+    let config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let kind = match parse_web_search_kind(config.web_search.enabled_provider.as_deref()) {
+        Some(k) => k,
+        None => return Ok(None),
+    };
+    // `has_api_key` reflects whether a secret is stored under the stable handle;
+    // the plaintext is reachable only via the core-internal resolve seam.
+    let has_api_key = state
+        .secret_store
+        .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+        .is_ok();
+    Ok(Some(WebSearchConfigView {
+        kind,
+        has_api_key,
+        max_results: config.web_search.max_results,
+    }))
+}
+
+/// Clear the configured web-search provider: delete the stored key from the
+/// keychain (Section 9.1 hygiene) and reset the [`WebSearchConfig`] to its
+/// default (unconfigured). Clearing when nothing is configured is a no-op.
+/// Backed by `clear_web_search_provider`.
+#[tauri::command]
+pub async fn clear_web_search_provider(
+    state: tauri::State<'_, AppState>,
+) -> Result<(), CommandError> {
+    clear_web_search_provider_inner(&state).await
+}
+
+/// The full body of [`clear_web_search_provider`], factored out for direct
+/// testing. Deletes the secret under the stable handle (idempotent) and resets
+/// the config's web-search field to default.
+async fn clear_web_search_provider_inner(state: &AppState) -> Result<(), CommandError> {
+    state
+        .secret_store
+        .delete(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let db = state.session_manager.db();
+    let mut config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    config.web_search = WebSearchConfig::default();
+    config
+        .save(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))
+}
+
+/// Run a web search for `query` and return display-safe results (FEAT-004). It
+/// loads the [`WebSearchConfig`], resolves the API key CORE-INTERNALLY via the
+/// secret store, builds the configured [`providers::WebSearchProvider`], runs the
+/// search, and maps the hits into [`WebSearchResultView`]s.
+///
+/// It returns a CLEAR [`CommandError`] when web search is unconfigured (no
+/// provider selected or no stored key) so the composer can show a VISIBLE
+/// non-fatal notice and STILL send the plain message (never a silent hang). A
+/// provider failure surfaces as a display-safe error that never carries the key.
+/// Backed by `run_web_search`.
+#[tauri::command]
+pub async fn run_web_search(
+    state: tauri::State<'_, AppState>,
+    query: String,
+) -> Result<Vec<WebSearchResultView>, CommandError> {
+    run_web_search_inner(&state, &query).await
+}
+
+/// The full body of [`run_web_search`], factored out for direct testing against
+/// a wiremock-backed provider `base_url`.
+async fn run_web_search_inner(
+    state: &AppState,
+    query: &str,
+) -> Result<Vec<WebSearchResultView>, CommandError> {
+    validate_nonempty("query", query, MAX_MESSAGE_LEN)?;
+
+    let db = state.session_manager.db();
+    let config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // Unconfigured -> a CLEAR invalid-argument error the composer turns into a
+    // visible non-fatal notice while STILL sending the plain message.
+    let kind = parse_web_search_kind(config.web_search.enabled_provider.as_deref())
+        .ok_or_else(|| CommandError::invalid("web search is not configured"))?;
+
+    // Resolve the key CORE-INTERNALLY (the single plaintext seam); a missing key
+    // is treated as unconfigured with the same clear message.
+    let api_key = state
+        .secret_store
+        .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+        .map_err(|_| CommandError::invalid("web search is not configured (no API key stored)"))?;
+
+    // Build the configured provider (base_url None -> the kind's default
+    // endpoint) and run the search. `WebSearchError` is display-safe and never
+    // carries the key.
+    let provider = kind
+        .build(&api_key, web_search_base_url(state))
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let opts = WebSearchOptions {
+        max_results: config.web_search.max_results,
+    };
+    let results = provider
+        .search(query, opts)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    Ok(results
+        .into_iter()
+        .map(|r| WebSearchResultView {
+            title: r.title,
+            url: r.url,
+            snippet: r.snippet,
+        })
+        .collect())
+}
+
+/// The web-search provider base URL override, if any. Production uses the
+/// provider's built-in default (`None`); tests set `AppState.web_search_base_url`
+/// to point the Tavily adapter at a local wiremock server.
+fn web_search_base_url(state: &AppState) -> Option<&str> {
+    state.web_search_base_url.as_deref()
+}
+
+// --- Local network (LAN) model sharing (FEAT-006 / Section 9.3) ------------
+
+/// The stable [`ProviderConfig::id`] prefix for a LAN peer configured through
+/// [`add_network_peer`] (FEAT-006). A peer is persisted as an OpenAI-compatible
+/// [`ProviderKind::GenericOpenAI`] row, so this prefix is what tells the peer
+/// commands (and the frontend's picker grouping) a generic-openai row is a LAN
+/// peer rather than a locally-hosted generic runtime ([`local_runtime_config_id`]
+/// = `generic-openai-local`) or a Kiro cloud provider
+/// ([`cloud_provider_config_id`] = `generic-openai-cloud`). Because the id is
+/// distinct from those fixed single-slot ids, a user can configure many peers
+/// alongside a local generic runtime and a Kiro provider without collision.
+const NETWORK_PEER_ID_PREFIX: &str = "network-peer-";
+
+/// Upper bound on a user-supplied peer label (Section 9.2 "bounds").
+const MAX_PEER_LABEL_LEN: usize = 256;
+
+/// Whether a persisted provider row is a LAN peer configured through
+/// [`add_network_peer`]: a [`ProviderKind::GenericOpenAI`] row whose id carries
+/// the [`NETWORK_PEER_ID_PREFIX`]. This is how the peer commands isolate their
+/// rows from the local-generic runtime and Kiro cloud rows (which share the
+/// GenericOpenAI kind but use fixed single-slot ids).
+fn is_network_peer(cfg: &ProviderConfig) -> bool {
+    cfg.kind == ProviderKind::GenericOpenAI && cfg.id.starts_with(NETWORK_PEER_ID_PREFIX)
+}
+
+/// Derive a stable per-peer [`ProviderConfig::id`] from the peer's base_url. A
+/// hash of the (trimmed, lowercased) base_url keeps re-adding the SAME peer
+/// idempotent (it updates the one row instead of inserting a duplicate) while
+/// letting DIFFERENT peers coexist, and keeps the id opaque + free of any
+/// user-entered label/credentials. The [`NETWORK_PEER_ID_PREFIX`] marks it as a
+/// peer for [`is_network_peer`] and the picker grouping.
+fn network_peer_id(base_url: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    base_url.trim().to_ascii_lowercase().hash(&mut hasher);
+    format!("{NETWORK_PEER_ID_PREFIX}{:016x}", hasher.finish())
+}
+
+/// A display-safe view of a configured LAN peer for the webview (FEAT-006).
+/// Carries only non-secret fields (Section 9.1): the optional API key and any
+/// resolved secret NEVER cross this boundary. `has_api_key` reports only WHETHER
+/// a key is stored (as an opaque [`SecretRef`]), never the key itself.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NetworkPeerView {
+    /// The stable per-peer config id (see [`network_peer_id`]).
+    pub id: String,
+    /// The user-entered label, or the base_url when no label was given.
+    pub label: String,
+    /// The peer's persisted OpenAI-compatible base_url.
+    pub base_url: String,
+    /// Whether an API key is stored (as an opaque `SecretRef`), never the key.
+    pub has_api_key: bool,
+    /// Optional display-safe base_url advisory (e.g. non-loopback plaintext
+    /// HTTP), surfaced only on the add path; `None` when rehydrating rows.
+    pub warning: Option<String>,
+}
+
+/// Add a LAN peer as a consumable, OpenAI-compatible provider (FEAT-006). The
+/// peer is persisted as a [`ProviderKind::GenericOpenAI`] [`ProviderConfig`] row
+/// pointed at the peer's `host:port` base_url, so its models enumerate and route
+/// EXACTLY like any provider with no pipeline change (they flow through
+/// [`list_available_models`] and the send registry build).
+///
+/// PRIVACY (Section 9.3): a peer is OFF-HOST, so it is NOT provably-local. The
+/// peer row is a `GenericOpenAI` kind with a NON-loopback base_url, so
+/// [`local_provider_ids`] (which only admits a `GenericOpenAI` row whose base_url
+/// is loopback) correctly EXCLUDES it. A LocalOnly/Confidential conversation
+/// therefore never routes to a peer.
+///
+/// `base_url` is REQUIRED and validated through the Section 9.3 posture
+/// ([`check_provider_base_url`]): a Blocked link-local/metadata target rejects;
+/// a non-loopback plaintext target returns the existing TLS warning. The optional
+/// `api_key` is stored as an opaque [`SecretRef`] and never comes back. Tauri
+/// maps the snake_case params to camelCase over the wire (`baseUrl`, `apiKey`).
+#[tauri::command]
+pub async fn add_network_peer(
+    state: tauri::State<'_, AppState>,
+    base_url: String,
+    label: Option<String>,
+    api_key: Option<String>,
+) -> Result<NetworkPeerView, CommandError> {
+    add_network_peer_and_notify(&state, &base_url, label.as_deref(), api_key.as_deref()).await
+}
+
+/// The mutation-plus-notify seam behind [`add_network_peer`]: run the
+/// [`add_network_peer_inner`] body and, only if it succeeds, emit
+/// `ProvidersChanged` so the new peer's models become enumerable immediately in
+/// the picker (mirrors `set_cloud_provider_and_notify`). Fire-and-forget.
+async fn add_network_peer_and_notify(
+    state: &AppState,
+    base_url: &str,
+    label: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<NetworkPeerView, CommandError> {
+    let view = add_network_peer_inner(state, base_url, label, api_key).await?;
+    emit_providers_changed(state);
+    Ok(view)
+}
+
+/// The full validate-then-store-then-upsert body of [`add_network_peer`],
+/// factored out for direct testing without a live Tauri `State` (the established
+/// `_inner` pattern; mirrors [`set_cloud_provider_inner`]).
+///
+/// It (1) trims and requires a non-empty `base_url` within [`MAX_BASE_URL_LEN`]
+/// and validates it via [`check_provider_base_url`] (a Blocked target errors and
+/// persists nothing; a non-loopback plaintext target yields a display-safe
+/// warning); (2) derives a stable per-peer id from the base_url; (3) stores an
+/// optional non-empty `api_key` as an opaque [`SecretRef`] under that id,
+/// deleting any prior secret on a keyless re-add so nothing is orphaned; and (4)
+/// upserts the [`ProviderConfig`] (get -> update | insert), so re-adding the same
+/// peer never duplicates the row. Returns a display-safe [`NetworkPeerView`] and
+/// NEVER the key.
+async fn add_network_peer_inner(
+    state: &AppState,
+    base_url: &str,
+    label: Option<&str>,
+    api_key: Option<&str>,
+) -> Result<NetworkPeerView, CommandError> {
+    // (1) A peer requires an explicit reachable base_url; validate it against
+    // the Section 9.3 posture before anything is persisted.
+    let base_url = base_url.trim();
+    validate_nonempty("baseUrl", base_url, MAX_BASE_URL_LEN)?;
+    let warning = check_provider_base_url(base_url)?;
+
+    // Bound the optional label; fall back to the base_url as the display label.
+    let label = match label.map(str::trim) {
+        Some(l) if !l.is_empty() => {
+            validate_nonempty("label", l, MAX_PEER_LABEL_LEN)?;
+            l.to_string()
+        }
+        _ => base_url.to_string(),
+    };
+
+    // (2) A stable id derived from the base_url makes re-adding the same peer an
+    // idempotent upsert while letting different peers coexist.
+    let id = network_peer_id(base_url);
+
+    let repo = ProviderRepo::new(state.session_manager.db());
+    let existing = repo
+        .get(&id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // (3) Store the optional API key as an opaque SecretRef; on a keyless add,
+    // delete any prior secret so it does not linger unreferenced.
+    let api_key_ref = match api_key {
+        Some(key) if !key.is_empty() => {
+            if key.len() > MAX_SECRET_LEN {
+                return Err(CommandError::invalid(format!(
+                    "`apiKey` exceeds the maximum length of {MAX_SECRET_LEN} bytes"
+                )));
+            }
+            Some(
+                state
+                    .secret_store
+                    .store(&id, key)
+                    .map_err(|e| CommandError::internal(e.to_string()))?,
+            )
+        }
+        _ => {
+            if let Some(prior_ref) = existing.as_ref().and_then(|cfg| cfg.api_key_ref.as_ref()) {
+                state
+                    .secret_store
+                    .delete(prior_ref)
+                    .map_err(|e| CommandError::internal(e.to_string()))?;
+            }
+            None
+        }
+    };
+    let has_api_key = api_key_ref.is_some();
+
+    // (4) Upsert the peer row. The label is persisted in `extra` so it can be
+    // rehydrated by `list_network_peers` (a display-only field, never a secret).
+    let config = ProviderConfig {
+        id: id.clone(),
+        kind: ProviderKind::GenericOpenAI,
+        base_url: Some(base_url.to_string()),
+        api_key_ref,
+        extra: json!({ "label": label }),
+    };
+    if existing.is_some() {
+        repo.update(&config)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
+    } else {
+        repo.insert(&config)
+            .await
+            .map_err(|e| CommandError::internal(e.to_string()))?;
+    }
+
+    Ok(NetworkPeerView {
+        id,
+        label,
+        base_url: base_url.to_string(),
+        has_api_key,
+        warning,
+    })
+}
+
+/// The display label persisted for a peer in its config `extra`, or the base_url
+/// as a fallback when none was stored (older rows / no label). Display-only.
+fn peer_label(cfg: &ProviderConfig) -> String {
+    cfg.extra
+        .get("label")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| cfg.base_url.clone().unwrap_or_default())
+}
+
+/// List the configured LAN peers so the Network Sharing UI can rehydrate from
+/// the backend source of truth (FEAT-006). Display-safe: each row carries only
+/// id/label/baseUrl/hasApiKey (never the key), and `warning` is always `None`
+/// when rehydrating.
+#[tauri::command]
+pub async fn list_network_peers(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<NetworkPeerView>, CommandError> {
+    list_network_peers_inner(&state).await
+}
+
+/// The full body of [`list_network_peers`], factored out for direct testing. It
+/// loads every persisted [`ProviderConfig`], keeps only the LAN-peer rows
+/// ([`is_network_peer`]), and maps each to a display-safe [`NetworkPeerView`].
+async fn list_network_peers_inner(state: &AppState) -> Result<Vec<NetworkPeerView>, CommandError> {
+    let configs = ProviderRepo::new(state.session_manager.db())
+        .list()
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let views = configs
+        .into_iter()
+        .filter(is_network_peer)
+        .map(|cfg| NetworkPeerView {
+            label: peer_label(&cfg),
+            has_api_key: cfg.api_key_ref.is_some(),
+            base_url: cfg.base_url.unwrap_or_default(),
+            id: cfg.id,
+            warning: None,
+        })
+        .collect();
+    Ok(views)
+}
+
+/// Remove a configured LAN peer by its id (FEAT-006), deleting any stored secret
+/// (Section 9.1 keychain hygiene) and the row. Only a LAN-peer row is
+/// addressable; a non-peer id (or an unknown id) is a no-op after validation.
+#[tauri::command]
+pub async fn remove_network_peer(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<(), CommandError> {
+    remove_network_peer_and_notify(&state, &id).await
+}
+
+/// The mutation-plus-notify seam behind [`remove_network_peer`]: run the
+/// [`remove_network_peer_inner`] body and, only on success, emit
+/// `ProvidersChanged` so the model selector drops the removed peer's models.
+async fn remove_network_peer_and_notify(state: &AppState, id: &str) -> Result<(), CommandError> {
+    remove_network_peer_inner(state, id).await?;
+    emit_providers_changed(state);
+    Ok(())
+}
+
+/// The full body of [`remove_network_peer`], factored out for direct testing. It
+/// validates the id, confirms the row is a LAN peer (rejecting a non-peer id so
+/// this command cannot delete a local runtime or cloud provider), deletes any
+/// stored secret before the row, then deletes the row; a missing secret/row is a
+/// no-op.
+async fn remove_network_peer_inner(state: &AppState, id: &str) -> Result<(), CommandError> {
+    let id = id.trim();
+    validate_nonempty("id", id, MAX_PROVIDER_ID_LEN)?;
+    let repo = ProviderRepo::new(state.session_manager.db());
+    let existing = repo
+        .get(id)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    match existing {
+        // Only a LAN-peer row is removable through this command; refuse to touch
+        // a local-runtime or cloud row that happens to share the id space.
+        Some(cfg) if is_network_peer(&cfg) => {
+            if let Some(secret_ref) = cfg.api_key_ref.as_ref() {
+                state
+                    .secret_store
+                    .delete(secret_ref)
+                    .map_err(|e| CommandError::internal(e.to_string()))?;
+            }
+            repo.delete(id)
+                .await
+                .map_err(|e| CommandError::internal(e.to_string()))
+        }
+        Some(_) => Err(CommandError::invalid(
+            "the given id is not a network peer and cannot be removed here",
+        )),
+        // An unknown id is a no-op (idempotent remove).
+        None => Ok(()),
+    }
+}
+
+/// A display-safe view of the LAN model-sharing settings (FEAT-006), returned by
+/// `set_model_sharing` / `get_model_sharing`. Carries the persisted enabled/port
+/// plus a VISIBLE `status` string describing the current serve state (running,
+/// disabled, or a non-fatal reason the port could not be bound) so the UI never
+/// shows a silent success/hang.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelSharingView {
+    /// Whether LAN sharing is enabled.
+    pub enabled: bool,
+    /// The configured share-server port.
+    pub port: u16,
+    /// A display-safe status describing the serve state (e.g. "Sharing on port
+    /// 11435", "Sharing is off", or a non-fatal bind-failure reason).
+    pub status: String,
+}
+
+/// Render the display-safe [`ModelSharingView::status`] for a config + serve
+/// outcome. Keeps the visible-status wording in one place.
+fn model_sharing_status(config: &ModelSharingConfig, bind: Option<&ShareServerStatus>) -> String {
+    if !config.enabled {
+        return "Sharing is off. Your local models are not exposed to the network.".to_string();
+    }
+    match bind {
+        Some(ShareServerStatus::Running { port }) => {
+            format!("Sharing your local models on the network (port {port}).")
+        }
+        Some(ShareServerStatus::Unavailable { port, reason }) => format!(
+            "Sharing could not start on port {port}: {reason}. \
+             Pick a different port and try again."
+        ),
+        None => {
+            format!("Sharing is enabled on port {}.", config.port)
+        }
+    }
+}
+
+/// Enable/disable LAN model sharing on a configurable port (FEAT-006). Persists
+/// the additive [`ModelSharingConfig`] and, when enabling, attempts to bind the
+/// share server, returning a VISIBLE status: a bind failure degrades to a
+/// non-fatal message (never a silent hang). The share server re-exposes THIS
+/// instance's local models over an OpenAI-compatible read surface.
+///
+/// SECURITY POSTURE (Section 9.3): sharing binds to the LAN and re-exposes local
+/// models, so it is OFF by default and the UI states this exposes local models to
+/// the local network. Binding to a real LAN interface + peer reachability is
+/// USER-ONLY (the sandbox has no cross-machine network). Tauri maps the port
+/// param over the wire.
+#[tauri::command]
+pub async fn set_model_sharing(
+    state: tauri::State<'_, AppState>,
+    enabled: bool,
+    port: Option<u16>,
+) -> Result<ModelSharingView, CommandError> {
+    set_model_sharing_inner(&state, enabled, port).await
+}
+
+/// The full persist-then-bind body of [`set_model_sharing`], factored out for
+/// direct testing. It persists the additive [`ModelSharingConfig`] then, when
+/// enabling, attempts a VISIBLE bind (never blocks), mapping the outcome to the
+/// display-safe status. The models the server would expose are gathered from the
+/// on-host local providers via [`local_shared_models`].
+async fn set_model_sharing_inner(
+    state: &AppState,
+    enabled: bool,
+    port: Option<u16>,
+) -> Result<ModelSharingView, CommandError> {
+    let db = state.session_manager.db();
+    let mut config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    let port = match port {
+        // Port 0 is not a stable published port; reject it so the UI shows a
+        // clear error rather than an OS-assigned ephemeral port.
+        Some(0) => return Err(CommandError::invalid("`port` must be between 1 and 65535")),
+        Some(p) => p,
+        None => config.model_sharing.port,
+    };
+    config.model_sharing = ModelSharingConfig { enabled, port };
+    config
+        .save(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+
+    // When enabling, attempt a VISIBLE bind so a taken port degrades to a
+    // non-fatal status instead of a silent hang. The full serving loop is
+    // user-only; this seam only surfaces the bind outcome.
+    let bind = if enabled {
+        let models = local_shared_models(state).await?;
+        Some(ModelShareServer::new(port, models).try_bind())
+    } else {
+        None
+    };
+
+    let status = model_sharing_status(&config.model_sharing, bind.as_ref());
+    Ok(ModelSharingView {
+        enabled,
+        port,
+        status,
+    })
+}
+
+/// Report the current LAN model-sharing settings so the Network Sharing UI can
+/// rehydrate (FEAT-006). Does NOT (re)bind the server; it reports the persisted
+/// enabled/port plus a display-safe status.
+#[tauri::command]
+pub async fn get_model_sharing(
+    state: tauri::State<'_, AppState>,
+) -> Result<ModelSharingView, CommandError> {
+    get_model_sharing_inner(&state).await
+}
+
+/// The full body of [`get_model_sharing`], factored out for direct testing.
+async fn get_model_sharing_inner(state: &AppState) -> Result<ModelSharingView, CommandError> {
+    let db = state.session_manager.db();
+    let config = AppConfig::load(db)
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    // Reporting does not (re)bind; the status reflects only the persisted state.
+    let status = model_sharing_status(&config.model_sharing, None);
+    Ok(ModelSharingView {
+        enabled: config.model_sharing.enabled,
+        port: config.model_sharing.port,
+        status,
+    })
+}
+
+/// Gather the ON-HOST local models this instance would re-expose to peers when
+/// sharing is enabled (FEAT-006). It enumerates via [`list_available_models_inner`]
+/// and keeps only the provably-local provider ids ([`local_provider_ids`]), so a
+/// LAN peer (off-host) is NEVER re-shared onward and cloud models are never
+/// exposed. Display-safe: the shared entries carry only model ids.
+async fn local_shared_models(state: &AppState) -> Result<Vec<SharedModel>, CommandError> {
+    let configs = ProviderRepo::new(state.session_manager.db())
+        .list()
+        .await
+        .map_err(|e| CommandError::internal(e.to_string()))?;
+    let local_ids = local_provider_ids(&configs);
+    let available = list_available_models_inner(state).await?;
+    let models = available
+        .models
+        .into_iter()
+        .filter(|m| local_ids.contains(&m.provider_id))
+        .map(|m| SharedModel::new(m.model))
+        .collect();
+    Ok(models)
+}
+
+/// A display-safe discovered LAN peer (FEAT-006), returned by
+/// `discover_network_peers`. Carries only a label + base URL the user can
+/// one-click Add as a consume peer; never any secret.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveredPeerView {
+    /// A human-friendly label for the discovered peer.
+    pub label: String,
+    /// The peer's OpenAI-compatible base URL to Add.
+    pub base_url: String,
+}
+
+/// The bounded timeout applied to a discovery probe (FEAT-006). Kept short so
+/// the Network Sharing UI's "Discover peers" button never hangs.
+const DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1_500);
+
+/// Discover LAN peers advertising an OpenAI-compatible endpoint (FEAT-006). Runs
+/// the peer-discovery seam with a bounded timeout and returns display-safe
+/// results the user can one-click Add. Non-fatal: discovery being unavailable
+/// (or finding nothing) returns an EMPTY list rather than an error, and the UI
+/// shows a "no peers found / discovery unavailable" notice.
+///
+/// Live discovery is USER-ONLY: the in-sandbox implementation
+/// ([`StubPeerDiscovery`]) returns empty without error; the real mDNS/UDP probe
+/// is a documented follow-up (no new crate dependency is added in-sandbox).
+#[tauri::command]
+pub async fn discover_network_peers(
+    _state: tauri::State<'_, AppState>,
+) -> Result<Vec<DiscoveredPeerView>, CommandError> {
+    discover_network_peers_inner().await
+}
+
+/// The full body of [`discover_network_peers`], factored out for direct testing.
+/// It maps the discovery seam's [`providers::DiscoveredPeer`]s onto display-safe
+/// [`DiscoveredPeerView`]s. The stub returns empty in-sandbox, exercising the
+/// non-fatal empty path the UI surfaces.
+async fn discover_network_peers_inner() -> Result<Vec<DiscoveredPeerView>, CommandError> {
+    let discovery = StubPeerDiscovery;
+    let peers = discovery.discover(DISCOVERY_TIMEOUT);
+    Ok(peers
+        .into_iter()
+        .map(|p| DiscoveredPeerView {
+            label: p.label,
+            base_url: p.base_url,
+        })
+        .collect())
+}
+
 // --- Message pipeline (P4.6 / Section 2.2 / 8.1) ---------------------------
 
 /// Send a user message and drive the end-to-end pipeline (architecture.md
@@ -2437,6 +3208,279 @@ fn resolve_permission_inner(
     Ok(state.permission_registry.resolve(id, decision))
 }
 
+// --- Attach / repository context (FEAT-003, Section 8.1) --------------------
+//
+// These commands back the composer's Attach (📎) and Repository (📁) controls.
+// They read local files natively so the frontend can PREPEND a bounded,
+// clearly-delimited context block to the user message `content` before calling
+// `send_message` (the pipeline treats `content` as a plain String, so the whole
+// attach/repository mechanism rides inside the existing turn with NO change to
+// `run_turn`/`send_message` semantics).
+//
+// All of these commands are stateless filesystem reads (no `AppState`, no core
+// mutation, no events): they validate + read + shape a display-safe view. The
+// failure-prone PURE logic (MIME guessing, the directory skip-list, binary
+// filtering, byte-cap checks, base64) lives in the host-verifiable
+// `domain::file_context` module so `cargo test -p domain` exercises it offline;
+// only the thin `std::fs` glue below is CI-only (tauri-app builds only in CI).
+// The `_inner` helpers take a `&Path` so they are unit-testable with tempfiles.
+
+/// The upper bound on a supplied filesystem path length (Section 9.2 "bounds").
+const MAX_FS_PATH_LEN: usize = 4_096;
+
+/// A display-safe view of a text file read for attachment (FEAT-003). Crosses
+/// the IPC boundary, so it is camelCase-serde. Carries the file's contents so
+/// the composer can fold them into the next turn's context block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileContentView {
+    /// The absolute path that was read (as supplied by the file dialog).
+    pub path: String,
+    /// The final path component (file name), for the attachment chip label.
+    pub name: String,
+    /// The number of bytes read (the UTF-8 text's byte length).
+    pub byte_len: usize,
+    /// The file's UTF-8 text contents.
+    pub text: String,
+}
+
+/// A display-safe view of a binary file (an image) read for attachment
+/// (FEAT-003), base64-encoded. camelCase-serde across the IPC boundary. The
+/// composer only attaches this when the selected model advertises `vision`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBinaryView {
+    /// The absolute path that was read (as supplied by the file dialog).
+    pub path: String,
+    /// The final path component (file name), for the attachment chip label.
+    pub name: String,
+    /// The MIME type guessed from the extension (e.g. `image/png`).
+    pub mime_type: String,
+    /// The file contents, base64-encoded (RFC 4648, with padding).
+    pub base64: String,
+    /// The number of RAW (pre-encoding) bytes read.
+    pub byte_len: usize,
+}
+
+/// One entry in a [`RepoListing`]: a file the user may select for context.
+/// camelCase-serde across the IPC boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoFileEntry {
+    /// The path RELATIVE to the picked directory (display + re-read key).
+    pub rel_path: String,
+    /// The file's size in bytes, so the UI can enforce a total-size cap.
+    pub byte_len: usize,
+}
+
+/// A display-safe listing of a picked repository directory (FEAT-003).
+/// camelCase-serde across the IPC boundary. `truncated` is set when the walk hit
+/// the entry cap so the UI can say the list is partial.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoListing {
+    /// The picked directory (as supplied by the directory dialog).
+    pub dir: String,
+    /// The bounded, filtered set of candidate files (relative paths + sizes).
+    pub files: Vec<RepoFileEntry>,
+    /// True when the walk stopped at [`file_context::MAX_REPO_ENTRIES`] and
+    /// more files exist than are listed.
+    pub truncated: bool,
+}
+
+/// Validate a supplied filesystem path: non-empty (trimmed) and within the
+/// length bound, before any `std::fs` access.
+fn validate_fs_path(path: &str) -> Result<(), CommandError> {
+    if path.trim().is_empty() {
+        return Err(CommandError::invalid("`path` must not be empty"));
+    }
+    if path.len() > MAX_FS_PATH_LEN {
+        return Err(CommandError::invalid(format!(
+            "`path` exceeds the maximum length of {MAX_FS_PATH_LEN} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Read a local TEXT file for attachment (FEAT-003). Validates the path,
+/// enforces the per-file text cap, rejects binary-by-extension and non-UTF-8
+/// files, and returns a display-safe [`FileContentView`]. The contents ride into
+/// the next turn inside the composer's assembled `content` block.
+#[tauri::command]
+pub fn read_text_file(path: String) -> Result<FileContentView, CommandError> {
+    read_text_file_inner(Path::new(path.trim()), &path)
+}
+
+/// The body of [`read_text_file`], taking a `&Path` (plus the original display
+/// string) so it is unit-testable with tempfiles and no live Tauri `State`.
+fn read_text_file_inner(path: &Path, display_path: &str) -> Result<FileContentView, CommandError> {
+    validate_fs_path(display_path)?;
+    if file_context::has_binary_extension(display_path) {
+        return Err(CommandError::invalid(
+            "this file looks binary and cannot be attached as text",
+        ));
+    }
+    let metadata = std::fs::metadata(path).map_err(|_| {
+        CommandError::not_found(format!("file not found or unreadable: {display_path}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(CommandError::invalid(format!(
+            "not a regular file: {display_path}"
+        )));
+    }
+    if !file_context::within_text_cap(metadata.len() as usize) {
+        return Err(CommandError::invalid(format!(
+            "file is too large to attach as text (max {} bytes)",
+            file_context::MAX_ATTACH_BYTES
+        )));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| CommandError::internal(format!("failed to read file: {e}")))?;
+    // Re-check against the byte cap after the read: metadata.len() can lag the
+    // actual size on some filesystems, and we never want to return an oversized
+    // payload across IPC.
+    if !file_context::within_text_cap(bytes.len()) {
+        return Err(CommandError::invalid(format!(
+            "file is too large to attach as text (max {} bytes)",
+            file_context::MAX_ATTACH_BYTES
+        )));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| CommandError::invalid("file is not valid UTF-8 text"))?;
+    Ok(FileContentView {
+        path: display_path.to_string(),
+        name: file_context::file_name(display_path),
+        byte_len: text.len(),
+        text,
+    })
+}
+
+/// Read a local IMAGE (binary) file for attachment (FEAT-003), base64-encoded.
+/// Validates the path, enforces the per-file image cap, and returns a
+/// display-safe [`FileBinaryView`] with a MIME type guessed from the extension.
+/// The composer only attaches the result when the selected model advertises the
+/// `vision` capability.
+#[tauri::command]
+pub fn read_file_base64(path: String) -> Result<FileBinaryView, CommandError> {
+    read_file_base64_inner(Path::new(path.trim()), &path)
+}
+
+/// The body of [`read_file_base64`], taking a `&Path` (plus the original display
+/// string) so it is unit-testable with tempfiles.
+fn read_file_base64_inner(path: &Path, display_path: &str) -> Result<FileBinaryView, CommandError> {
+    validate_fs_path(display_path)?;
+    let metadata = std::fs::metadata(path).map_err(|_| {
+        CommandError::not_found(format!("file not found or unreadable: {display_path}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(CommandError::invalid(format!(
+            "not a regular file: {display_path}"
+        )));
+    }
+    if !file_context::within_image_cap(metadata.len() as usize) {
+        return Err(CommandError::invalid(format!(
+            "image is too large to attach (max {} bytes)",
+            file_context::MAX_IMAGE_BYTES
+        )));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| CommandError::internal(format!("failed to read file: {e}")))?;
+    if !file_context::within_image_cap(bytes.len()) {
+        return Err(CommandError::invalid(format!(
+            "image is too large to attach (max {} bytes)",
+            file_context::MAX_IMAGE_BYTES
+        )));
+    }
+    Ok(FileBinaryView {
+        path: display_path.to_string(),
+        name: file_context::file_name(display_path),
+        mime_type: file_context::guess_mime_type(display_path).to_string(),
+        base64: file_context::encode_base64(&bytes),
+        byte_len: bytes.len(),
+    })
+}
+
+/// List a picked repository directory for context selection (FEAT-003). Walks
+/// the tree, skipping version-control / dependency / build-output directories
+/// and binary-by-extension files, capping the number of returned entries at
+/// [`file_context::MAX_REPO_ENTRIES`], and returns relative paths + byte sizes so
+/// the UI can present a checkbox list under a total-size cap. The actual file
+/// contents are fetched per-selected-file via [`read_text_file`].
+#[tauri::command]
+pub fn list_repo_files(dir: String) -> Result<RepoListing, CommandError> {
+    list_repo_files_inner(Path::new(dir.trim()), &dir)
+}
+
+/// The body of [`list_repo_files`], taking a `&Path` (plus the original display
+/// string) so it is unit-testable with a tempdir.
+fn list_repo_files_inner(dir: &Path, display_dir: &str) -> Result<RepoListing, CommandError> {
+    validate_fs_path(display_dir)?;
+    let metadata = std::fs::metadata(dir)
+        .map_err(|_| CommandError::not_found(format!("directory not found: {display_dir}")))?;
+    if !metadata.is_dir() {
+        return Err(CommandError::invalid(format!(
+            "not a directory: {display_dir}"
+        )));
+    }
+
+    let mut files: Vec<RepoFileEntry> = Vec::new();
+    let mut truncated = false;
+    // An explicit work stack rather than recursion so the walk is bounded and
+    // cannot blow the stack on a deep tree. Each frame carries the directory to
+    // read and its path relative to the picked root (empty at the root).
+    let mut stack: Vec<(std::path::PathBuf, String)> = vec![(dir.to_path_buf(), String::new())];
+    while let Some((current, rel_prefix)) = stack.pop() {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(entries) => entries,
+            // A directory we cannot read (permissions) is skipped, not fatal:
+            // the picked root already passed the is_dir check above.
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let child_rel = if rel_prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel_prefix}/{name}")
+            };
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                if file_context::is_skipped_dir(&name) {
+                    continue;
+                }
+                stack.push((entry.path(), child_rel));
+            } else if file_type.is_file() {
+                if file_context::has_binary_extension(&name) {
+                    continue;
+                }
+                if files.len() >= file_context::MAX_REPO_ENTRIES {
+                    truncated = true;
+                    break;
+                }
+                let byte_len = entry.metadata().map(|m| m.len() as usize).unwrap_or(0);
+                files.push(RepoFileEntry {
+                    rel_path: child_rel,
+                    byte_len,
+                });
+            }
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    // Stable, predictable ordering for the UI (and the tests).
+    files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(RepoListing {
+        dir: display_dir.to_string(),
+        files,
+        truncated,
+    })
+}
+
 // --- Embedded local inference engine (Strategy B / FEAT-002) ----------------
 
 /// A display-safe view of one imported embedded (local `.gguf`) model
@@ -2753,6 +3797,7 @@ pub fn app_version() -> String {
 mod tests {
     use super::*;
     use orchestrator_core::{CoreEvent, SessionManager};
+    use persistence::config::DEFAULT_MODEL_SHARING_PORT;
     use persistence::Db;
     use providers::AvailableModel;
     use secrets::{InMemorySecretStore, SecretError};
@@ -4353,6 +5398,212 @@ mod tests {
         assert!(configs.is_empty());
     }
 
+    // --- Web search (FEAT-004) ---------------------------------------------
+
+    /// `set_web_search_provider_inner` persists the selection + clamped cap,
+    /// stores the key as an opaque `SecretRef` under the stable handle, and
+    /// returns a display-safe view with `hasApiKey = true` that NEVER echoes the
+    /// key.
+    #[tokio::test]
+    async fn set_web_search_provider_inner_persists_without_echoing_key() {
+        let state = test_state().await;
+        let plaintext = "tvly-do-not-leak-1234";
+
+        let view = set_web_search_provider_inner(
+            &state,
+            WebSearchKind::Tavily,
+            plaintext,
+            Some(50), // over the cap -> clamped to MAX_WEB_SEARCH_RESULTS
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.kind, WebSearchKind::Tavily);
+        assert!(view.has_api_key);
+        assert_eq!(view.max_results, MAX_WEB_SEARCH_RESULTS);
+
+        // The view (and its serialized form) never carries the key. The
+        // secret-hygiene check is that the key VALUE is absent; the DTO
+        // legitimately carries a `hasApiKey` boolean (an intentional,
+        // non-sensitive presence marker), so a field-name substring assertion
+        // would collide with it and is deliberately not used here.
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(!json.contains(plaintext));
+
+        // The config persisted the selection + cap; the key is reachable ONLY
+        // via the internal resolve seam under the stable handle.
+        let cfg = AppConfig::load(state.session_manager.db()).await.unwrap();
+        assert_eq!(cfg.web_search.enabled_provider.as_deref(), Some("tavily"));
+        assert_eq!(cfg.web_search.max_results, MAX_WEB_SEARCH_RESULTS);
+        assert_eq!(
+            state
+                .secret_store
+                .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+                .unwrap(),
+            plaintext
+        );
+    }
+
+    /// The handler REJECTS invalid input before touching the store/config: an
+    /// empty key and an over-long key both error, and nothing is persisted.
+    #[tokio::test]
+    async fn set_web_search_provider_inner_rejects_invalid_input() {
+        let state = test_state().await;
+
+        let err = set_web_search_provider_inner(&state, WebSearchKind::Tavily, "", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        let too_long = "x".repeat(MAX_SECRET_LEN + 1);
+        let err = set_web_search_provider_inner(&state, WebSearchKind::Tavily, &too_long, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        // Nothing was stored or persisted for the rejected calls.
+        assert!(state
+            .secret_store
+            .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+            .is_err());
+        let cfg = AppConfig::load(state.session_manager.db()).await.unwrap();
+        assert!(cfg.web_search.enabled_provider.is_none());
+    }
+
+    /// `get_web_search_config_inner` returns `None` when unconfigured and
+    /// rehydrates the display-safe view (with `hasApiKey`) after a set.
+    #[tokio::test]
+    async fn get_web_search_config_inner_rehydrates() {
+        let state = test_state().await;
+
+        // Unconfigured -> None.
+        assert!(get_web_search_config_inner(&state).await.unwrap().is_none());
+
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-key", Some(7))
+            .await
+            .unwrap();
+
+        let view = get_web_search_config_inner(&state)
+            .await
+            .unwrap()
+            .expect("configured web search must rehydrate");
+        assert_eq!(view.kind, WebSearchKind::Tavily);
+        assert!(view.has_api_key);
+        assert_eq!(view.max_results, 7);
+    }
+
+    /// `clear_web_search_provider_inner` deletes the stored secret AND resets the
+    /// config to default (unconfigured), and is idempotent.
+    #[tokio::test]
+    async fn clear_web_search_provider_inner_removes_secret_and_config() {
+        let state = test_state().await;
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-key", None)
+            .await
+            .unwrap();
+
+        clear_web_search_provider_inner(&state).await.unwrap();
+
+        // Secret gone, config reset, and get -> None.
+        assert!(state
+            .secret_store
+            .resolve(&SecretRef::new(WEB_SEARCH_SECRET_HANDLE))
+            .is_err());
+        let cfg = AppConfig::load(state.session_manager.db()).await.unwrap();
+        assert!(cfg.web_search.enabled_provider.is_none());
+        assert!(get_web_search_config_inner(&state).await.unwrap().is_none());
+
+        // Clearing again is a no-op (idempotent).
+        clear_web_search_provider_inner(&state).await.unwrap();
+    }
+
+    /// `run_web_search_inner` returns a CLEAR invalid-argument error when web
+    /// search is unconfigured, so the composer shows a visible non-fatal notice
+    /// and STILL sends the plain message.
+    #[tokio::test]
+    async fn run_web_search_inner_unconfigured_errors_clearly() {
+        let state = test_state().await;
+        let err = run_web_search_inner(&state, "anything").await.unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+        assert!(err.message.to_lowercase().contains("not configured"));
+    }
+
+    /// `run_web_search_inner` happy path: with a configured Tavily provider and
+    /// the `web_search_base_url` pointed at a local wiremock server, it resolves
+    /// the key core-internally, runs the search, and returns display-safe
+    /// results that never echo the key.
+    #[tokio::test]
+    async fn run_web_search_inner_returns_results_via_mock_provider() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [
+                    {"title": "T1", "url": "https://a.example", "content": "snippet one"},
+                    {"title": "T2", "url": "https://b.example", "content": "snippet two"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        // Build state with the base_url override pointed at the mock server.
+        let db = Db::open_in_memory().await.unwrap();
+        let (mut state, _rx) = AppState::new(
+            SessionManager::new(db),
+            Arc::new(InMemorySecretStore::new()),
+        );
+        state.web_search_base_url = Some(server.uri());
+
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-secret-key", Some(2))
+            .await
+            .unwrap();
+
+        let results = run_web_search_inner(&state, "rust async").await.unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].title, "T1");
+        assert_eq!(results[0].url, "https://a.example");
+        assert_eq!(results[0].snippet, "snippet one");
+
+        // Display-safe: the results never carry the key.
+        let json = serde_json::to_string(&results).unwrap();
+        assert!(!json.contains("tvly-secret-key"));
+    }
+
+    /// `run_web_search_inner` maps a provider failure (a non-200 from the mock)
+    /// into a display-safe error that never carries the key.
+    #[tokio::test]
+    async fn run_web_search_inner_provider_failure_is_display_safe() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .respond_with(
+                ResponseTemplate::new(401).set_body_string("unauthorized: tvly-secret-key"),
+            )
+            .mount(&server)
+            .await;
+
+        let db = Db::open_in_memory().await.unwrap();
+        let (mut state, _rx) = AppState::new(
+            SessionManager::new(db),
+            Arc::new(InMemorySecretStore::new()),
+        );
+        state.web_search_base_url = Some(server.uri());
+
+        set_web_search_provider_inner(&state, WebSearchKind::Tavily, "tvly-secret-key", None)
+            .await
+            .unwrap();
+
+        let err = run_web_search_inner(&state, "q").await.unwrap_err();
+        assert!(matches!(err.code, ErrorCode::Internal));
+        // The display-safe error keeps the status but never the key.
+        assert!(err.message.contains("401"));
+        assert!(!err.message.contains("tvly-secret-key"));
+    }
+
     /// A persisted GenericOpenAI row with a loopback base_url is classified
     /// local by `local_provider_ids`, while one pointed at a remote host is
     /// not. This mirrors `local_provider_ids_classifies_by_kind_and_endpoint`
@@ -5068,5 +6319,379 @@ mod tests {
             rx.try_recv().is_err(),
             "a rejected embedded mutation must not emit ProvidersChanged"
         );
+    }
+
+    // --- Attach / repository context (FEAT-003) -----------------------------
+
+    #[test]
+    fn read_text_file_inner_happy_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let display = path.to_string_lossy().to_string();
+        let view = read_text_file_inner(&path, &display).unwrap();
+        assert_eq!(view.name, "notes.txt");
+        assert_eq!(view.text, "hello world");
+        assert_eq!(view.byte_len, "hello world".len());
+        assert_eq!(view.path, display);
+    }
+
+    #[test]
+    fn read_text_file_inner_rejects_empty_and_missing() {
+        // Empty path -> InvalidArgument.
+        let err = read_text_file_inner(Path::new(""), "").unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+        // Missing file -> NotFound.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.txt");
+        let display = missing.to_string_lossy().to_string();
+        let err = read_text_file_inner(&missing, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::NotFound));
+    }
+
+    #[test]
+    fn read_text_file_inner_rejects_oversized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let big = "a".repeat(file_context::MAX_ATTACH_BYTES + 1);
+        std::fs::write(&path, &big).unwrap();
+        let display = path.to_string_lossy().to_string();
+        let err = read_text_file_inner(&path, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+    }
+
+    #[test]
+    fn read_text_file_inner_rejects_non_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.dat");
+        // Invalid UTF-8 byte sequence.
+        std::fs::write(&path, [0xff, 0xfe, 0x00, 0x80]).unwrap();
+        let display = path.to_string_lossy().to_string();
+        let err = read_text_file_inner(&path, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+    }
+
+    #[test]
+    fn read_text_file_inner_rejects_binary_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logo.png");
+        std::fs::write(&path, "not really a png").unwrap();
+        let display = path.to_string_lossy().to_string();
+        let err = read_text_file_inner(&path, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+    }
+
+    #[test]
+    fn read_file_base64_inner_happy_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pixel.png");
+        std::fs::write(&path, b"foobar").unwrap();
+        let display = path.to_string_lossy().to_string();
+        let view = read_file_base64_inner(&path, &display).unwrap();
+        assert_eq!(view.name, "pixel.png");
+        assert_eq!(view.mime_type, "image/png");
+        assert_eq!(view.base64, "Zm9vYmFy");
+        assert_eq!(view.byte_len, 6);
+    }
+
+    #[test]
+    fn read_file_base64_inner_rejects_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone.png");
+        let display = missing.to_string_lossy().to_string();
+        let err = read_file_base64_inner(&missing, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::NotFound));
+    }
+
+    #[test]
+    fn list_repo_files_inner_filters_and_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("README.md"), "# hi").unwrap();
+        std::fs::write(root.join("logo.png"), "binary").unwrap();
+        // A skipped dir with a file inside must be excluded wholesale.
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git").join("config"), "x").unwrap();
+        std::fs::create_dir(root.join("node_modules")).unwrap();
+        std::fs::write(root.join("node_modules").join("dep.js"), "x").unwrap();
+        // A nested non-skipped dir contributes a relative path.
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("lib.rs"), "pub fn x() {}").unwrap();
+
+        let display = root.to_string_lossy().to_string();
+        let listing = list_repo_files_inner(root, &display).unwrap();
+        assert!(!listing.truncated);
+        let rels: Vec<&str> = listing.files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(rels.contains(&"main.rs"));
+        assert!(rels.contains(&"README.md"));
+        assert!(rels.contains(&"src/lib.rs"));
+        // Binary + skipped-dir files are excluded.
+        assert!(!rels.iter().any(|r| r.ends_with("logo.png")));
+        assert!(!rels.iter().any(|r| r.contains(".git")));
+        assert!(!rels.iter().any(|r| r.contains("node_modules")));
+    }
+
+    #[test]
+    fn list_repo_files_inner_rejects_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir");
+        let display = missing.to_string_lossy().to_string();
+        let err = list_repo_files_inner(&missing, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::NotFound));
+    }
+
+    #[test]
+    fn list_repo_files_inner_sets_truncated_at_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Create more files than the entry cap so the walk truncates.
+        for i in 0..(file_context::MAX_REPO_ENTRIES + 10) {
+            std::fs::write(root.join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let display = root.to_string_lossy().to_string();
+        let listing = list_repo_files_inner(root, &display).unwrap();
+        assert!(listing.truncated);
+        assert_eq!(listing.files.len(), file_context::MAX_REPO_ENTRIES);
+    }
+
+    // --- LAN model sharing (FEAT-006) --------------------------------------
+
+    /// `add_network_peer_inner` persists a peer as a GenericOpenAI row with the
+    /// network-peer id prefix, shows it in `list_network_peers_inner`, and
+    /// reflects `has_api_key`. A stored key is kept only as an opaque SecretRef
+    /// (never returned) and is resolvable through the internal seam.
+    #[tokio::test]
+    async fn add_network_peer_persists_lists_and_reflects_has_api_key() {
+        let state = test_state().await;
+
+        // A keyless peer at a remote TLS base_url: persists + lists.
+        let view = add_network_peer_inner(
+            &state,
+            "https://192.168.1.50:11435/v1",
+            Some("Studio box"),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(view.id.starts_with(NETWORK_PEER_ID_PREFIX));
+        assert_eq!(view.label, "Studio box");
+        assert_eq!(view.base_url, "https://192.168.1.50:11435/v1");
+        assert!(!view.has_api_key);
+        // Remote TLS => accepted silently, no warning.
+        assert!(view.warning.is_none());
+
+        let peers = list_network_peers_inner(&state).await.unwrap();
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].id, view.id);
+        assert_eq!(peers[0].label, "Studio box");
+        assert!(!peers[0].has_api_key);
+
+        // A keyed peer stores the key as a SecretRef (never returned) resolvable
+        // only via the internal seam.
+        let keyed = add_network_peer_inner(
+            &state,
+            "https://10.0.0.7:11435/v1",
+            None,
+            Some("peer-secret-key"),
+        )
+        .await
+        .unwrap();
+        assert!(keyed.has_api_key);
+        // No label given -> the base_url is the display label.
+        assert_eq!(keyed.label, "https://10.0.0.7:11435/v1");
+        assert_eq!(
+            state
+                .secret_store
+                .resolve(&SecretRef::new(keyed.id.as_str()))
+                .unwrap(),
+            "peer-secret-key"
+        );
+        // The serialized view NEVER carries the key.
+        let json = serde_json::to_string(&keyed).unwrap();
+        assert!(!json.contains("peer-secret-key"));
+
+        // Re-adding the SAME base_url is an idempotent upsert (no duplicate row).
+        let readd =
+            add_network_peer_inner(&state, "https://10.0.0.7:11435/v1", Some("renamed"), None)
+                .await
+                .unwrap();
+        assert_eq!(readd.id, keyed.id);
+        // The keyless re-add cleared the prior secret so nothing is orphaned.
+        assert!(!readd.has_api_key);
+        assert!(matches!(
+            state
+                .secret_store
+                .resolve(&SecretRef::new(keyed.id.as_str())),
+            Err(SecretError::NotFound(_))
+        ));
+        let peers = list_network_peers_inner(&state).await.unwrap();
+        assert_eq!(peers.len(), 2);
+    }
+
+    /// A peer at a blocked link-local/metadata base_url is REJECTED and nothing
+    /// is persisted (the Section 9.3 posture, reused via check_provider_base_url).
+    #[tokio::test]
+    async fn add_network_peer_rejects_blocked_base_url() {
+        let state = test_state().await;
+        let err = add_network_peer_inner(&state, "http://169.254.169.254/v1", None, None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+        assert!(list_network_peers_inner(&state).await.unwrap().is_empty());
+    }
+
+    /// A peer at a non-loopback PLAINTEXT base_url is accepted but carries the
+    /// existing TLS advisory (parity with set_local_runtime / set_cloud_provider).
+    #[tokio::test]
+    async fn add_network_peer_warns_on_non_loopback_plaintext() {
+        let state = test_state().await;
+        let view = add_network_peer_inner(&state, "http://192.168.1.50:11435/v1", None, None)
+            .await
+            .unwrap();
+        let warning = view
+            .warning
+            .expect("plaintext non-loopback yields a warning");
+        assert!(warning.contains("plaintext"));
+        // Persisted despite the advisory (non-blocking).
+        assert_eq!(list_network_peers_inner(&state).await.unwrap().len(), 1);
+    }
+
+    /// A LAN peer is OFF-HOST: it must NOT satisfy the LocalOnly/Confidential
+    /// privacy gate. A peer is a GenericOpenAI row at a NON-loopback base_url, so
+    /// `local_provider_ids` (which admits GenericOpenAI only at loopback)
+    /// EXCLUDES it. This pins the documented privacy decision.
+    #[tokio::test]
+    async fn network_peer_is_excluded_from_local_provider_ids() {
+        let state = test_state().await;
+        let view = add_network_peer_inner(&state, "https://192.168.1.50:11435/v1", None, None)
+            .await
+            .unwrap();
+        let configs = ProviderRepo::new(state.session_manager.db())
+            .list()
+            .await
+            .unwrap();
+        let local = local_provider_ids(&configs);
+        assert!(
+            !local.contains(&view.id),
+            "a LAN peer is off-host and must never be treated as provably-local"
+        );
+    }
+
+    /// `remove_network_peer_inner` deletes both the stored secret and the row,
+    /// is idempotent for an unknown id, and refuses to remove a non-peer row.
+    #[tokio::test]
+    async fn remove_network_peer_deletes_secret_and_row() {
+        let state = test_state().await;
+        let view = add_network_peer_inner(
+            &state,
+            "https://10.0.0.7:11435/v1",
+            None,
+            Some("peer-secret-key"),
+        )
+        .await
+        .unwrap();
+        assert!(view.has_api_key);
+
+        remove_network_peer_inner(&state, &view.id).await.unwrap();
+        assert!(list_network_peers_inner(&state).await.unwrap().is_empty());
+        // The secret is gone from the store.
+        assert!(matches!(
+            state
+                .secret_store
+                .resolve(&SecretRef::new(view.id.as_str())),
+            Err(SecretError::NotFound(_))
+        ));
+        // Removing an unknown id is a no-op (idempotent).
+        remove_network_peer_inner(&state, &view.id).await.unwrap();
+
+        // A non-peer row (a cloud provider) cannot be removed through this path.
+        set_cloud_provider_inner(&state, ProviderKind::OpenAI, "sk-test", None)
+            .await
+            .unwrap();
+        let err = remove_network_peer_inner(&state, "openai-cloud")
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+    }
+
+    /// `set_model_sharing_inner` persists the additive config and returns a
+    /// VISIBLE status; `get_model_sharing_inner` rehydrates it. Disabling reports
+    /// the off status; enabling on an ephemeral port reports a running status.
+    #[tokio::test]
+    async fn model_sharing_persists_and_reports_visible_status() {
+        let state = test_state().await;
+
+        // Default (unconfigured) -> off.
+        let got = get_model_sharing_inner(&state).await.unwrap();
+        assert!(!got.enabled);
+        assert_eq!(got.port, DEFAULT_MODEL_SHARING_PORT);
+        assert!(got.status.to_lowercase().contains("off"));
+
+        // Enable on an ephemeral port (0 is rejected; use a high port). Binding
+        // to a real LAN interface is user-only, but the seam must return a
+        // visible status without hanging.
+        let err = set_model_sharing_inner(&state, true, Some(0))
+            .await
+            .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+
+        let view = set_model_sharing_inner(&state, true, Some(11500))
+            .await
+            .unwrap();
+        assert!(view.enabled);
+        assert_eq!(view.port, 11500);
+        assert!(!view.status.is_empty());
+
+        // Rehydrate: enabled + port persisted.
+        let got = get_model_sharing_inner(&state).await.unwrap();
+        assert!(got.enabled);
+        assert_eq!(got.port, 11500);
+
+        // Disable -> off status, port retained.
+        let view = set_model_sharing_inner(&state, false, None).await.unwrap();
+        assert!(!view.enabled);
+        assert_eq!(view.port, 11500);
+        assert!(view.status.to_lowercase().contains("off"));
+    }
+
+    /// The model-sharing status wording reflects each serve outcome, including a
+    /// non-fatal port-unavailable reason (never a silent hang).
+    #[test]
+    fn model_sharing_status_wording_is_visible_and_non_fatal() {
+        let disabled = ModelSharingConfig {
+            enabled: false,
+            port: 11435,
+        };
+        assert!(model_sharing_status(&disabled, None)
+            .to_lowercase()
+            .contains("off"));
+
+        let enabled = ModelSharingConfig {
+            enabled: true,
+            port: 11435,
+        };
+        let running =
+            model_sharing_status(&enabled, Some(&ShareServerStatus::Running { port: 11435 }));
+        assert!(running.contains("11435"));
+
+        let unavailable = model_sharing_status(
+            &enabled,
+            Some(&ShareServerStatus::Unavailable {
+                port: 11435,
+                reason: "address already in use".to_string(),
+            }),
+        );
+        assert!(unavailable.contains("address already in use"));
+        assert!(unavailable.contains("11435"));
+    }
+
+    /// `discover_network_peers_inner` maps the discovery seam's results to
+    /// display-safe views. The in-sandbox stub returns EMPTY without error,
+    /// exercising the non-fatal empty path the UI surfaces.
+    #[tokio::test]
+    async fn discover_network_peers_maps_results_and_is_non_fatal_when_empty() {
+        let peers = discover_network_peers_inner().await.unwrap();
+        assert!(peers.is_empty());
     }
 }

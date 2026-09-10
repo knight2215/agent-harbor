@@ -167,6 +167,12 @@ pub struct AppState {
     /// `status` reports it. Behind an `RwLock` so command tasks can read/update
     /// it concurrently; `Arc` keeps it cheap to clone into those tasks.
     pub embedded_loaded_model: Arc<RwLock<Option<String>>>,
+    /// Optional web-search provider base-URL override (FEAT-004). `None` in
+    /// production, so the configured provider uses its built-in default
+    /// endpoint (e.g. Tavily's `https://api.tavily.com`). Tests set this to a
+    /// local wiremock `MockServer` URI so `run_web_search` can be exercised
+    /// offline with no live network.
+    pub web_search_base_url: Option<String>,
 }
 
 impl AppState {
@@ -231,6 +237,7 @@ impl AppState {
             mcp_servers,
             embedded_engine: Arc::new(EmbeddedEngine::empty()),
             embedded_loaded_model: Arc::new(RwLock::new(None)),
+            web_search_base_url: None,
         };
         Ok((state, rx))
     }
@@ -256,6 +263,7 @@ impl AppState {
             mcp_servers: McpRegistry::new(),
             embedded_engine: Arc::new(EmbeddedEngine::empty()),
             embedded_loaded_model: Arc::new(RwLock::new(None)),
+            web_search_base_url: None,
         };
         (state, rx)
     }

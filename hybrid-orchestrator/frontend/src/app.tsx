@@ -3,10 +3,12 @@
 // A navigable shell with a collapsible left sidebar hosting the brand/logo and
 // the primary destinations Chat / History / Settings. The main pane renders the
 // active destination:
-//   - Chat (default): the chat surface (MessageList + Composer + PermissionPrompt)
-//     with the model selector's per-conversation routing-mode + model control
-//     next to the Composer (RouteBadge surfaces the chosen provider/model +
-//     rationale, Section 8.2).
+//   - Chat (default): a Welcome screen until a conversation is active, then the
+//     chat surface (MessageList + Composer + PermissionPrompt). The model
+//     selector's routing-mode + model control, the "Why this model?" info icon,
+//     and the enumeration-error warning icon are folded INTO the Composer's
+//     compact control row (Section 8.1/8.2). The Chat nav item nests the
+//     Conversations sub-list (conversation list + New conversation).
 //   - History: the conversation history / session-management surface (Section 8.5).
 //   - Settings: the heavy-configuration area (providers & keys, local runtimes,
 //     MCP / tools, agents, routing, appearance) with its own sub-navigation.
@@ -31,8 +33,10 @@ import logoUrl from "./assets/logo.svg";
 import { Composer } from "./features/chat/Composer";
 import { MessageList } from "./features/chat/MessageList";
 import { PermissionPrompt } from "./features/chat/PermissionPrompt";
-import { RoutingModeToggle } from "./features/model-selector/RoutingModeToggle";
+import { WelcomeScreen } from "./features/chat/WelcomeScreen";
+import { ConversationList } from "./features/history/ConversationList";
 import { History } from "./features/history/History";
+import { NewConversationButton } from "./features/history/NewConversationButton";
 import { Settings } from "./features/settings/Settings";
 import { onCoreEvent } from "./ipc/events";
 import { useConversationsStore } from "./state/conversations";
@@ -98,6 +102,10 @@ function StatusBar() {
 export function App() {
   const [destination, setDestination] = useState<Destination>("chat");
   const [collapsed, setCollapsed] = useState<boolean>(readCollapsed);
+  // The chat surface renders ONLY when a conversation is active; otherwise the
+  // Chat destination shows the Welcome screen so a fresh launch never looks like
+  // an already-open (but empty) conversation.
+  const activeConversationId = useConversationsStore((s) => s.activeConversationId);
 
   // Single top-level core-event subscription: fan every CoreEvent out to each
   // store's reducer so the surfaces stay in sync without subscribing
@@ -163,39 +171,51 @@ export function App() {
 
         <nav className="app__nav" role="navigation" aria-label="Primary">
           {NAV_ITEMS.map(({ id, label, icon }) => (
-            <button
-              key={id}
-              type="button"
-              className="app__nav-item"
-              data-active={destination === id}
-              aria-current={destination === id ? "page" : undefined}
-              title={label}
-              onClick={() => setDestination(id)}
-            >
-              <span className="app__nav-icon" aria-hidden="true">
-                {icon}
-              </span>
-              <span className="app__nav-label">{label}</span>
-            </button>
+            <div key={id} className="app__nav-group">
+              <button
+                type="button"
+                className="app__nav-item"
+                data-active={destination === id}
+                aria-current={destination === id ? "page" : undefined}
+                title={label}
+                onClick={() => setDestination(id)}
+              >
+                <span className="app__nav-icon" aria-hidden="true">
+                  {icon}
+                </span>
+                <span className="app__nav-label">{label}</span>
+              </button>
+              {/*
+                Conversations nested UNDER the Chat nav item: the Chat group's
+                expanded body hosts the reusable conversation list + a New
+                conversation action, so selecting a row resumes that session and
+                creating one opens it (both flip the chat surface on). This
+                replaces the old always-on <History /> block under Chat. The
+                sub-list is hidden in the collapsed rail (CSS) like the labels.
+              */}
+              {id === "chat" && (
+                <div className="app__nav-sub" data-testid="chat-conversations">
+                  <span className="app__nav-sub-label">Conversations</span>
+                  <NewConversationButton />
+                  <ConversationList query="" />
+                </div>
+              )}
+            </div>
           ))}
         </nav>
-
-        {destination === "chat" && (
-          <div className="app__sidebar-history">
-            <History />
-          </div>
-        )}
       </aside>
 
       <main className="app__main">
-        {destination === "chat" && (
-          <section className="app__chat" aria-label="Chat">
-            <MessageList />
-            <RoutingModeToggle />
-            <Composer />
-            <PermissionPrompt />
-          </section>
-        )}
+        {destination === "chat" &&
+          (activeConversationId !== null ? (
+            <section className="app__chat" aria-label="Chat">
+              <MessageList />
+              <Composer />
+              <PermissionPrompt />
+            </section>
+          ) : (
+            <WelcomeScreen />
+          ))}
         {destination === "history" && <History />}
         {destination === "settings" && <Settings />}
       </main>

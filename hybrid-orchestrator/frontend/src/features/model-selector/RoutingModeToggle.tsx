@@ -25,7 +25,6 @@ import { useState } from "react";
 import { useConversationsStore } from "../../state/conversations";
 import { useProvidersStore } from "../../state/providers";
 import type { ManualRoute, RoutingMode } from "../../types";
-import { AutoRationaleTooltip } from "./AutoRationaleTooltip";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 
 /** The non-Manual segments and their labels, in display order. */
@@ -108,15 +107,13 @@ export function RoutingModeToggle() {
         </button>
       </div>
 
-      {!isManual && <AutoRationaleTooltip conversationId={activeConversationId} />}
-
       {/*
         Reveal the manual-pin picker only when Manual/showPicker is on AND there
         are models to choose from. With zero models the picker would render a
-        NoModelsEmptyState that stacks with the one PerMessageOverrideControl
-        already shows in the chat pane; suppressing it here keeps a single piece
-        of guidance visible (the override control owns it) without changing the
-        routing-mode or pin semantics.
+        NoModelsEmptyState that stacks with the one the InlineModelControl
+        already shows in the composer; suppressing it here keeps a single piece
+        of guidance visible (the inline model control owns it) without changing
+        the routing-mode or pin semantics.
       */}
       {(isManual || showPicker) && models.length > 0 && (
         <ProviderModelPicker models={models} value={pin} onChange={pinRoute} />

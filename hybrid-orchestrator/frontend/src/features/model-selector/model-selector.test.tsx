@@ -11,6 +11,9 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 import { useConversationsStore } from "../../state/conversations";
 import { useProvidersStore } from "../../state/providers";
+import { AutoRationaleTooltip } from "./AutoRationaleTooltip";
+import { EnumerationErrorModal } from "./EnumerationErrorModal";
+import { InlineModelControl } from "./InlineModelControl";
 import { PerMessageOverrideControl } from "./PerMessageOverrideControl";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { RoutingModeToggle } from "./RoutingModeToggle";
@@ -68,6 +71,8 @@ function resetStores() {
     activeConversationId: null,
     messages: [],
     pendingOverride: null,
+    webSearchEnabled: false,
+    attachments: [],
     pendingPermissions: [],
   });
   useProvidersStore.setState({
@@ -160,6 +165,41 @@ describe("model selector", () => {
     expect(
       within(local).getByRole("button", { name: /embedded \/ local-llama-3\.gguf/ }),
     ).toHaveTextContent("free");
+  });
+
+  it("ProviderModelPicker shows a distinct Network group for a LAN peer (FEAT-006)", () => {
+    // A LAN peer's models carry the `network-peer-` provider-id prefix the
+    // backend stamps, so they must land in their own Network group - not misfiled
+    // under Local (even though a keyless peer's models are zero-priced) or Cloud.
+    render(
+      <ProviderModelPicker
+        models={[
+          model("network-peer-abc123", "qwen3:8b", true),
+          model("ollama-local", "llama3.1:8b", true),
+          model("openai", "gpt-4o", false),
+        ]}
+        value={null}
+        onChange={vi.fn()}
+      />,
+    );
+
+    const network = screen.getByRole("region", { name: "Network" });
+    const local = screen.getByRole("region", { name: "Local" });
+    const cloud = screen.getByRole("region", { name: "Cloud" });
+
+    // The peer's model is under Network...
+    expect(
+      within(network).getByRole("button", { name: /network-peer-abc123 \/ qwen3:8b/ }),
+    ).toBeInTheDocument();
+    // ...and NOT double-counted under Local despite its zero price.
+    expect(
+      within(local).queryByRole("button", { name: /network-peer-abc123 \/ qwen3:8b/ }),
+    ).toBeNull();
+    // On-host Local + Cloud still group correctly.
+    expect(
+      within(local).getByRole("button", { name: /ollama-local \/ llama3\.1:8b/ }),
+    ).toBeInTheDocument();
+    expect(within(cloud).getByRole("button", { name: /openai \/ gpt-4o/ })).toBeInTheDocument();
   });
 
   it("RoutingModeToggle: renders four segmented positions", () => {
@@ -405,5 +445,84 @@ describe("model selector", () => {
     expect(await screen.findByTestId("no-models-empty-state")).toBeInTheDocument();
     const errors = await screen.findByTestId("provider-enumeration-errors");
     expect(within(errors).getByText(/ollama-local/)).toBeInTheDocument();
+  });
+
+  it("InlineModelControl writes the SHARED store override (not its own copy)", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    useProvidersStore.setState({ models: [model("openai", "gpt-4o", false)] });
+
+    render(<InlineModelControl />);
+    // Open the compact dropdown, then pick a model.
+    fireEvent.click(screen.getByRole("button", { name: "Select model for the next message" }));
+    fireEvent.click(screen.getByRole("button", { name: /openai \/ gpt-4o/ }));
+
+    // The SAME shared transient override the Composer send path consumes is set.
+    expect(useConversationsStore.getState().pendingOverride).toEqual({
+      providerId: "openai",
+      model: "gpt-4o",
+    });
+    // The compact trigger reflects the effective selection.
+    expect(screen.getByTestId("inline-model-current")).toHaveTextContent("openai / gpt-4o");
+  });
+
+  it("InlineModelControl shows a single 'No models' affordance when empty", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    useProvidersStore.setState({ models: [] });
+    render(<InlineModelControl />);
+    // Exactly one guidance node, not a stacked/blanked picker.
+    expect(screen.getAllByTestId("no-models-empty-state")).toHaveLength(1);
+  });
+
+  it("EnumerationErrorModal renders no warning icon when there are no errors", () => {
+    useProvidersStore.setState({ errors: [], lastError: null });
+    const { container } = render(<EnumerationErrorModal />);
+    // Zero errors => no icon at all.
+    expect(screen.queryByRole("button", { name: "Show model load warnings" })).toBeNull();
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("EnumerationErrorModal shows a warning icon and lists errors + lastError in a modal", () => {
+    useProvidersStore.setState({
+      errors: [{ providerId: "ollama-local", message: "connection refused" }],
+      lastError: "provider registry build failed",
+    });
+    render(<EnumerationErrorModal />);
+
+    // The warning icon appears because errors exist; no dialog until clicked.
+    const trigger = screen.getByRole("button", { name: "Show model load warnings" });
+    expect(screen.queryByRole("dialog")).toBeNull();
+
+    fireEvent.click(trigger);
+    const dialog = screen.getByRole("dialog", { name: "Model load warnings" });
+    expect(within(dialog).getByText(/ollama-local/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/connection refused/)).toBeInTheDocument();
+    // The last load failure is surfaced in the same modal.
+    expect(within(dialog).getByTestId("modal-last-error")).toHaveTextContent(
+      "provider registry build failed",
+    );
+
+    // The modal is dismissible.
+    fireEvent.click(within(dialog).getByRole("button", { name: "Close" }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("AutoRationaleTooltip reveals the rationale from an info icon on click", async () => {
+    // get_route_explanation resolves a display-safe rationale for the active
+    // conversation; the info icon reveals it (no always-on body text).
+    invoke.mockResolvedValue({
+      rationale: "cheapest local model that fits the context",
+      source: "automatic",
+    });
+
+    render(<AutoRationaleTooltip conversationId="c-1" />);
+
+    // The trigger is an accessible info icon; the rationale is hidden until click.
+    const trigger = await screen.findByRole("button", { name: "Why this model?" });
+    expect(screen.queryByText("cheapest local model that fits the context")).toBeNull();
+
+    fireEvent.click(trigger);
+    expect(
+      await screen.findByText("cheapest local model that fits the context"),
+    ).toBeInTheDocument();
   });
 });

@@ -4,26 +4,35 @@ import type {
   AvailableModelsResult,
   CloudProviderConfig,
   Conversation,
+  DiscoveredPeerView,
   EmbeddedModelStatus,
   EmbeddedModelView,
   ExportFormat,
+  FileBinaryView,
+  FileContentView,
   LocalRuntimeConfig,
   ManualRoute,
   McpServerConfig,
   McpServerInput,
   Message,
   ModelParameters,
+  ModelSharingView,
+  NetworkPeerView,
   OpenedConversation,
   PermissionDecision,
   PermissionMode,
   PrivacyTag,
   ProviderDiagnosticsReport,
   ProviderKind,
+  RepoListing,
   RouteExplanation,
   RoutingHint,
   RoutingMode,
   SecretRef,
   ToolDescriptorView,
+  WebSearchConfigView,
+  WebSearchKind,
+  WebSearchResultView,
 } from "../types";
 
 /**
@@ -245,6 +254,132 @@ export function clearCloudProvider(kind: ProviderKind): Promise<void> {
   return invoke<void>("clear_cloud_provider", { kind });
 }
 
+// --- Web search (FEAT-004 / Section 8.1 web-search toggle) ------------------
+
+/**
+ * Configure the web-search provider (FEAT-004): pick a {@link WebSearchKind}
+ * (Tavily is the recommended default) and enter its API key, optionally
+ * overriding how many results a search requests. The plaintext key flows IN and
+ * is stored server-side as an opaque {@link SecretRef} under a stable keychain
+ * handle; it NEVER comes back across IPC (the returned {@link WebSearchConfigView}
+ * only reports `hasApiKey`). Backed by `set_web_search_provider`.
+ */
+export function setWebSearchProvider(
+  kind: WebSearchKind,
+  apiKey: string,
+  maxResults?: number | null,
+): Promise<WebSearchConfigView> {
+  return invoke<WebSearchConfigView>("set_web_search_provider", { kind, apiKey, maxResults });
+}
+
+/**
+ * Return the configured web-search provider so the Settings section can
+ * rehydrate from the backend source of truth, or `null` when web search is
+ * unconfigured. DISPLAY-SAFE: reports only kind / hasApiKey / maxResults, never
+ * the key. Backed by `get_web_search_config`.
+ */
+export function getWebSearchConfig(): Promise<WebSearchConfigView | null> {
+  return invoke<WebSearchConfigView | null>("get_web_search_config");
+}
+
+/**
+ * Clear the configured web-search provider, deleting the stored key from the OS
+ * keychain and resetting the selection. Clearing when nothing is configured is a
+ * no-op. Backed by `clear_web_search_provider`.
+ */
+export function clearWebSearchProvider(): Promise<void> {
+  return invoke<void>("clear_web_search_provider");
+}
+
+/**
+ * Run a web search for `query` and return display-safe results (FEAT-004),
+ * which the composer injects as a bounded context block before the model
+ * answers when the 🌐 toggle is ON. REJECTS with a clear error when web search
+ * is unconfigured (no provider/key) so the composer can show a VISIBLE
+ * non-fatal notice and STILL send the plain message. DISPLAY-SAFE: results carry
+ * only title/url/snippet, never the key. Backed by `run_web_search`.
+ */
+export function runWebSearch(query: string): Promise<WebSearchResultView[]> {
+  return invoke<WebSearchResultView[]>("run_web_search", { query });
+}
+
+// --- Local network (LAN) model sharing (FEAT-006 / Section 9.3) -------------
+
+/**
+ * Add a LAN peer as a consumable, OpenAI-compatible provider (FEAT-006): the
+ * peer is persisted as a generic OpenAI-compatible {@link CloudProviderConfig}-
+ * style provider row pointed at its `host:port` `baseUrl`, so its models
+ * enumerate and route exactly like any provider. `baseUrl` is REQUIRED and
+ * validated through the Section 9.3 base-url posture: a blocked link-local /
+ * metadata target REJECTS this call, while an accepted plaintext non-loopback
+ * target resolves with a non-null {@link NetworkPeerView.warning}. `label` is
+ * optional (the base URL is used when omitted); the optional `apiKey` flows IN
+ * and is stored as an opaque {@link SecretRef} that NEVER comes back.
+ *
+ * PRIVACY (Section 9.3): a LAN peer is OFF-HOST, so it does NOT satisfy a
+ * LocalOnly/Confidential privacy tag; such conversations never route to a peer.
+ * Backed by `add_network_peer`.
+ */
+export function addNetworkPeer(
+  baseUrl: string,
+  label: string | null,
+  apiKey: string | null,
+): Promise<NetworkPeerView> {
+  return invoke<NetworkPeerView>("add_network_peer", { baseUrl, label, apiKey });
+}
+
+/**
+ * List the configured LAN peers so the Network Sharing UI can rehydrate from the
+ * backend source of truth. DISPLAY-SAFE: each row carries only
+ * id/label/baseUrl/hasApiKey, never the key. Backed by `list_network_peers`.
+ */
+export function listNetworkPeers(): Promise<NetworkPeerView[]> {
+  return invoke<NetworkPeerView[]>("list_network_peers");
+}
+
+/**
+ * Remove a configured LAN peer by its id (deleting any stored secret + the row).
+ * Removing an unknown id is a no-op. Backed by `remove_network_peer`.
+ */
+export function removeNetworkPeer(id: string): Promise<void> {
+  return invoke<void>("remove_network_peer", { id });
+}
+
+/**
+ * Enable or disable LAN model sharing on an optional `port` (FEAT-006). When
+ * enabling, this instance runs a small OpenAI-compatible read surface bound to
+ * the LAN that re-exposes THIS machine's local models to peers. The returned
+ * {@link ModelSharingView.status} is a VISIBLE description of the serve state (a
+ * bind failure degrades to a non-fatal reason, never a silent hang).
+ *
+ * SECURITY: sharing exposes this machine's local models to the local network, so
+ * it is OFF by default and the UI states this. Live LAN binding + peer
+ * reachability are user-only. Backed by `set_model_sharing`.
+ */
+export function setModelSharing(enabled: boolean, port: number | null): Promise<ModelSharingView> {
+  return invoke<ModelSharingView>("set_model_sharing", { enabled, port });
+}
+
+/**
+ * Report the current LAN model-sharing settings so the Network Sharing UI can
+ * rehydrate. Does NOT (re)bind the server. Backed by `get_model_sharing`.
+ */
+export function getModelSharing(): Promise<ModelSharingView> {
+  return invoke<ModelSharingView>("get_model_sharing");
+}
+
+/**
+ * Discover LAN peers advertising an OpenAI-compatible endpoint (FEAT-006),
+ * returning display-safe results the user can one-click Add. Non-fatal:
+ * discovery being unavailable (or finding nothing) returns an EMPTY list rather
+ * than an error, and the UI shows a "no peers found / discovery unavailable"
+ * notice. Live discovery is user-only (the in-sandbox implementation returns
+ * empty). Backed by `discover_network_peers`.
+ */
+export function discoverNetworkPeers(): Promise<DiscoveredPeerView[]> {
+  return invoke<DiscoveredPeerView[]>("discover_network_peers");
+}
+
 // --- Message pipeline (P4.6 / Section 8.1) ----------------------------------
 
 /**
@@ -459,4 +594,44 @@ export function unloadEmbeddedModel(): Promise<EmbeddedModelStatus> {
  */
 export function embeddedModelStatus(): Promise<EmbeddedModelStatus> {
   return invoke<EmbeddedModelStatus>("embedded_model_status");
+}
+
+// --- Attach / repository context (FEAT-003 / Section 8.1) -------------------
+
+/**
+ * Read a local TEXT file for attachment (architecture.md Section 8.1 chat
+ * surface). The backend validates the path, enforces a per-file byte cap
+ * (`MAX_ATTACH_BYTES`), rejects binary-by-extension and non-UTF-8 files, and
+ * returns a display-safe {@link FileContentView} whose `text` the composer folds
+ * into the next turn's context block. Also used to fetch the contents of
+ * repository files the user selected from a {@link listRepoFiles} listing.
+ * Backed by `read_text_file`.
+ */
+export function readTextFile(path: string): Promise<FileContentView> {
+  return invoke<FileContentView>("read_text_file", { path });
+}
+
+/**
+ * Read a local IMAGE (binary) file for attachment, base64-encoded
+ * (architecture.md Section 8.1). The backend validates the path, enforces a
+ * per-file image cap, and returns a display-safe {@link FileBinaryView} with a
+ * MIME type guessed from the extension. The composer only attaches the result
+ * when the selected model advertises the `vision` capability. Backed by
+ * `read_file_base64`.
+ */
+export function readFileBase64(path: string): Promise<FileBinaryView> {
+  return invoke<FileBinaryView>("read_file_base64", { path });
+}
+
+/**
+ * List a picked repository directory for context selection (architecture.md
+ * Section 8.1). The backend walks the tree, skipping version-control /
+ * dependency / build-output directories and binary-by-extension files, caps the
+ * number of returned entries, and returns a {@link RepoListing} of relative
+ * paths + byte sizes (with `truncated` set when capped) so the UI can present a
+ * bounded checkbox list under a total-size cap. Selected files' contents are
+ * fetched per-file via {@link readTextFile}. Backed by `list_repo_files`.
+ */
+export function listRepoFiles(dir: string): Promise<RepoListing> {
+  return invoke<RepoListing>("list_repo_files", { dir });
 }

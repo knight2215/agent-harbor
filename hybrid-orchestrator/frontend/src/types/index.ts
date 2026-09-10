@@ -245,6 +245,83 @@ export interface CloudProviderConfig {
 }
 
 /**
+ * The selectable web-search backends (FEAT-004). Mirrors Rust
+ * `providers::WebSearchKind` (`#[serde(rename_all = "camelCase")]`): `tavily`
+ * (the recommended default), `brave`, and `serpApi` (the latter two are
+ * scaffolded backends). A string-literal union so the Settings dropdown and the
+ * command wrappers stay exact.
+ */
+export type WebSearchKind = "tavily" | "brave" | "serpApi";
+
+/**
+ * A display-safe view of the configured web-search provider (FEAT-004),
+ * returned by the `set_web_search_provider` / `get_web_search_config` commands.
+ * Mirrors Rust `commands::WebSearchConfigView`. `hasApiKey` reports only WHETHER
+ * a key is stored (as an opaque {@link SecretRef}), never the key itself; the
+ * key NEVER crosses IPC.
+ */
+export interface WebSearchConfigView {
+  kind: WebSearchKind;
+  hasApiKey: boolean;
+  maxResults: number;
+}
+
+/**
+ * A display-safe web-search result row (FEAT-004), returned by `run_web_search`
+ * and injected as context before the model answers. Mirrors Rust
+ * `commands::WebSearchResultView`. Carries only public result fields
+ * (title/url/snippet), never the API key.
+ */
+export interface WebSearchResultView {
+  title: string;
+  url: string;
+  snippet: string;
+}
+
+/**
+ * A display-safe view of one configured LAN peer (FEAT-006), returned by the
+ * `add_network_peer` / `list_network_peers` commands. Mirrors Rust
+ * `commands::NetworkPeerView`. A peer is an OpenAI-compatible provider on the
+ * local network whose models enumerate + route like any provider. `hasApiKey`
+ * reports only WHETHER a key is stored (as an opaque {@link SecretRef}), never
+ * the key itself; `warning` carries the optional display-safe base-url advisory
+ * from the backend's `check_provider_base_url` validation (null when there is
+ * none), surfaced only on Add.
+ */
+export interface NetworkPeerView {
+  id: string;
+  label: string;
+  baseUrl: string;
+  hasApiKey: boolean;
+  warning: string | null;
+}
+
+/**
+ * A display-safe view of the LAN model-sharing settings (FEAT-006), returned by
+ * the `set_model_sharing` / `get_model_sharing` commands. Mirrors Rust
+ * `commands::ModelSharingView`. `status` is a display-safe, VISIBLE description
+ * of the serve state (running, off, or a non-fatal bind-failure reason) so the
+ * UI never shows a silent success/hang. Sharing is OFF by default and exposes
+ * this machine's local models to the local network when enabled.
+ */
+export interface ModelSharingView {
+  enabled: boolean;
+  port: number;
+  status: string;
+}
+
+/**
+ * A display-safe discovered LAN peer (FEAT-006), returned by
+ * `discover_network_peers`. Mirrors Rust `commands::DiscoveredPeerView`. Carries
+ * only a label + base URL the user can one-click Add as a consume peer, never
+ * any secret.
+ */
+export interface DiscoveredPeerView {
+  label: string;
+  baseUrl: string;
+}
+
+/**
  * Per-model capability descriptor. Mirrors Rust `providers::Capabilities`
  * (architecture.md Section 4.1). Rust uses `#[serde(rename_all = "camelCase")]`,
  * so `json_mode` -> `jsonMode` and `max_context` -> `maxContext`.
@@ -374,6 +451,57 @@ export interface EmbeddedModelView {
 export interface EmbeddedModelStatus {
   loadedModelId: string | null;
   registeredCount: number;
+}
+
+/**
+ * A display-safe view of a text file read for attachment (FEAT-003, Section
+ * 8.1 chat surface). Mirrors Rust `commands::FileContentView`
+ * (`#[serde(rename_all = "camelCase")]`). Carries the file's UTF-8 contents so
+ * the composer can fold them into the next turn's context block.
+ */
+export interface FileContentView {
+  path: string;
+  name: string;
+  byteLen: number;
+  text: string;
+}
+
+/**
+ * A display-safe view of a binary (image) file read for attachment (FEAT-003),
+ * base64-encoded. Mirrors Rust `commands::FileBinaryView`
+ * (`#[serde(rename_all = "camelCase")]`). The composer only attaches this when
+ * the selected model advertises the `vision` capability.
+ */
+export interface FileBinaryView {
+  path: string;
+  name: string;
+  mimeType: string;
+  base64: string;
+  byteLen: number;
+}
+
+/**
+ * One candidate file in a {@link RepoListing} (FEAT-003). Mirrors Rust
+ * `commands::RepoFileEntry` (`#[serde(rename_all = "camelCase")]`). `relPath` is
+ * relative to the picked directory and is both the display label and the re-read
+ * key; `byteLen` lets the UI enforce a total-size cap across selected files.
+ */
+export interface RepoFileEntry {
+  relPath: string;
+  byteLen: number;
+}
+
+/**
+ * A display-safe listing of a picked repository directory (FEAT-003). Mirrors
+ * Rust `commands::RepoListing` (`#[serde(rename_all = "camelCase")]`).
+ * `truncated` is true when the backend walk stopped at its entry cap, so the UI
+ * can note the list is partial. File contents are fetched per selection via
+ * {@link FileContentView} (`read_text_file`).
+ */
+export interface RepoListing {
+  dir: string;
+  files: RepoFileEntry[];
+  truncated: boolean;
 }
 
 /**

@@ -16,7 +16,9 @@ pub mod builtins;
 pub mod capability;
 pub mod contract;
 pub mod crypto;
+pub mod net_share;
 pub mod registry;
+pub mod web_search;
 
 pub mod adapters {
     //! Provider adapter implementations.
@@ -86,6 +88,27 @@ pub use adapters::embedded::{EmbeddedFactory, EmbeddedProvider};
 pub use adapters::anthropic::AnthropicFactory;
 pub use adapters::bedrock::BedrockFactory;
 pub use adapters::gemini::GeminiFactory;
+
+// Pluggable web search (FEAT-004): the `WebSearchProvider` trait, the selectable
+// `WebSearchKind` enum (Tavily default), the working Tavily adapter, and the
+// display-safe result/error/options types. Consumed by the tauri-app web-search
+// commands and unit-tested offline with wiremock (no live network).
+pub use web_search::{
+    TavilyProvider, WebSearchError, WebSearchKind, WebSearchOptions, WebSearchProvider,
+    WebSearchResult, TAVILY_DEFAULT_BASE_URL,
+};
+
+// LAN model sharing (FEAT-006): the SHARE/serve seam (`ModelShareServer` +
+// `render_models_response` + `ShareServerStatus`) that re-exposes this
+// instance's local models to peers over an OpenAI-compatible read surface, and
+// the peer-DISCOVERY seam (`PeerDiscovery` trait + `StubPeerDiscovery` +
+// `DiscoveredPeer`). The consume side needs no code here: a peer is a generic
+// OpenAI-compatible `ProviderConfig` row that enumerates + routes through the
+// existing path. Unit-tested offline; live LAN binding + discovery are user-only.
+pub use net_share::{
+    render_models_response, DiscoveredPeer, ModelShareServer, PeerDiscovery, ShareServerStatus,
+    SharedModel, StubPeerDiscovery,
+};
 
 // Re-export the reused domain types so downstream crates can refer to them
 // through this crate's surface (single source of truth remains `domain`).

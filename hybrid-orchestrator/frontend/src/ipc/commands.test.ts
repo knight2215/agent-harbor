@@ -37,6 +37,19 @@ import {
   openConversation,
   stopGeneration,
   resolvePermission,
+  readTextFile,
+  readFileBase64,
+  listRepoFiles,
+  setWebSearchProvider,
+  getWebSearchConfig,
+  clearWebSearchProvider,
+  runWebSearch,
+  addNetworkPeer,
+  listNetworkPeers,
+  removeNetworkPeer,
+  setModelSharing,
+  getModelSharing,
+  discoverNetworkPeers,
 } from "./commands";
 import type { McpServerInput } from "../types";
 
@@ -307,5 +320,117 @@ describe("ipc/commands wrappers", () => {
       requestId: "r-1",
       decision: { allow: true, remember: false },
     });
+  });
+
+  it("readTextFile forwards path and returns the file content view (FEAT-003)", async () => {
+    invoke.mockResolvedValue({ path: "/tmp/a.txt", name: "a.txt", byteLen: 5, text: "hello" });
+    await expect(readTextFile("/tmp/a.txt")).resolves.toEqual({
+      path: "/tmp/a.txt",
+      name: "a.txt",
+      byteLen: 5,
+      text: "hello",
+    });
+    expect(invoke).toHaveBeenCalledWith("read_text_file", { path: "/tmp/a.txt" });
+  });
+
+  it("readFileBase64 forwards path and returns the binary view (FEAT-003)", async () => {
+    invoke.mockResolvedValue({
+      path: "/tmp/a.png",
+      name: "a.png",
+      mimeType: "image/png",
+      base64: "Zm9v",
+      byteLen: 3,
+    });
+    await expect(readFileBase64("/tmp/a.png")).resolves.toMatchObject({ mimeType: "image/png" });
+    expect(invoke).toHaveBeenCalledWith("read_file_base64", { path: "/tmp/a.png" });
+  });
+
+  it("listRepoFiles forwards dir and returns the listing (FEAT-003)", async () => {
+    invoke.mockResolvedValue({
+      dir: "/tmp/repo",
+      files: [{ relPath: "a.txt", byteLen: 5 }],
+      truncated: false,
+    });
+    await expect(listRepoFiles("/tmp/repo")).resolves.toMatchObject({ truncated: false });
+    expect(invoke).toHaveBeenCalledWith("list_repo_files", { dir: "/tmp/repo" });
+  });
+
+  // --- Web search (FEAT-004) ---------------------------------------------
+
+  it("setWebSearchProvider forwards kind + apiKey + maxResults and returns the view", async () => {
+    invoke.mockResolvedValue({ kind: "tavily", hasApiKey: true, maxResults: 5 });
+    await expect(setWebSearchProvider("tavily", "tvly-key", 5)).resolves.toMatchObject({
+      kind: "tavily",
+      hasApiKey: true,
+    });
+    expect(invoke).toHaveBeenCalledWith("set_web_search_provider", {
+      kind: "tavily",
+      apiKey: "tvly-key",
+      maxResults: 5,
+    });
+  });
+
+  it("getWebSearchConfig invokes get_web_search_config", async () => {
+    invoke.mockResolvedValue(null);
+    await expect(getWebSearchConfig()).resolves.toBeNull();
+    expect(invoke).toHaveBeenCalledWith("get_web_search_config");
+  });
+
+  it("clearWebSearchProvider invokes clear_web_search_provider", async () => {
+    await clearWebSearchProvider();
+    expect(invoke).toHaveBeenCalledWith("clear_web_search_provider");
+  });
+
+  it("runWebSearch forwards the query and returns display-safe results", async () => {
+    invoke.mockResolvedValue([{ title: "T", url: "https://ex.com", snippet: "s" }]);
+    await expect(runWebSearch("rust async")).resolves.toMatchObject([{ title: "T" }]);
+    expect(invoke).toHaveBeenCalledWith("run_web_search", { query: "rust async" });
+  });
+
+  // --- Local network (LAN) model sharing (FEAT-006) ------------------------
+
+  it("addNetworkPeer forwards baseUrl/label/apiKey", async () => {
+    invoke.mockResolvedValue({
+      id: "network-peer-1",
+      label: "box",
+      baseUrl: "http://192.168.1.5:11435/v1",
+      hasApiKey: false,
+      warning: null,
+    });
+    await addNetworkPeer("http://192.168.1.5:11435/v1", "box", null);
+    expect(invoke).toHaveBeenCalledWith("add_network_peer", {
+      baseUrl: "http://192.168.1.5:11435/v1",
+      label: "box",
+      apiKey: null,
+    });
+  });
+
+  it("listNetworkPeers invokes list_network_peers", async () => {
+    invoke.mockResolvedValue([]);
+    await listNetworkPeers();
+    expect(invoke).toHaveBeenCalledWith("list_network_peers");
+  });
+
+  it("removeNetworkPeer forwards the id", async () => {
+    await removeNetworkPeer("network-peer-1");
+    expect(invoke).toHaveBeenCalledWith("remove_network_peer", { id: "network-peer-1" });
+  });
+
+  it("setModelSharing forwards enabled + port", async () => {
+    invoke.mockResolvedValue({ enabled: true, port: 11435, status: "Sharing on port 11435." });
+    await setModelSharing(true, 11435);
+    expect(invoke).toHaveBeenCalledWith("set_model_sharing", { enabled: true, port: 11435 });
+  });
+
+  it("getModelSharing invokes get_model_sharing", async () => {
+    invoke.mockResolvedValue({ enabled: false, port: 11435, status: "Sharing is off." });
+    await getModelSharing();
+    expect(invoke).toHaveBeenCalledWith("get_model_sharing");
+  });
+
+  it("discoverNetworkPeers invokes discover_network_peers", async () => {
+    invoke.mockResolvedValue([]);
+    await discoverNetworkPeers();
+    expect(invoke).toHaveBeenCalledWith("discover_network_peers");
   });
 });

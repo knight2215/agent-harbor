@@ -52,6 +52,31 @@ import type {
  */
 export type SendState = "idle" | "sending" | "failed";
 
+/**
+ * One piece of context attached to the NEXT chat turn (FEAT-003). Held in the
+ * conversations store (like the transient per-message override) so it is
+ * cleared after a successful send. Three kinds:
+ *   - `text`: an attached text file (its `text` contents are inlined).
+ *   - `repo`: a repository file selected from the folder picker (also text
+ *      contents, tagged separately so the UI can show it under "Repository").
+ *   - `image`: an attached image (base64 + mime); only ever created when the
+ *      selected model advertises `vision`, so its presence already passed the
+ *      vision gate.
+ * `byteLen` is the file's size, used to enforce the total-size caps.
+ */
+export interface Attachment {
+  kind: "text" | "repo" | "image";
+  name: string;
+  path: string;
+  byteLen: number;
+  /** Present for `text` / `repo` kinds: the file's UTF-8 contents. */
+  text?: string;
+  /** Present for `image` kind: the base64-encoded file. */
+  base64?: string;
+  /** Present for `image` kind: the MIME type (e.g. `image/png`). */
+  mimeType?: string;
+}
+
 /** A pending Ask-mode tool-permission request awaiting the user's decision. */
 export interface PendingPermission {
   requestId: string;
@@ -70,6 +95,20 @@ export interface ConversationsState {
   messages: Message[];
   /** The transient per-message override (Section 8.2), or null for automatic. */
   pendingOverride: ManualRoute | null;
+  /**
+   * Whether the composer's web-search toggle is ON (FEAT-002 lands the toggle
+   * + flag; FEAT-004 consumes it when assembling the send context). A real
+   * on/off flag rather than a stub so the affordance is meaningful today.
+   */
+  webSearchEnabled: boolean;
+  /**
+   * Files attached to the NEXT chat turn (FEAT-003): text/repo file contents
+   * and vision-gated images. Assembled into a bounded, delimited context block
+   * that is prepended to the user message `content` on send, then CLEARED after
+   * a successful send so it applies to exactly one turn (mirroring the
+   * transient per-message override).
+   */
+  attachments: Attachment[];
   /** Queue of pending Ask-mode permission requests (Section 9.4). */
   pendingPermissions: PendingPermission[];
   /**
@@ -133,6 +172,18 @@ export interface ConversationsState {
   /** Read and clear the transient override for a single send. */
   consumePendingOverride: () => ManualRoute | null;
 
+  // --- Web-search toggle (FEAT-002 flag; FEAT-004 consumer) ----------------
+  /** Set the composer's web-search on/off flag. */
+  setWebSearchEnabled: (enabled: boolean) => void;
+
+  // --- Attachments / repository context (FEAT-003) -------------------------
+  /** Add an attachment for the next turn (deduped by path + kind). */
+  addAttachment: (attachment: Attachment) => void;
+  /** Remove the attachment with the given path + kind. */
+  removeAttachment: (path: string, kind: Attachment["kind"]) => void;
+  /** Clear all attachments (used after a successful send). */
+  clearAttachments: () => void;
+
   // --- Send / stop (Section 8.1) -------------------------------------------
   /**
    * Send a user message on the active conversation. Reads and CLEARS the
@@ -195,6 +246,8 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
   activeConversationId: null,
   messages: [],
   pendingOverride: null,
+  webSearchEnabled: false,
+  attachments: [],
   pendingPermissions: [],
   sendState: "idle",
   sendError: null,
@@ -316,6 +369,25 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
 
   setPendingOverride: (route) => set({ pendingOverride: route }),
 
+  setWebSearchEnabled: (enabled) => set({ webSearchEnabled: enabled }),
+
+  addAttachment: (attachment) =>
+    set((state) => {
+      // Dedupe by path + kind so re-picking the same file is idempotent.
+      const exists = state.attachments.some(
+        (a) => a.path === attachment.path && a.kind === attachment.kind,
+      );
+      if (exists) return {};
+      return { attachments: [...state.attachments, attachment] };
+    }),
+
+  removeAttachment: (path, kind) =>
+    set((state) => ({
+      attachments: state.attachments.filter((a) => !(a.path === path && a.kind === kind)),
+    })),
+
+  clearAttachments: () => set({ attachments: [] }),
+
   consumePendingOverride: () => {
     const { pendingOverride } = get();
     set({ pendingOverride: null });
@@ -336,7 +408,10 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
     set({ sendState: "sending", sendError: null });
     try {
       await sendMessageCmd(activeConversationId, content, override);
-      set({ sendState: "idle", sendError: null });
+      // Clear the one-turn attachments on a SUCCESSFUL send, mirroring how the
+      // transient override is consumed once (FEAT-003). On failure they are
+      // left in place so the user can retry without re-attaching.
+      set({ sendState: "idle", sendError: null, attachments: [] });
     } catch (e) {
       set({ sendState: "failed", sendError: e instanceof Error ? e.message : String(e) });
     }

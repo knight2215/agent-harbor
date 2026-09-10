@@ -47,6 +47,17 @@ describe("Settings", () => {
           providers: [],
         });
       }
+      // FEAT-004: the Web Search section reads this on mount; unconfigured.
+      if (cmd === "get_web_search_config") {
+        return Promise.resolve(null);
+      }
+      // FEAT-006: the Network Sharing section reads these on mount.
+      if (cmd === "get_model_sharing") {
+        return Promise.resolve({ enabled: false, port: 11435, status: "Sharing is off." });
+      }
+      if (cmd === "list_network_peers") {
+        return Promise.resolve([]);
+      }
       return Promise.resolve([]);
     });
     render(<Settings />);
@@ -59,6 +70,11 @@ describe("Settings", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Local Runtimes" }));
     expect(await screen.findByRole("region", { name: "Local Runtimes" })).toBeInTheDocument();
+    // While the Local Runtimes section is the active (mounted) section, assert
+    // its informational note and embedded-engine surface. Only the active
+    // section is mounted (Settings renders sections conditionally), so these
+    // must be checked here, before navigating away to another section.
+    //
     // The informational note for genuinely-future runtimes is present and
     // labeled, and it no longer claims Ollama (shipped) is "coming soon" nor
     // that the embedded engine is unavailable.
@@ -72,6 +88,14 @@ describe("Settings", () => {
     expect(
       await screen.findByRole("region", { name: "Embedded inference engine" }),
     ).toBeInTheDocument();
+
+    // FEAT-004: the Web Search section is registered and renders by name.
+    fireEvent.click(screen.getByRole("button", { name: "Web Search" }));
+    expect(await screen.findByRole("region", { name: "Web Search" })).toBeInTheDocument();
+
+    // FEAT-006: the Network Sharing section is registered and renders by name.
+    fireEvent.click(screen.getByRole("button", { name: "Network Sharing" }));
+    expect(await screen.findByRole("region", { name: "Network Sharing" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "MCP / Tools" }));
     expect(await screen.findByRole("region", { name: "Tool manager" })).toBeInTheDocument();
@@ -768,5 +792,279 @@ describe("LocalRuntimesSection OpenAI-compatible runtimes", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("local-runtime-configured-lmStudio")).not.toBeInTheDocument();
     });
+  });
+});
+
+import { WebSearchSection } from "./WebSearchSection";
+import type { WebSearchConfigView } from "../../types";
+
+// FEAT-004: the Web Search settings section saves / clears / rehydrates the
+// configured provider through the web-search commands. Every mounting test
+// mocks `get_web_search_config` (read on mount) with a well-formed shape; the
+// key is write-only (never displayed) and every input has an explicit
+// aria-label (help-text-wrapping bug guard).
+describe("WebSearchSection", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    invoke.mockResolvedValue(null);
+    window.localStorage.clear();
+  });
+
+  const view = (kind: WebSearchConfigView["kind"], maxResults: number): WebSearchConfigView => ({
+    kind,
+    hasApiKey: true,
+    maxResults,
+  });
+
+  it("rehydrates the configured provider from get_web_search_config on mount", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_web_search_config") return Promise.resolve(view("tavily", 7));
+      return Promise.resolve(null);
+    });
+    render(<WebSearchSection />);
+
+    // The configured line rehydrates with the provider label + result count.
+    expect(await screen.findByTestId("web-search-configured-tavily")).toBeInTheDocument();
+    // Every input is reachable by its explicit accessible name.
+    expect(screen.getByLabelText("Web search provider")).toBeInTheDocument();
+    expect(screen.getByLabelText("Web search API key")).toBeInTheDocument();
+    expect(screen.getByLabelText("Web search max results")).toHaveValue(7);
+  });
+
+  it("saves the provider + key and never displays the key", async () => {
+    invoke.mockImplementation((cmd: string, args?: Record<string, unknown>) => {
+      if (cmd === "get_web_search_config") return Promise.resolve(null);
+      if (cmd === "set_web_search_provider") {
+        return Promise.resolve(view((args?.kind as WebSearchConfigView["kind"]) ?? "tavily", 5));
+      }
+      return Promise.resolve(null);
+    });
+    render(<WebSearchSection />);
+
+    // Enter a key and save.
+    const keyInput = screen.getByLabelText("Web search API key") as HTMLInputElement;
+    fireEvent.change(keyInput, { target: { value: "tvly-secret-key" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_web_search_provider", {
+        kind: "tavily",
+        apiKey: "tvly-secret-key",
+        maxResults: 5,
+      });
+    });
+    // The configured line appears and the key input is cleared (write-only).
+    expect(await screen.findByTestId("web-search-configured-tavily")).toBeInTheDocument();
+    expect((screen.getByLabelText("Web search API key") as HTMLInputElement).value).toBe("");
+    // The key is a password input and is never rendered as visible text.
+    expect(keyInput.type).toBe("password");
+    expect(screen.queryByText("tvly-secret-key")).not.toBeInTheDocument();
+  });
+
+  it("clears the configured provider", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "get_web_search_config") return Promise.resolve(view("tavily", 5));
+      if (cmd === "clear_web_search_provider") return Promise.resolve(undefined);
+      return Promise.resolve(null);
+    });
+    render(<WebSearchSection />);
+
+    const clear = await screen.findByTestId("web-search-clear");
+    fireEvent.click(clear);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("clear_web_search_provider");
+    });
+    await waitFor(() => {
+      expect(screen.queryByTestId("web-search-configured-tavily")).not.toBeInTheDocument();
+    });
+  });
+});
+
+import { NetworkSharingSection } from "./NetworkSharingSection";
+import type { ModelSharingView, NetworkPeerView } from "../../types";
+
+// FEAT-006: the Network Sharing section manages LAN peers (consume), discovery,
+// and the share toggle. Every mounting test mocks `list_network_peers` +
+// `get_model_sharing` (read on mount) with well-formed shapes. Every input has
+// an explicit aria-label (help-text-wrapping bug guard).
+describe("NetworkSharingSection", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    window.localStorage.clear();
+  });
+
+  const sharingOff: ModelSharingView = {
+    enabled: false,
+    port: 11435,
+    status: "Sharing is off. Your local models are not exposed to the network.",
+  };
+
+  const peer = (
+    id: string,
+    label: string,
+    baseUrl: string,
+    hasApiKey = false,
+  ): NetworkPeerView => ({
+    id,
+    label,
+    baseUrl,
+    hasApiKey,
+    warning: null,
+  });
+
+  it("rehydrates configured peers and the sharing status on mount", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_network_peers") {
+        return Promise.resolve([
+          peer("network-peer-abc", "Studio box", "http://192.168.1.50:11435/v1"),
+        ]);
+      }
+      if (cmd === "get_model_sharing") return Promise.resolve(sharingOff);
+      return Promise.resolve([]);
+    });
+    render(<NetworkSharingSection />);
+
+    expect(await screen.findByTestId("network-peer-network-peer-abc")).toHaveTextContent(
+      "http://192.168.1.50:11435/v1",
+    );
+    expect(await screen.findByTestId("model-sharing-status")).toHaveTextContent(/off/i);
+    expect(invoke).toHaveBeenCalledWith("list_network_peers");
+    expect(invoke).toHaveBeenCalledWith("get_model_sharing");
+  });
+
+  it("adds a peer via add_network_peer and shows the base-url warning, then lists it", async () => {
+    let listed: NetworkPeerView[] = [];
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_network_peers") return Promise.resolve(listed);
+      if (cmd === "get_model_sharing") return Promise.resolve(sharingOff);
+      if (cmd === "add_network_peer") {
+        const added = peer("network-peer-xyz", "LAN box", "http://192.168.1.9:11435/v1");
+        listed = [{ ...added }];
+        return Promise.resolve({
+          ...added,
+          warning:
+            "base_url is a non-loopback endpoint served over plaintext HTTP; prefer https://",
+        });
+      }
+      return Promise.resolve([]);
+    });
+    render(<NetworkSharingSection />);
+
+    // Start from the empty notice.
+    expect(await screen.findByTestId("network-peer-empty")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Peer base URL"), {
+      target: { value: "http://192.168.1.9:11435/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("Peer label"), { target: { value: "LAN box" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add peer" }));
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("add_network_peer", {
+        baseUrl: "http://192.168.1.9:11435/v1",
+        label: "LAN box",
+        apiKey: null,
+      });
+    });
+    // The non-loopback plaintext advisory is surfaced (role=status, non-fatal).
+    expect(await screen.findByTestId("network-peer-warning")).toHaveTextContent(/plaintext/i);
+    // The peer now appears in the list (refreshed via list_network_peers).
+    expect(await screen.findByTestId("network-peer-network-peer-xyz")).toHaveTextContent("LAN box");
+  });
+
+  it("removes a peer via remove_network_peer", async () => {
+    let listed: NetworkPeerView[] = [
+      peer("network-peer-abc", "Studio box", "http://10.0.0.5:11435/v1"),
+    ];
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_network_peers") return Promise.resolve(listed);
+      if (cmd === "get_model_sharing") return Promise.resolve(sharingOff);
+      if (cmd === "remove_network_peer") {
+        listed = [];
+        return Promise.resolve(undefined);
+      }
+      return Promise.resolve([]);
+    });
+    render(<NetworkSharingSection />);
+
+    const removeBtn = await screen.findByRole("button", { name: "Remove peer Studio box" });
+    fireEvent.click(removeBtn);
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("remove_network_peer", { id: "network-peer-abc" });
+    });
+    expect(await screen.findByTestId("network-peer-empty")).toBeInTheDocument();
+  });
+
+  it("discovers peers and shows them with a one-click Add", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_network_peers") return Promise.resolve([]);
+      if (cmd === "get_model_sharing") return Promise.resolve(sharingOff);
+      if (cmd === "discover_network_peers") {
+        return Promise.resolve([{ label: "Found box", baseUrl: "http://192.168.1.20:11435/v1" }]);
+      }
+      if (cmd === "add_network_peer") {
+        return Promise.resolve(
+          peer("network-peer-found", "Found box", "http://192.168.1.20:11435/v1"),
+        );
+      }
+      return Promise.resolve([]);
+    });
+    render(<NetworkSharingSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Discover peers on the local network" }));
+
+    const found = await screen.findByTestId("discovered-peer-http://192.168.1.20:11435/v1");
+    expect(found).toHaveTextContent("Found box");
+
+    fireEvent.click(screen.getByRole("button", { name: "Add discovered peer Found box" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("add_network_peer", {
+        baseUrl: "http://192.168.1.20:11435/v1",
+        label: "Found box",
+        apiKey: null,
+      });
+    });
+  });
+
+  it("shows a non-fatal 'no peers found' notice when discovery returns empty", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_network_peers") return Promise.resolve([]);
+      if (cmd === "get_model_sharing") return Promise.resolve(sharingOff);
+      if (cmd === "discover_network_peers") return Promise.resolve([]);
+      return Promise.resolve([]);
+    });
+    render(<NetworkSharingSection />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Discover peers on the local network" }));
+    expect(await screen.findByTestId("discovered-peer-empty")).toHaveTextContent(/no peers found/i);
+  });
+
+  it("toggles sharing on via set_model_sharing and reflects the status", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "list_network_peers") return Promise.resolve([]);
+      if (cmd === "get_model_sharing") return Promise.resolve(sharingOff);
+      if (cmd === "set_model_sharing") {
+        return Promise.resolve({
+          enabled: true,
+          port: 11435,
+          status: "Sharing your local models on the network (port 11435).",
+        });
+      }
+      return Promise.resolve([]);
+    });
+    render(<NetworkSharingSection />);
+
+    // Off on mount.
+    expect(await screen.findByTestId("model-sharing-status")).toHaveTextContent(/off/i);
+
+    fireEvent.click(screen.getByLabelText("Share my local models on the network"));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("set_model_sharing", { enabled: true, port: 11435 });
+    });
+    expect(await screen.findByTestId("model-sharing-status")).toHaveTextContent(
+      /sharing your local models/i,
+    );
   });
 });

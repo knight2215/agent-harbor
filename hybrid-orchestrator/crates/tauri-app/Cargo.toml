@@ -22,6 +22,13 @@ license = "MIT"
 
 [dependencies]
 orchestrator-core = { path = "../orchestrator-core" }
+# The leaf `domain` crate is depended on DIRECTLY (in addition to the re-exports
+# via `orchestrator-core`) so the FEAT-003 attach/repository commands can call
+# the HOST-VERIFIABLE pure helpers in `domain::file_context` (MIME guessing, the
+# directory skip-list, binary-extension filtering, byte-cap checks, base64). Those
+# helpers live in `domain` so `cargo test -p domain` exercises them offline even
+# though this `tauri-app` crate builds only in CI.
+domain = { path = "../domain" }
 providers = { path = "../providers" }
 # The embedded local inference engine (Strategy B / FEAT-002). Used by the
 # embedded-model lifecycle Tauri commands to construct/drive an
@@ -80,3 +87,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 # sync with the root `[workspace.dependencies]`) because this crate is under
 # `[workspace] exclude`.
 chrono = { version = "0.4", features = ["serde"] }
+# Mocked-HTTP server for the FEAT-004 `run_web_search` happy-path test: it points
+# the configured web-search provider's base_url at a local wiremock MockServer so
+# the command path is exercised offline with no live network (mirrors the
+# providers crate's adapter tests). Concrete literal version (kept in sync with
+# the providers crate + root `[workspace.dependencies]`) because this crate is
+# under `[workspace] exclude` and has no workspace root to inherit from.
+wiremock = "0.6"

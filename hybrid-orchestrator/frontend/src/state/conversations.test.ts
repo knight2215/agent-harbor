@@ -46,6 +46,7 @@ describe("conversations store", () => {
       activeConversationId: null,
       messages: [],
       pendingOverride: null,
+      attachments: [],
       pendingPermissions: [],
       sendState: "idle",
       sendError: null,
@@ -290,6 +291,44 @@ describe("conversations store", () => {
       content: "again",
       overrideRoute: null,
     });
+  });
+
+  it("attachment actions add (deduped), remove, and clear (FEAT-003)", () => {
+    const store = useConversationsStore.getState();
+    store.addAttachment({ kind: "text", name: "a.txt", path: "/tmp/a.txt", byteLen: 5, text: "x" });
+    // Re-adding the same path + kind is idempotent (deduped).
+    store.addAttachment({ kind: "text", name: "a.txt", path: "/tmp/a.txt", byteLen: 5, text: "x" });
+    expect(useConversationsStore.getState().attachments).toHaveLength(1);
+    // A different kind on the same path is a distinct attachment.
+    store.addAttachment({ kind: "repo", name: "a.txt", path: "/tmp/a.txt", byteLen: 5, text: "x" });
+    expect(useConversationsStore.getState().attachments).toHaveLength(2);
+    // Remove by path + kind.
+    store.removeAttachment("/tmp/a.txt", "text");
+    expect(useConversationsStore.getState().attachments).toHaveLength(1);
+    expect(useConversationsStore.getState().attachments[0].kind).toBe("repo");
+    // Clear drops everything.
+    store.clearAttachments();
+    expect(useConversationsStore.getState().attachments).toHaveLength(0);
+  });
+
+  it("sendMessage clears attachments on success but keeps them on failure (FEAT-003)", async () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      attachments: [{ kind: "text", name: "a.txt", path: "/tmp/a.txt", byteLen: 5, text: "x" }],
+    });
+    // Successful send clears the one-turn attachments.
+    await useConversationsStore.getState().sendMessage("hello");
+    expect(useConversationsStore.getState().attachments).toHaveLength(0);
+
+    // A failed send leaves them in place so the user can retry.
+    useConversationsStore.setState({
+      attachments: [{ kind: "text", name: "b.txt", path: "/tmp/b.txt", byteLen: 5, text: "y" }],
+    });
+    invoke.mockImplementation((command: string) =>
+      command === "send_message" ? Promise.reject(new Error("nope")) : Promise.resolve(undefined),
+    );
+    await useConversationsStore.getState().sendMessage("hello");
+    expect(useConversationsStore.getState().attachments).toHaveLength(1);
   });
 
   it("sendMessage captures a rejected send_message into sendState/sendError", async () => {

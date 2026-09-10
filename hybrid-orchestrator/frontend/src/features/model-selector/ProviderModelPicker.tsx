@@ -6,11 +6,15 @@
 // imports the very same component, so it takes its data + selection through
 // props and owns no store state itself.
 //
-// Options are grouped into Local vs Cloud. `AvailableModel` does not carry the
-// provider kind/baseUrl, so locality is decided by the optional `isLocal`
-// predicate; it defaults to the zero-price heuristic (local providers price at
-// zero per the `TokenPrice` contract, Section 6.2). Each option shows capability
-// hints (from `Capabilities`) and a rough cost signal (from `TokenPrice`).
+// Options are grouped into Network (LAN peers, FEAT-006), Local (on-host), and
+// Cloud. `AvailableModel` does not carry the provider kind/baseUrl, so a LAN
+// peer is recognized by the optional `isNetwork` predicate (default: the peer's
+// provider id prefix, which the backend `add_network_peer` command stamps) and
+// on-host locality by the optional `isLocal` predicate (default: the zero-price
+// heuristic, since local providers price at zero per the `TokenPrice` contract,
+// Section 6.2). Network peers are shown SEPARATELY from on-host Local so the user
+// can tell an off-host peer apart. Each option shows capability hints (from
+// `Capabilities`) and a rough cost signal (from `TokenPrice`).
 
 import type { AvailableModel, ManualRoute } from "../../types";
 import { NoModelsEmptyState } from "./NoModelsEmptyState";
@@ -18,6 +22,20 @@ import { NoModelsEmptyState } from "./NoModelsEmptyState";
 /** True when both token rates are zero, the default "this is a local model" signal. */
 function isFreeModel(model: AvailableModel): boolean {
   return model.price.inputPerMtok === 0 && model.price.outputPerMtok === 0;
+}
+
+/**
+ * The stable provider-id prefix the backend `add_network_peer` command stamps on
+ * a LAN peer's provider row (FEAT-006). Mirrors Rust `NETWORK_PEER_ID_PREFIX`.
+ * A peer's models therefore carry a `providerId` starting with this, which is
+ * how the default `isNetwork` predicate tells a LAN peer apart from an on-host
+ * Local or a Cloud provider without extra data.
+ */
+const NETWORK_PEER_ID_PREFIX = "network-peer-";
+
+/** True when a model belongs to a LAN peer (FEAT-006), by its provider-id prefix. */
+function isNetworkPeerModel(model: AvailableModel): boolean {
+  return model.providerId.startsWith(NETWORK_PEER_ID_PREFIX);
 }
 
 /** Compact capability labels for an option (e.g. "tools", "vision"). */
@@ -52,10 +70,15 @@ export interface ProviderModelPickerProps {
   /** Called with the chosen route when the user selects an option. */
   onChange: (route: ManualRoute) => void;
   /**
-   * Decide whether an option is a Local model. Defaults to the zero-price
-   * heuristic; callers with richer provider metadata can override it.
+   * Decide whether an option is a Local (on-host) model. Defaults to the
+   * zero-price heuristic; callers with richer provider metadata can override it.
    */
   isLocal?: (model: AvailableModel) => boolean;
+  /**
+   * Decide whether an option is a LAN peer (FEAT-006), shown in a distinct
+   * Network group. Defaults to the peer provider-id prefix the backend stamps.
+   */
+  isNetwork?: (model: AvailableModel) => boolean;
 }
 
 interface GroupProps {
@@ -99,18 +122,24 @@ function ModelGroup({ label, models, value, onChange }: GroupProps) {
   );
 }
 
-/** A grouped Local vs Cloud provider/model picker. */
+/** A grouped Network (LAN peers) / Local (on-host) / Cloud provider/model picker. */
 export function ProviderModelPicker({
   models,
   value,
   onChange,
   isLocal = isFreeModel,
+  isNetwork = isNetworkPeerModel,
 }: ProviderModelPickerProps) {
   // Normalize defensively so an undefined/non-array `models` prop cannot crash
   // the `.filter`/`.length` reads below.
   const list = Array.isArray(models) ? models : [];
-  const local = list.filter((m) => isLocal(m));
-  const cloud = list.filter((m) => !isLocal(m));
+  // A LAN peer is classified first so it is shown in its own Network group and
+  // never double-counts under Local/Cloud (a peer's zero-priced models would
+  // otherwise fall into Local).
+  const network = list.filter((m) => isNetwork(m));
+  const rest = list.filter((m) => !isNetwork(m));
+  const local = rest.filter((m) => isLocal(m));
+  const cloud = rest.filter((m) => !isLocal(m));
 
   if (list.length === 0) {
     return <NoModelsEmptyState />;
@@ -118,6 +147,7 @@ export function ProviderModelPicker({
 
   return (
     <div className="model-picker">
+      <ModelGroup label="Network" models={network} value={value} onChange={onChange} />
       <ModelGroup label="Local" models={local} value={value} onChange={onChange} />
       <ModelGroup label="Cloud" models={cloud} value={value} onChange={onChange} />
     </div>

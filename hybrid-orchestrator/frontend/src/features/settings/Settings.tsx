@@ -15,13 +15,17 @@ import { AboutUpdatesSection } from "./AboutUpdatesSection";
 import { AppearanceSection } from "./AppearanceSection";
 import { DiagnosticsSection } from "./DiagnosticsSection";
 import { LocalRuntimesSection } from "./LocalRuntimesSection";
+import { NetworkSharingSection } from "./NetworkSharingSection";
 import { ProviderKeysSection } from "./ProviderKeysSection";
 import { RoutingSection } from "./RoutingSection";
+import { WebSearchSection } from "./WebSearchSection";
 
 /** The Settings sub-sections, in display order. */
 type SettingsSection =
   | "providers"
   | "localRuntimes"
+  | "webSearch"
+  | "networkSharing"
   | "tools"
   | "agents"
   | "routing"
@@ -32,6 +36,8 @@ type SettingsSection =
 const SECTIONS: ReadonlyArray<{ id: SettingsSection; label: string }> = [
   { id: "providers", label: "Providers & Keys" },
   { id: "localRuntimes", label: "Local Runtimes" },
+  { id: "webSearch", label: "Web Search" },
+  { id: "networkSharing", label: "Network Sharing" },
   { id: "tools", label: "MCP / Tools" },
   { id: "agents", label: "Agents" },
   { id: "routing", label: "Routing" },
@@ -61,6 +67,8 @@ export function Settings() {
 
       {section === "providers" && <ProviderKeysSection />}
       {section === "localRuntimes" && <LocalRuntimesSection />}
+      {section === "webSearch" && <WebSearchSection />}
+      {section === "networkSharing" && <NetworkSharingSection />}
       {section === "tools" && <ToolManager />}
       {section === "agents" && <AgentEditor />}
       {section === "routing" && <RoutingSection />}
