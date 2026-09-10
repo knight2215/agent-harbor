@@ -14,6 +14,9 @@
 //!     JSON API, and a free tier). [`WebSearchKind::Brave`] and
 //!     [`WebSearchKind::SerpApi`] are scaffolded so the pluggability is real
 //!     (their `build` returns an [`WebSearchError::Unsupported`] until wired).
+//!     [`WebSearchKind::Custom`] lets a user supply their OWN Tavily-compatible
+//!     endpoint (a user-entered `base_url`) instead of picking only from the
+//!     preselected backends.
 //!   - [`TavilyProvider`]: the working default. It POSTs to a CONFIGURABLE
 //!     `base_url` (default [`TAVILY_DEFAULT_BASE_URL`]) so the unit tests can
 //!     point it at a local `wiremock` MockServer (no live network).
@@ -104,7 +107,9 @@ impl WebSearchError {
 
 /// The selectable web-search backends (FEAT-004). Serialized in camelCase to
 /// match the TS string-literal union the frontend mirrors (`tavily` / `brave` /
-/// `serpApi`). [`WebSearchKind::Tavily`] is the recommended default.
+/// `serpApi` / `custom`). [`WebSearchKind::Tavily`] is the recommended default,
+/// and [`WebSearchKind::Custom`] lets a user point web search at their OWN
+/// Tavily-compatible endpoint (a user-supplied `base_url`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum WebSearchKind {
