@@ -260,7 +260,6 @@ mod tests {
             // On some platforms 0.0.0.0:<port> may not collide with 127.0.0.1;
             // a Running status is also acceptable so long as it does not hang.
             ShareServerStatus::Running { .. } => {}
-            other => panic!("unexpected status: {other:?}"),
         }
     }
 
