@@ -317,10 +317,10 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
     const override = get().consumePendingOverride();
     // Mark the attempt in flight and clear any prior failure so a retry starts
     // clean. Capture a REJECTION into `sendState`/`sendError` instead of letting
-    // it escape (the Composer fires this as `void sendMessage(...)`, so a thrown
-    // error would otherwise be swallowed and leave NO signal — the silent
-    // no-op bug). Mirror providers.ts load() error extraction. On success reset
-    // to idle; the assistant reply then arrives via streaming CoreEvents.
+    // it escape: the Composer fires this as `void sendMessage(...)`, so a thrown
+    // error would otherwise be swallowed and leave NO signal (the silent no-op
+    // bug). Mirror providers.ts load() error extraction. On success reset to
+    // idle; the assistant reply then arrives via streaming CoreEvents.
     set({ sendState: "sending", sendError: null });
     try {
       await sendMessageCmd(activeConversationId, content, override);
