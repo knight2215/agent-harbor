@@ -70,14 +70,11 @@ describe("Settings", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Local Runtimes" }));
     expect(await screen.findByRole("region", { name: "Local Runtimes" })).toBeInTheDocument();
-
-    // FEAT-004: the Web Search section is registered and renders by name.
-    fireEvent.click(screen.getByRole("button", { name: "Web Search" }));
-    expect(await screen.findByRole("region", { name: "Web Search" })).toBeInTheDocument();
-
-    // FEAT-006: the Network Sharing section is registered and renders by name.
-    fireEvent.click(screen.getByRole("button", { name: "Network Sharing" }));
-    expect(await screen.findByRole("region", { name: "Network Sharing" })).toBeInTheDocument();
+    // While the Local Runtimes section is the active (mounted) section, assert
+    // its informational note and embedded-engine surface. Only the active
+    // section is mounted (Settings renders sections conditionally), so these
+    // must be checked here, before navigating away to another section.
+    //
     // The informational note for genuinely-future runtimes is present and
     // labeled, and it no longer claims Ollama (shipped) is "coming soon" nor
     // that the embedded engine is unavailable.
@@ -91,6 +88,14 @@ describe("Settings", () => {
     expect(
       await screen.findByRole("region", { name: "Embedded inference engine" }),
     ).toBeInTheDocument();
+
+    // FEAT-004: the Web Search section is registered and renders by name.
+    fireEvent.click(screen.getByRole("button", { name: "Web Search" }));
+    expect(await screen.findByRole("region", { name: "Web Search" })).toBeInTheDocument();
+
+    // FEAT-006: the Network Sharing section is registered and renders by name.
+    fireEvent.click(screen.getByRole("button", { name: "Network Sharing" }));
+    expect(await screen.findByRole("region", { name: "Network Sharing" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "MCP / Tools" }));
     expect(await screen.findByRole("region", { name: "Tool manager" })).toBeInTheDocument();
