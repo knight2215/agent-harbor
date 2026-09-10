@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent, within } from "@testing-library/react";
 import { App } from "./app";
 import { useConversationsStore } from "./state/conversations";
 import { useProvidersStore } from "./state/providers";
@@ -43,6 +43,39 @@ function routeInvoke(command: string): unknown {
       return { loadedModelId: null, registeredCount: 0 };
     case "provider_diagnostics":
       return { configuredCount: 0, totalModelCount: 0, providerCountWithModels: 0, providers: [] };
+    case "get_messages":
+      return [];
+    case "get_route_explanation":
+      // The composer's "Why this model?" info icon fetches this when a
+      // conversation is active; a null-rationale explanation renders no icon.
+      return { providerId: null, model: null, rationale: null, source: "automatic" };
+    case "create_conversation":
+      return {
+        id: "c-new",
+        title: "New conversation",
+        createdAt: "2024-01-01T00:00:00Z",
+        updatedAt: "2024-01-01T00:00:00Z",
+        personaId: null,
+        conversationPref: null,
+        routingMode: null,
+        privacyTags: [],
+        enabledToolServers: [],
+      };
+    case "open_conversation":
+      return {
+        conversation: {
+          id: "c-new",
+          title: "New conversation",
+          createdAt: "2024-01-01T00:00:00Z",
+          updatedAt: "2024-01-01T00:00:00Z",
+          personaId: null,
+          conversationPref: null,
+          routingMode: null,
+          privacyTags: [],
+          enabledToolServers: [],
+        },
+        messages: [],
+      };
     default:
       return undefined;
   }
@@ -77,6 +110,7 @@ describe("<App />", () => {
       activeConversationId: null,
       messages: [],
       pendingOverride: null,
+      webSearchEnabled: false,
       pendingPermissions: [],
       sendState: "idle",
       sendError: null,
@@ -87,7 +121,13 @@ describe("<App />", () => {
     // between tests. Restore the real `load` so the startup load() that the App
     // now runs on mount routes through the mocked `invoke` for tests that do not
     // seed their own spy.
-    useProvidersStore.setState({ models: [], load: realProvidersLoad });
+    useProvidersStore.setState({
+      models: [],
+      errors: [],
+      loadState: "idle",
+      lastError: null,
+      load: realProvidersLoad,
+    });
   });
 
   it("renders the app version read at runtime via getVersion()", async () => {
@@ -109,8 +149,10 @@ describe("<App />", () => {
     expect(screen.getByRole("button", { name: /History/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Settings/ })).toBeInTheDocument();
 
-    // Chat is the default destination.
-    expect(screen.getByRole("region", { name: "Chat" })).toBeInTheDocument();
+    // Chat is the default destination, but with no active conversation the pane
+    // shows the Welcome screen (not the chat surface).
+    expect(screen.getByRole("region", { name: "Welcome" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Chat" })).toBeNull();
   });
 
   it("renders expanded by default with visible nav labels", () => {
@@ -148,9 +190,57 @@ describe("<App />", () => {
     expect(document.querySelector(".app")).toHaveAttribute("data-collapsed", "true");
   });
 
-  it("renders the 'Override next message' control exactly once in the chat pane", () => {
+  it("shows the Welcome screen (large logo + New conversation) by default", () => {
     render(<App />);
-    expect(screen.getAllByText("Override next message")).toHaveLength(1);
+    const welcome = screen.getByRole("region", { name: "Welcome" });
+    expect(welcome).toBeInTheDocument();
+    // The large logo carries its stable testid.
+    expect(screen.getByTestId("welcome-logo")).toBeInTheDocument();
+    // A prominent primary "New conversation" button lives on the welcome screen
+    // (plus the one nested under the Chat nav item in the sidebar).
+    expect(
+      within(welcome).getByRole("button", { name: "New conversation" }),
+    ).toBeInTheDocument();
+    // The chat surface is NOT rendered until a conversation is active.
+    expect(screen.queryByRole("region", { name: "Chat" })).toBeNull();
+  });
+
+  it("renders the chat surface only after a conversation is opened", async () => {
+    render(<App />);
+    // Welcome first.
+    expect(screen.getByRole("region", { name: "Welcome" })).toBeInTheDocument();
+
+    // Opening a conversation flips the active id, so the chat surface appears.
+    useConversationsStore.setState({
+      conversations: [
+        {
+          id: "c-1",
+          title: "Chat",
+          createdAt: "2024-01-01T00:00:00Z",
+          updatedAt: "2024-01-01T00:00:00Z",
+          personaId: null,
+          conversationPref: null,
+          routingMode: null,
+          privacyTags: [],
+          enabledToolServers: [],
+        },
+      ],
+      activeConversationId: "c-1",
+      messages: [],
+    });
+
+    expect(await screen.findByRole("region", { name: "Chat" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Welcome" })).toBeNull();
+  });
+
+  it("nests the Conversations sub-list under the Chat nav item", () => {
+    render(<App />);
+    // The Chat group's expanded body carries the conversation sub-list + its own
+    // New conversation action (reusing the history components).
+    const sub = screen.getByTestId("chat-conversations");
+    expect(sub).toBeInTheDocument();
+    expect(within(sub).getByText("Conversations")).toBeInTheDocument();
+    expect(within(sub).getByRole("button", { name: "New conversation" })).toBeInTheDocument();
   });
 
   it("stacks only ONE no-models empty state with an active Manual conversation and no models", async () => {
@@ -176,6 +266,7 @@ describe("<App />", () => {
       activeConversationId: "c-1",
       messages: [],
       pendingOverride: null,
+      webSearchEnabled: false,
       pendingPermissions: [],
       sendState: "idle",
       sendError: null,
@@ -190,10 +281,12 @@ describe("<App />", () => {
       expect(screen.getByTestId("app-version")).toHaveTextContent("9.9.9-test");
     });
 
-    // Exactly one NoModelsEmptyState in the whole chat pane, and the
-    // 'Override next message' label still renders exactly once.
+    // The chat surface renders because a conversation is active. The composer's
+    // inline model control shows the single "No models" guidance; the routing
+    // toggle suppresses its own manual-pin picker when models are empty, so
+    // exactly ONE NoModelsEmptyState surfaces in the whole chat pane.
+    expect(await screen.findByRole("region", { name: "Chat" })).toBeInTheDocument();
     expect(screen.getAllByTestId("no-models-empty-state")).toHaveLength(1);
-    expect(screen.getAllByText("Override next message")).toHaveLength(1);
 
     // Reset the shared stores so the seeded conversation does not bleed into
     // sibling tests in this file.
@@ -202,6 +295,7 @@ describe("<App />", () => {
       activeConversationId: null,
       messages: [],
       pendingOverride: null,
+      webSearchEnabled: false,
       pendingPermissions: [],
       sendState: "idle",
       sendError: null,

@@ -46,17 +46,29 @@ function model(providerId: string, id: string, local: boolean): AvailableModel {
   };
 }
 
+// The providers store is a module-level singleton; capture its REAL load() once
+// before any test swaps in a spy so resetStores() can restore it (a leaked spy
+// would otherwise persist across tests, since the Composer now calls load()).
+const realProvidersLoad = useProvidersStore.getState().load;
+
 function resetStores() {
   useConversationsStore.setState({
     conversations: [],
     activeConversationId: null,
     messages: [],
     pendingOverride: null,
+    webSearchEnabled: false,
     pendingPermissions: [],
     sendState: "idle",
     sendError: null,
   });
-  useProvidersStore.setState({ models: [] });
+  useProvidersStore.setState({
+    models: [],
+    errors: [],
+    loadState: "idle",
+    lastError: null,
+    load: realProvidersLoad,
+  });
 }
 
 describe("chat surface", () => {
@@ -357,6 +369,42 @@ describe("chat surface", () => {
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("stop_generation", { conversationId: "c-1" });
     });
+  });
+
+  it("Composer exposes the Attach / Repository / Web-search icon affordances", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<Composer />);
+    expect(screen.getByRole("button", { name: "Attach file" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Add repository context" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Toggle web search" })).toBeInTheDocument();
+    // A small Refresh-models icon lives in the composer control row.
+    expect(screen.getByRole("button", { name: "Refresh models" })).toBeInTheDocument();
+  });
+
+  it("Composer web-search toggle flips the shared store flag (aria-pressed)", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1", webSearchEnabled: false });
+    render(<Composer />);
+    const toggle = screen.getByRole("button", { name: "Toggle web search" });
+    // Off by default.
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(useConversationsStore.getState().webSearchEnabled).toBe(false);
+
+    fireEvent.click(toggle);
+    // The real on/off flag in the conversations store is flipped (FEAT-004
+    // consumes it); aria-pressed reflects the new state.
+    expect(useConversationsStore.getState().webSearchEnabled).toBe(true);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("Composer Refresh models icon re-enumerates via the providers store load()", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    const load = vi.fn();
+    useProvidersStore.setState({ load });
+    render(<Composer />);
+    fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+    expect(load).toHaveBeenCalled();
+    // The next beforeEach -> resetStores() restores the real load(), so the
+    // seeded spy does not leak into sibling tests.
   });
 
   it("PermissionPrompt renders on permission_requested and resolves via resolvePermission", async () => {

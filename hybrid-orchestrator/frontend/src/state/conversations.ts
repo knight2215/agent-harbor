@@ -70,6 +70,12 @@ export interface ConversationsState {
   messages: Message[];
   /** The transient per-message override (Section 8.2), or null for automatic. */
   pendingOverride: ManualRoute | null;
+  /**
+   * Whether the composer's web-search toggle is ON (FEAT-002 lands the toggle
+   * + flag; FEAT-004 consumes it when assembling the send context). A real
+   * on/off flag rather than a stub so the affordance is meaningful today.
+   */
+  webSearchEnabled: boolean;
   /** Queue of pending Ask-mode permission requests (Section 9.4). */
   pendingPermissions: PendingPermission[];
   /**
@@ -133,6 +139,10 @@ export interface ConversationsState {
   /** Read and clear the transient override for a single send. */
   consumePendingOverride: () => ManualRoute | null;
 
+  // --- Web-search toggle (FEAT-002 flag; FEAT-004 consumer) ----------------
+  /** Set the composer's web-search on/off flag. */
+  setWebSearchEnabled: (enabled: boolean) => void;
+
   // --- Send / stop (Section 8.1) -------------------------------------------
   /**
    * Send a user message on the active conversation. Reads and CLEARS the
@@ -195,6 +205,7 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
   activeConversationId: null,
   messages: [],
   pendingOverride: null,
+  webSearchEnabled: false,
   pendingPermissions: [],
   sendState: "idle",
   sendError: null,
@@ -315,6 +326,8 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
   },
 
   setPendingOverride: (route) => set({ pendingOverride: route }),
+
+  setWebSearchEnabled: (enabled) => set({ webSearchEnabled: enabled }),
 
   consumePendingOverride: () => {
     const { pendingOverride } = get();

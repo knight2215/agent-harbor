@@ -44,6 +44,9 @@
   --ah-danger: #b4232a;
   --ah-focus-ring: rgba(13, 125, 140, 0.55);
 
+  /* Modal/overlay scrim behind a dialog (FEAT-002 enumeration-error modal). */
+  --ah-overlay: rgba(20, 36, 48, 0.45);
+
   /* Spacing scale. */
   --ah-space-1: 4px;
   --ah-space-2: 8px;
@@ -91,6 +94,7 @@
 
   --ah-danger: #f0666c;
   --ah-focus-ring: rgba(79, 208, 224, 0.6);
+  --ah-overlay: rgba(3, 8, 16, 0.6);
 
   --ah-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
@@ -118,6 +122,7 @@
 
     --ah-danger: #f0666c;
     --ah-focus-ring: rgba(79, 208, 224, 0.6);
+    --ah-overlay: rgba(3, 8, 16, 0.6);
 
     --ah-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
   }

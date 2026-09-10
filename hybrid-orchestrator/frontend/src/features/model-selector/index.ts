@@ -6,6 +6,8 @@
 
 export { AutoRationaleTooltip } from "./AutoRationaleTooltip";
 export type { AutoRationaleTooltipProps } from "./AutoRationaleTooltip";
+export { EnumerationErrorModal } from "./EnumerationErrorModal";
+export { InlineModelControl } from "./InlineModelControl";
 export { PerMessageOverrideControl } from "./PerMessageOverrideControl";
 export { ProviderEnumerationErrors } from "./ProviderEnumerationErrors";
 export type { ProviderEnumerationErrorsProps } from "./ProviderEnumerationErrors";

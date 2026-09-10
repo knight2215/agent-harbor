@@ -1,9 +1,16 @@
-// AutoRationaleTooltip (architecture.md Section 8.2 "why this model").
+// AutoRationaleTooltip (architecture.md Section 8.2 "why this model"; FEAT-002
+// redesign).
 //
 // Explains why Automatic routing picked a model. It lazily fetches the
 // display-safe route preview via `get_route_explanation`; a `fallbackRationale`
 // (typically the last assistant message's `RouteMetadata.rationale`) is shown
 // until the fetch resolves or when no conversation is active.
+//
+// REDESIGN: the rationale is no longer always-on body text next to the picker.
+// It is now revealed by a compact INFO ICON button ("Why this model?") in the
+// composer control row; clicking it toggles a small popover carrying the same
+// fetched rationale. The data path (get_route_explanation + fallback) is
+// unchanged; only the presentation is icon-triggered.
 
 import { useEffect, useState } from "react";
 import { getRouteExplanation } from "../../ipc/commands";
@@ -16,12 +23,13 @@ export interface AutoRationaleTooltipProps {
   fallbackRationale?: string | null;
 }
 
-/** A small tooltip surfacing the routing rationale for the active conversation. */
+/** An info-icon trigger surfacing the routing rationale for the active conversation. */
 export function AutoRationaleTooltip({
   conversationId,
   fallbackRationale = null,
 }: AutoRationaleTooltipProps) {
   const [explanation, setExplanation] = useState<RouteExplanation | null>(null);
+  const [open, setOpen] = useState(false);
 
   useEffect(() => {
     if (conversationId === null) {
@@ -45,9 +53,23 @@ export function AutoRationaleTooltip({
   if (rationale === null || rationale === undefined) return null;
 
   return (
-    <span className="auto-rationale" role="note" title={rationale}>
-      <span className="auto-rationale__label">Why this model?</span>
-      <span className="auto-rationale__text">{rationale}</span>
+    <span className="auto-rationale">
+      <button
+        type="button"
+        className="composer__icon auto-rationale__trigger"
+        aria-label="Why this model?"
+        aria-expanded={open}
+        title={rationale}
+        onClick={() => setOpen((prev) => !prev)}
+      >
+        <span aria-hidden="true">ⓘ</span>
+      </button>
+      {open && (
+        <span className="auto-rationale__popover" role="note">
+          <span className="auto-rationale__label">Why this model?</span>
+          <span className="auto-rationale__text">{rationale}</span>
+        </span>
+      )}
     </span>
   );
 }

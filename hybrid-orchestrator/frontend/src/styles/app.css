@@ -88,7 +88,7 @@ body {
 
 .app[data-collapsed="true"] .app__brand-text,
 .app[data-collapsed="true"] .app__nav-label,
-.app[data-collapsed="true"] .app__sidebar-history {
+.app[data-collapsed="true"] .app__nav-sub {
   display: none;
 }
 
@@ -184,10 +184,33 @@ body {
   align-items: stretch;
 }
 
-.app__sidebar-history {
-  flex: 1 1 auto;
+/*
+ * Conversations sub-list nested under the Chat nav item. It grows to fill the
+ * remaining sidebar height and scrolls internally so a long history never
+ * pushes the nav off-screen. Hidden in the collapsed rail (see the
+ * data-collapsed rule above and the responsive twin below).
+ */
+.app__nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+}
+
+.app__nav-sub {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+  padding: var(--ah-space-2) 0 var(--ah-space-2) var(--ah-space-4);
   min-height: 0;
   overflow-y: auto;
+}
+
+.app__nav-sub-label {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ah-text-faint);
 }
 
 /* --- Main pane ------------------------------------------------------------ */
@@ -223,6 +246,9 @@ body {
   max-width: 880px;
   margin: 0 auto;
   width: 100%;
+  /* Fill the main pane height so the message thread scrolls and the composer
+   * stays anchored at the bottom (Kiro-style). */
+  height: 100%;
 }
 
 /* --- Message thread ------------------------------------------------------- */
@@ -440,6 +466,25 @@ body {
   gap: var(--ah-space-2);
   /* Keep the form (and its textarea) inside the chat/grid track at any width. */
   min-width: 0;
+  /* Bottom-anchored: the message thread above scrolls; the composer never
+   * shrinks and stays pinned to the bottom of the chat column. */
+  flex: 0 0 auto;
+}
+
+/*
+ * The Kiro-style input box: a single bordered surface wrapping the textarea and
+ * a compact control row beneath it, so the inline model/routing/attach controls
+ * read as part of the composer rather than a wall of controls above it.
+ */
+.composer__box {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+  min-width: 0;
+  padding: var(--ah-space-2);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface);
 }
 
 .composer__input {
@@ -449,13 +494,98 @@ body {
   /* Grow with content vertically only; never let a horizontal drag widen the
    * grid track. */
   resize: vertical;
-  min-height: 96px;
+  min-height: 72px;
   padding: var(--ah-space-2) var(--ah-space-3);
-  border: 1px solid var(--ah-border);
+  border: none;
   border-radius: var(--ah-radius-sm);
-  background: var(--ah-surface);
+  background: transparent;
   color: var(--ah-text);
   font: inherit;
+}
+
+.composer__input:focus-visible {
+  outline: none;
+}
+
+/* The compact control row under the textarea: inline affordances on the left,
+ * Send/Stop on the right. Wraps on narrow widths so nothing spills the track. */
+.composer__controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ah-space-2);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.composer__controls-left {
+  display: flex;
+  align-items: center;
+  gap: var(--ah-space-1);
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+/* A small square icon button used for Attach / Repository / Web-search /
+ * Refresh / the warning + info icons. */
+.composer__icon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 var(--ah-space-1);
+  border: 1px solid transparent;
+  border-radius: var(--ah-radius-sm);
+  background: transparent;
+  color: var(--ah-text-muted);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.composer__icon:hover:not(:disabled) {
+  background: var(--ah-surface-hover);
+  color: var(--ah-text);
+}
+
+.composer__icon:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Active/pressed affordance for the web-search toggle. */
+.composer__icon[data-active="true"],
+.composer__icon[aria-pressed="true"] {
+  background: var(--ah-accent-soft);
+  color: var(--ah-accent);
+  border-color: var(--ah-accent);
+}
+
+/* The warning icon reads in the danger palette so it stands out when present. */
+.composer__warning {
+  color: var(--ah-danger);
+}
+
+/* A tiny count badge on the Attach / Repository icons. */
+.composer__icon-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--ah-accent);
+  color: var(--ah-accent-contrast);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
 }
 
 .composer__input::placeholder {
@@ -516,28 +646,31 @@ body {
 /* --- Segmented routing-mode control --------------------------------------- */
 
 .routing-mode {
-  display: flex;
+  position: relative;
+  display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--ah-space-3);
+  gap: var(--ah-space-2);
 }
 
 .routing-mode__toggle {
   display: inline-flex;
-  padding: var(--ah-space-1);
-  gap: var(--ah-space-1);
+  padding: 2px;
+  gap: 2px;
   background: var(--ah-surface-2);
   border: 1px solid var(--ah-border);
   border-radius: var(--ah-radius-md);
 }
 
+/* Compact inline segments (smaller than the old four big tabs). */
 .routing-mode__toggle button {
-  padding: var(--ah-space-1) var(--ah-space-3);
+  padding: 2px var(--ah-space-2);
   border: none;
   border-radius: var(--ah-radius-sm);
   background: transparent;
   color: var(--ah-text-muted);
   font: inherit;
+  font-size: 12px;
   cursor: pointer;
   transition:
     background 0.12s ease,
@@ -1123,10 +1256,10 @@ body {
 
   /* twin of: .app[data-collapsed="true"] .app__brand-text,
    *          .app[data-collapsed="true"] .app__nav-label,
-   *          .app[data-collapsed="true"] .app__sidebar-history */
+   *          .app[data-collapsed="true"] .app__nav-sub */
   .app .app__brand-text,
   .app .app__nav-label,
-  .app .app__sidebar-history {
+  .app .app__nav-sub {
     display: none;
   }
 
@@ -1157,4 +1290,289 @@ body {
   .settings {
     grid-template-columns: 1fr;
   }
+}
+
+/* --- Welcome screen (default Chat landing) -------------------------------- */
+
+/*
+ * The default landing view before any conversation is active: a large centered
+ * logo, a short intro, and a prominent primary "New conversation" button, so a
+ * fresh launch reads as a real welcome rather than an already-open empty chat.
+ */
+.welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--ah-space-4);
+  height: 100%;
+  min-height: 0;
+  padding: var(--ah-space-6);
+  text-align: center;
+}
+
+.welcome__logo {
+  width: 96px;
+  height: 96px;
+  border-radius: var(--ah-radius-lg);
+  background: var(--ah-accent-soft);
+  padding: var(--ah-space-3);
+}
+
+.welcome__title {
+  margin: 0;
+  font-size: 24px;
+  color: var(--ah-text);
+}
+
+.welcome__intro {
+  margin: 0;
+  max-width: 460px;
+  color: var(--ah-text-muted);
+}
+
+.welcome__cta {
+  padding: var(--ah-space-2) var(--ah-space-5);
+  border: none;
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-accent);
+  color: var(--ah-accent-contrast);
+  font: inherit;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s ease;
+}
+
+.welcome__cta:hover {
+  background: var(--ah-accent-strong);
+}
+
+/* --- Inline model control (compact composer dropdown) --------------------- */
+
+.inline-model {
+  position: relative;
+  display: inline-flex;
+}
+
+.inline-model__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ah-space-1);
+  max-width: 220px;
+  height: 32px;
+  padding: 0 var(--ah-space-2);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface-2);
+  color: var(--ah-text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.inline-model__trigger:hover {
+  background: var(--ah-surface-hover);
+}
+
+.inline-model__current {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--ah-font-mono);
+}
+
+.inline-model__caret {
+  flex: 0 0 auto;
+  color: var(--ah-text-faint);
+}
+
+/* The picker popover opens upward from the composer control row. */
+.inline-model__popover {
+  position: absolute;
+  bottom: calc(100% + var(--ah-space-1));
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+  min-width: 280px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface);
+  box-shadow: var(--ah-shadow);
+}
+
+.inline-model__popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ah-space-2);
+}
+
+.inline-model__popover-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ah-text-muted);
+}
+
+.inline-model__clear {
+  padding: 2px var(--ah-space-2);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface-2);
+  color: var(--ah-text-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.inline-model__clear:hover {
+  background: var(--ah-surface-hover);
+  color: var(--ah-text);
+}
+
+/* The manual-pin picker inside the compact routing-mode control floats above
+ * the row rather than stretching it. */
+.routing-mode .model-picker {
+  position: absolute;
+  bottom: calc(100% + var(--ah-space-1));
+  left: 0;
+  z-index: 20;
+  min-width: 280px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface);
+  box-shadow: var(--ah-shadow);
+}
+
+/* --- "Why this model?" info-icon popover ---------------------------------- */
+
+.auto-rationale {
+  position: relative;
+  display: inline-flex;
+}
+
+.auto-rationale__popover {
+  position: absolute;
+  bottom: calc(100% + var(--ah-space-1));
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+  min-width: 240px;
+  max-width: 320px;
+  padding: var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-md);
+  background: var(--ah-surface);
+  color: var(--ah-text);
+  box-shadow: var(--ah-shadow);
+}
+
+.auto-rationale__label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ah-text-muted);
+}
+
+.auto-rationale__text {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+/* --- Modal (enumeration-error warnings) ----------------------------------- */
+
+.ah-modal__backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: grid;
+  place-items: center;
+  padding: var(--ah-space-4);
+  background: var(--ah-overlay);
+}
+
+.ah-modal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-3);
+  width: 100%;
+  max-width: 480px;
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: var(--ah-space-5);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-lg);
+  background: var(--ah-surface);
+  color: var(--ah-text);
+  box-shadow: var(--ah-shadow);
+}
+
+.ah-modal__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ah-space-3);
+}
+
+.ah-modal__title {
+  margin: 0;
+  font-size: 16px;
+}
+
+.ah-modal__close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: var(--ah-radius-sm);
+  background: transparent;
+  color: var(--ah-text-muted);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.ah-modal__close:hover {
+  background: var(--ah-surface-hover);
+  color: var(--ah-text);
+}
+
+.ah-modal__last-error {
+  margin: 0;
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-danger);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-danger);
+  font-size: 13px;
+}
+
+.ah-modal__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ah-modal__list-item {
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface-2);
+  color: var(--ah-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
 }
