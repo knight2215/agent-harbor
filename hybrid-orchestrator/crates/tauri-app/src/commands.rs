@@ -1908,7 +1908,7 @@ async fn run_web_search_inner(
     // `custom` with `None` is a display-safe config error, so an unconfigured
     // custom endpoint surfaces clearly rather than silently.
     let effective_base_url = web_search_base_url(state)
-        .or_else(|| config.web_search.base_url.as_deref())
+        .or(config.web_search.base_url.as_deref())
         .filter(|u| !u.is_empty());
 
     // Build the configured provider (base_url None -> the kind's default
