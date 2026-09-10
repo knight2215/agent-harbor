@@ -1,7 +1,14 @@
 {
   "task_id": "task-chat-surface-and-silent-send",
   "task_description": "Fix the chat surface to behave like a real chat and eliminate the silent no-response bug. Issue 1: composer Enter-to-send / Shift+Enter-newline (with IME guard). Issue 2 (most serious): a message to a working local model (Ollama qwen3) produced no reply and no error - root cause traced to send_message_inner using fail-fast providers::build_registry so any un-buildable provider row rejected the whole send, whose rejection the frontend swallowed; fix the backend to build the registry resiliently per-row AND make every send-path failure visible (rejected-send affordance + messageError reason rendering). Issue 3: render messages as a threaded, role-styled conversation view. Plus a spec update to Section 8.1. INTEGRATIONS_ONLY sandbox: no live Ollama and no crates.io/npm, so the live symptom cannot be reproduced here - traced in code, fixed at the most likely cause, and surfaced so the user's build reveals anything remaining.",
-  "status": "in_progress",
+  "status": "completed",
   "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
-  "blocked_reason": null
+  "blocked_reason": null,
+  "verification": {
+    "build": "skipped",
+    "tests": "skipped",
+    "test_quality": "pass",
+    "docker_build": "skipped",
+    "summary": "INTEGRATIONS_ONLY sandbox: no network, node_modules absent, and the tauri-app crate's external deps are not cached, so cargo build/clippy/test and npm build/lint/vitest cannot run in-sandbox (CI/user-build verification). Offline checks that DID run and PASS: `cargo fmt --check` for crates/tauri-app and crates/orchestrator-core (clean), and prettier `--check` (repo .prettierrc.json config) on all changed frontend files AND the whole frontend src tree (clean). Test-quality review: the new/updated vitest cases assert real behavior that would fail if the code were reverted - plain Enter triggers invoke('send_message') and clears the draft; Shift+Enter and IME-composition Enter do NOT invoke send_message; a rejected send_message drives store sendState='failed'/sendError and renders the role=alert 'Failed to send: <reason>' affordance; messageError renders the actual reason text (asserts the generic string is ABSENT) and appends a visible error bubble for an un-seeded messageId; the Rust send_message_inner_tolerates_unbuildable_provider_row test persists an un-buildable provider row and asserts the command returns Ok (would fail against the old fail-fast build_registry). Static review confirmed store fields declared+initialized across the interface/initial-state/all test setState blocks, rules-of-hooks safety in MessageList, a jsdom-guarded scrollIntoView, token-only CSS (no hardcoded colors), and no introduced em dashes."
+  }
 }
