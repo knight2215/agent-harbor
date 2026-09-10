@@ -24,8 +24,8 @@ use orchestrator_core::{
     ProviderConfig, ProviderKind, RouteSource, RoutingHint, RoutingMode, SecretRef, TurnContext,
 };
 use persistence::config::{
-    AppConfig, ModelSharingConfig, PricingConfig, WebSearchConfig, DEFAULT_MODEL_SHARING_PORT,
-    DEFAULT_WEB_SEARCH_MAX_RESULTS, WEB_SEARCH_SECRET_HANDLE,
+    AppConfig, ModelSharingConfig, PricingConfig, WebSearchConfig, DEFAULT_WEB_SEARCH_MAX_RESULTS,
+    WEB_SEARCH_SECRET_HANDLE,
 };
 use persistence::{McpServerRepo, ProviderRepo};
 use providers::{
@@ -3797,6 +3797,7 @@ pub fn app_version() -> String {
 mod tests {
     use super::*;
     use orchestrator_core::{CoreEvent, SessionManager};
+    use persistence::config::DEFAULT_MODEL_SHARING_PORT;
     use persistence::Db;
     use providers::AvailableModel;
     use secrets::{InMemorySecretStore, SecretError};
