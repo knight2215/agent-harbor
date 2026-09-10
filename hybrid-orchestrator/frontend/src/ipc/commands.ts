@@ -356,10 +356,7 @@ export function removeNetworkPeer(id: string): Promise<void> {
  * it is OFF by default and the UI states this. Live LAN binding + peer
  * reachability are user-only. Backed by `set_model_sharing`.
  */
-export function setModelSharing(
-  enabled: boolean,
-  port: number | null,
-): Promise<ModelSharingView> {
+export function setModelSharing(enabled: boolean, port: number | null): Promise<ModelSharingView> {
   return invoke<ModelSharingView>("set_model_sharing", { enabled, port });
 }
 

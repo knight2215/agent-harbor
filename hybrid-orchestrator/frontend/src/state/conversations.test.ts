@@ -325,9 +325,7 @@ describe("conversations store", () => {
       attachments: [{ kind: "text", name: "b.txt", path: "/tmp/b.txt", byteLen: 5, text: "y" }],
     });
     invoke.mockImplementation((command: string) =>
-      command === "send_message"
-        ? Promise.reject(new Error("nope"))
-        : Promise.resolve(undefined),
+      command === "send_message" ? Promise.reject(new Error("nope")) : Promise.resolve(undefined),
     );
     await useConversationsStore.getState().sendMessage("hello");
     expect(useConversationsStore.getState().attachments).toHaveLength(1);

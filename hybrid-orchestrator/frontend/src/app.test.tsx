@@ -247,9 +247,7 @@ describe("<App />", () => {
     expect(screen.getByTestId("welcome-logo")).toBeInTheDocument();
     // A prominent primary "New conversation" button lives on the welcome screen
     // (plus the one nested under the Chat nav item in the sidebar).
-    expect(
-      within(welcome).getByRole("button", { name: "New conversation" }),
-    ).toBeInTheDocument();
+    expect(within(welcome).getByRole("button", { name: "New conversation" })).toBeInTheDocument();
     // The chat surface is NOT rendered until a conversation is active.
     expect(screen.queryByRole("region", { name: "Chat" })).toBeNull();
   });

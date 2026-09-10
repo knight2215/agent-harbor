@@ -938,7 +938,8 @@ describe("NetworkSharingSection", () => {
         listed = [{ ...added }];
         return Promise.resolve({
           ...added,
-          warning: "base_url is a non-loopback endpoint served over plaintext HTTP; prefer https://",
+          warning:
+            "base_url is a non-loopback endpoint served over plaintext HTTP; prefer https://",
         });
       }
       return Promise.resolve([]);

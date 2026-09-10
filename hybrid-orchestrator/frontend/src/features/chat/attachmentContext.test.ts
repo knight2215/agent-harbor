@@ -30,7 +30,13 @@ describe("attachmentContext", () => {
   it("prepends a delimited context block for text/repo files", () => {
     const atts: Attachment[] = [
       textAttachment("notes.txt", "line one"),
-      { kind: "repo", name: "src/lib.rs", path: "/tmp/src/lib.rs", byteLen: 10, text: "pub fn x()" },
+      {
+        kind: "repo",
+        name: "src/lib.rs",
+        path: "/tmp/src/lib.rs",
+        byteLen: 10,
+        text: "pub fn x()",
+      },
     ];
     const content = assembleContent(atts, "please review");
     expect(content).toContain("### Attached file: notes.txt");
@@ -43,7 +49,14 @@ describe("attachmentContext", () => {
 
   it("includes a vision-gated image as a labelled note (not raw bytes)", () => {
     const atts: Attachment[] = [
-      { kind: "image", name: "pic.png", path: "/tmp/pic.png", byteLen: 3, base64: "Zm9v", mimeType: "image/png" },
+      {
+        kind: "image",
+        name: "pic.png",
+        path: "/tmp/pic.png",
+        byteLen: 3,
+        base64: "Zm9v",
+        mimeType: "image/png",
+      },
     ];
     const content = assembleContent(atts, "describe");
     expect(content).toContain("### Attached image: pic.png");
@@ -56,7 +69,10 @@ describe("attachmentContext", () => {
     // Two large text files whose combined size exceeds the cap; only the first
     // fits, the second is dropped with a marker.
     const big = "a".repeat(MAX_CONTEXT_BYTES - 200);
-    const atts: Attachment[] = [textAttachment("first.txt", big), textAttachment("second.txt", big)];
+    const atts: Attachment[] = [
+      textAttachment("first.txt", big),
+      textAttachment("second.txt", big),
+    ];
     const content = assembleContent(atts, "go");
     expect(content).toContain("### Attached file: first.txt");
     expect(content).not.toContain("### Attached file: second.txt");

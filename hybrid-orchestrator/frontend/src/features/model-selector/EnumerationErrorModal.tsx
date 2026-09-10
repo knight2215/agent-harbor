@@ -43,11 +43,7 @@ export function EnumerationErrorModal() {
         <span aria-hidden="true">⚠️</span>
       </button>
       {open && (
-        <div
-          className="ah-modal__backdrop"
-          role="presentation"
-          onClick={() => setOpen(false)}
-        >
+        <div className="ah-modal__backdrop" role="presentation" onClick={() => setOpen(false)}>
           <div
             className="ah-modal"
             role="dialog"

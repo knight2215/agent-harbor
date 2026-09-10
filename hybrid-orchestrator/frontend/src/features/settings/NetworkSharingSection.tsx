@@ -121,8 +121,8 @@ export function NetworkSharingSection() {
       <p className="settings__section-desc">
         Use models running on other machines on your local network, and optionally share your own
         local models with them. Peers you add appear under a <strong>Network</strong> group in the
-        model picker and route like any other provider. A peer is off your machine, so a
-        local-only / confidential conversation never routes to it.
+        model picker and route like any other provider. A peer is off your machine, so a local-only
+        / confidential conversation never routes to it.
       </p>
 
       {/* --- Consume peers --- */}
