@@ -7,6 +7,8 @@ import type {
   EmbeddedModelStatus,
   EmbeddedModelView,
   ExportFormat,
+  FileBinaryView,
+  FileContentView,
   LocalRuntimeConfig,
   ManualRoute,
   McpServerConfig,
@@ -19,6 +21,7 @@ import type {
   PrivacyTag,
   ProviderDiagnosticsReport,
   ProviderKind,
+  RepoListing,
   RouteExplanation,
   RoutingHint,
   RoutingMode,
@@ -459,4 +462,44 @@ export function unloadEmbeddedModel(): Promise<EmbeddedModelStatus> {
  */
 export function embeddedModelStatus(): Promise<EmbeddedModelStatus> {
   return invoke<EmbeddedModelStatus>("embedded_model_status");
+}
+
+// --- Attach / repository context (FEAT-003 / Section 8.1) -------------------
+
+/**
+ * Read a local TEXT file for attachment (architecture.md Section 8.1 chat
+ * surface). The backend validates the path, enforces a per-file byte cap
+ * (`MAX_ATTACH_BYTES`), rejects binary-by-extension and non-UTF-8 files, and
+ * returns a display-safe {@link FileContentView} whose `text` the composer folds
+ * into the next turn's context block. Also used to fetch the contents of
+ * repository files the user selected from a {@link listRepoFiles} listing.
+ * Backed by `read_text_file`.
+ */
+export function readTextFile(path: string): Promise<FileContentView> {
+  return invoke<FileContentView>("read_text_file", { path });
+}
+
+/**
+ * Read a local IMAGE (binary) file for attachment, base64-encoded
+ * (architecture.md Section 8.1). The backend validates the path, enforces a
+ * per-file image cap, and returns a display-safe {@link FileBinaryView} with a
+ * MIME type guessed from the extension. The composer only attaches the result
+ * when the selected model advertises the `vision` capability. Backed by
+ * `read_file_base64`.
+ */
+export function readFileBase64(path: string): Promise<FileBinaryView> {
+  return invoke<FileBinaryView>("read_file_base64", { path });
+}
+
+/**
+ * List a picked repository directory for context selection (architecture.md
+ * Section 8.1). The backend walks the tree, skipping version-control /
+ * dependency / build-output directories and binary-by-extension files, caps the
+ * number of returned entries, and returns a {@link RepoListing} of relative
+ * paths + byte sizes (with `truncated` set when capped) so the UI can present a
+ * bounded checkbox list under a total-size cap. Selected files' contents are
+ * fetched per-file via {@link readTextFile}. Backed by `list_repo_files`.
+ */
+export function listRepoFiles(dir: string): Promise<RepoListing> {
+  return invoke<RepoListing>("list_repo_files", { dir });
 }

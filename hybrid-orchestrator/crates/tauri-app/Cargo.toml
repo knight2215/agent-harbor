@@ -22,6 +22,13 @@ license = "MIT"
 
 [dependencies]
 orchestrator-core = { path = "../orchestrator-core" }
+# The leaf `domain` crate is depended on DIRECTLY (in addition to the re-exports
+# via `orchestrator-core`) so the FEAT-003 attach/repository commands can call
+# the HOST-VERIFIABLE pure helpers in `domain::file_context` (MIME guessing, the
+# directory skip-list, binary-extension filtering, byte-cap checks, base64). Those
+# helpers live in `domain` so `cargo test -p domain` exercises them offline even
+# though this `tauri-app` crate builds only in CI.
+domain = { path = "../domain" }
 providers = { path = "../providers" }
 # The embedded local inference engine (Strategy B / FEAT-002). Used by the
 # embedded-model lifecycle Tauri commands to construct/drive an

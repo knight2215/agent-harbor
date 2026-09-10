@@ -377,6 +377,57 @@ export interface EmbeddedModelStatus {
 }
 
 /**
+ * A display-safe view of a text file read for attachment (FEAT-003, Section
+ * 8.1 chat surface). Mirrors Rust `commands::FileContentView`
+ * (`#[serde(rename_all = "camelCase")]`). Carries the file's UTF-8 contents so
+ * the composer can fold them into the next turn's context block.
+ */
+export interface FileContentView {
+  path: string;
+  name: string;
+  byteLen: number;
+  text: string;
+}
+
+/**
+ * A display-safe view of a binary (image) file read for attachment (FEAT-003),
+ * base64-encoded. Mirrors Rust `commands::FileBinaryView`
+ * (`#[serde(rename_all = "camelCase")]`). The composer only attaches this when
+ * the selected model advertises the `vision` capability.
+ */
+export interface FileBinaryView {
+  path: string;
+  name: string;
+  mimeType: string;
+  base64: string;
+  byteLen: number;
+}
+
+/**
+ * One candidate file in a {@link RepoListing} (FEAT-003). Mirrors Rust
+ * `commands::RepoFileEntry` (`#[serde(rename_all = "camelCase")]`). `relPath` is
+ * relative to the picked directory and is both the display label and the re-read
+ * key; `byteLen` lets the UI enforce a total-size cap across selected files.
+ */
+export interface RepoFileEntry {
+  relPath: string;
+  byteLen: number;
+}
+
+/**
+ * A display-safe listing of a picked repository directory (FEAT-003). Mirrors
+ * Rust `commands::RepoListing` (`#[serde(rename_all = "camelCase")]`).
+ * `truncated` is true when the backend walk stopped at its entry cap, so the UI
+ * can note the list is partial. File contents are fetched per selection via
+ * {@link FileContentView} (`read_text_file`).
+ */
+export interface RepoListing {
+  dir: string;
+  files: RepoFileEntry[];
+  truncated: boolean;
+}
+
+/**
  * User-entered per-provider/per-model token-rate table stored in the versioned
  * app config. Mirrors Rust `persistence::PricingConfig` (architecture.md Section
  * 6.2). Keys are the camelCase `ProviderKind` serialization; empty maps are

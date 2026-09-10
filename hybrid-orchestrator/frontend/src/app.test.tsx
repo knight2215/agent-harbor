@@ -45,6 +45,21 @@ function routeInvoke(command: string): unknown {
       return { configuredCount: 0, totalModelCount: 0, providerCountWithModels: 0, providers: [] };
     case "get_messages":
       return [];
+    case "read_text_file":
+      // FEAT-003 attach: a well-formed text-file view.
+      return { path: "/tmp/a.txt", name: "a.txt", byteLen: 5, text: "hello" };
+    case "read_file_base64":
+      // FEAT-003 attach: a well-formed image view.
+      return {
+        path: "/tmp/a.png",
+        name: "a.png",
+        mimeType: "image/png",
+        base64: "Zm9v",
+        byteLen: 3,
+      };
+    case "list_repo_files":
+      // FEAT-003 repository: a well-formed (empty) listing.
+      return { dir: "/tmp/repo", files: [], truncated: false };
     case "get_route_explanation":
       // The composer's "Why this model?" info icon fetches this when a
       // conversation is active; a null-rationale explanation renders no icon.
@@ -111,6 +126,7 @@ describe("<App />", () => {
       messages: [],
       pendingOverride: null,
       webSearchEnabled: false,
+      attachments: [],
       pendingPermissions: [],
       sendState: "idle",
       sendError: null,
@@ -267,6 +283,7 @@ describe("<App />", () => {
       messages: [],
       pendingOverride: null,
       webSearchEnabled: false,
+      attachments: [],
       pendingPermissions: [],
       sendState: "idle",
       sendError: null,
@@ -296,6 +313,7 @@ describe("<App />", () => {
       messages: [],
       pendingOverride: null,
       webSearchEnabled: false,
+      attachments: [],
       pendingPermissions: [],
       sendState: "idle",
       sendError: null,

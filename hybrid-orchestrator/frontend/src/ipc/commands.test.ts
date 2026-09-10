@@ -37,6 +37,9 @@ import {
   openConversation,
   stopGeneration,
   resolvePermission,
+  readTextFile,
+  readFileBase64,
+  listRepoFiles,
 } from "./commands";
 import type { McpServerInput } from "../types";
 
@@ -307,5 +310,38 @@ describe("ipc/commands wrappers", () => {
       requestId: "r-1",
       decision: { allow: true, remember: false },
     });
+  });
+
+  it("readTextFile forwards path and returns the file content view (FEAT-003)", async () => {
+    invoke.mockResolvedValue({ path: "/tmp/a.txt", name: "a.txt", byteLen: 5, text: "hello" });
+    await expect(readTextFile("/tmp/a.txt")).resolves.toEqual({
+      path: "/tmp/a.txt",
+      name: "a.txt",
+      byteLen: 5,
+      text: "hello",
+    });
+    expect(invoke).toHaveBeenCalledWith("read_text_file", { path: "/tmp/a.txt" });
+  });
+
+  it("readFileBase64 forwards path and returns the binary view (FEAT-003)", async () => {
+    invoke.mockResolvedValue({
+      path: "/tmp/a.png",
+      name: "a.png",
+      mimeType: "image/png",
+      base64: "Zm9v",
+      byteLen: 3,
+    });
+    await expect(readFileBase64("/tmp/a.png")).resolves.toMatchObject({ mimeType: "image/png" });
+    expect(invoke).toHaveBeenCalledWith("read_file_base64", { path: "/tmp/a.png" });
+  });
+
+  it("listRepoFiles forwards dir and returns the listing (FEAT-003)", async () => {
+    invoke.mockResolvedValue({
+      dir: "/tmp/repo",
+      files: [{ relPath: "a.txt", byteLen: 5 }],
+      truncated: false,
+    });
+    await expect(listRepoFiles("/tmp/repo")).resolves.toMatchObject({ truncated: false });
+    expect(invoke).toHaveBeenCalledWith("list_repo_files", { dir: "/tmp/repo" });
   });
 });

@@ -12,8 +12,10 @@
 //! only a [`SecretRef`] handle. `SecretStore::resolve` (the single plaintext
 //! seam) is never surfaced here.
 
+use std::path::Path;
 use std::sync::Arc;
 
+use domain::file_context;
 use mcp_client::McpServerHandle;
 use orchestrator_core::{
     run_turn, AgentPersona, Conversation, ConversationInit, Decision, ManualRoute, McpServerConfig,
@@ -2435,6 +2437,279 @@ fn resolve_permission_inner(
 ) -> Result<bool, CommandError> {
     let id = parse_uuid("requestId", request_id)?;
     Ok(state.permission_registry.resolve(id, decision))
+}
+
+// --- Attach / repository context (FEAT-003, Section 8.1) --------------------
+//
+// These commands back the composer's Attach (📎) and Repository (📁) controls.
+// They read local files natively so the frontend can PREPEND a bounded,
+// clearly-delimited context block to the user message `content` before calling
+// `send_message` (the pipeline treats `content` as a plain String, so the whole
+// attach/repository mechanism rides inside the existing turn with NO change to
+// `run_turn`/`send_message` semantics).
+//
+// All of these commands are stateless filesystem reads (no `AppState`, no core
+// mutation, no events): they validate + read + shape a display-safe view. The
+// failure-prone PURE logic (MIME guessing, the directory skip-list, binary
+// filtering, byte-cap checks, base64) lives in the host-verifiable
+// `domain::file_context` module so `cargo test -p domain` exercises it offline;
+// only the thin `std::fs` glue below is CI-only (tauri-app builds only in CI).
+// The `_inner` helpers take a `&Path` so they are unit-testable with tempfiles.
+
+/// The upper bound on a supplied filesystem path length (Section 9.2 "bounds").
+const MAX_FS_PATH_LEN: usize = 4_096;
+
+/// A display-safe view of a text file read for attachment (FEAT-003). Crosses
+/// the IPC boundary, so it is camelCase-serde. Carries the file's contents so
+/// the composer can fold them into the next turn's context block.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileContentView {
+    /// The absolute path that was read (as supplied by the file dialog).
+    pub path: String,
+    /// The final path component (file name), for the attachment chip label.
+    pub name: String,
+    /// The number of bytes read (the UTF-8 text's byte length).
+    pub byte_len: usize,
+    /// The file's UTF-8 text contents.
+    pub text: String,
+}
+
+/// A display-safe view of a binary file (an image) read for attachment
+/// (FEAT-003), base64-encoded. camelCase-serde across the IPC boundary. The
+/// composer only attaches this when the selected model advertises `vision`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileBinaryView {
+    /// The absolute path that was read (as supplied by the file dialog).
+    pub path: String,
+    /// The final path component (file name), for the attachment chip label.
+    pub name: String,
+    /// The MIME type guessed from the extension (e.g. `image/png`).
+    pub mime_type: String,
+    /// The file contents, base64-encoded (RFC 4648, with padding).
+    pub base64: String,
+    /// The number of RAW (pre-encoding) bytes read.
+    pub byte_len: usize,
+}
+
+/// One entry in a [`RepoListing`]: a file the user may select for context.
+/// camelCase-serde across the IPC boundary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoFileEntry {
+    /// The path RELATIVE to the picked directory (display + re-read key).
+    pub rel_path: String,
+    /// The file's size in bytes, so the UI can enforce a total-size cap.
+    pub byte_len: usize,
+}
+
+/// A display-safe listing of a picked repository directory (FEAT-003).
+/// camelCase-serde across the IPC boundary. `truncated` is set when the walk hit
+/// the entry cap so the UI can say the list is partial.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoListing {
+    /// The picked directory (as supplied by the directory dialog).
+    pub dir: String,
+    /// The bounded, filtered set of candidate files (relative paths + sizes).
+    pub files: Vec<RepoFileEntry>,
+    /// True when the walk stopped at [`file_context::MAX_REPO_ENTRIES`] and
+    /// more files exist than are listed.
+    pub truncated: bool,
+}
+
+/// Validate a supplied filesystem path: non-empty (trimmed) and within the
+/// length bound, before any `std::fs` access.
+fn validate_fs_path(path: &str) -> Result<(), CommandError> {
+    if path.trim().is_empty() {
+        return Err(CommandError::invalid("`path` must not be empty"));
+    }
+    if path.len() > MAX_FS_PATH_LEN {
+        return Err(CommandError::invalid(format!(
+            "`path` exceeds the maximum length of {MAX_FS_PATH_LEN} bytes"
+        )));
+    }
+    Ok(())
+}
+
+/// Read a local TEXT file for attachment (FEAT-003). Validates the path,
+/// enforces the per-file text cap, rejects binary-by-extension and non-UTF-8
+/// files, and returns a display-safe [`FileContentView`]. The contents ride into
+/// the next turn inside the composer's assembled `content` block.
+#[tauri::command]
+pub fn read_text_file(path: String) -> Result<FileContentView, CommandError> {
+    read_text_file_inner(Path::new(path.trim()), &path)
+}
+
+/// The body of [`read_text_file`], taking a `&Path` (plus the original display
+/// string) so it is unit-testable with tempfiles and no live Tauri `State`.
+fn read_text_file_inner(path: &Path, display_path: &str) -> Result<FileContentView, CommandError> {
+    validate_fs_path(display_path)?;
+    if file_context::has_binary_extension(display_path) {
+        return Err(CommandError::invalid(
+            "this file looks binary and cannot be attached as text",
+        ));
+    }
+    let metadata = std::fs::metadata(path).map_err(|_| {
+        CommandError::not_found(format!("file not found or unreadable: {display_path}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(CommandError::invalid(format!(
+            "not a regular file: {display_path}"
+        )));
+    }
+    if !file_context::within_text_cap(metadata.len() as usize) {
+        return Err(CommandError::invalid(format!(
+            "file is too large to attach as text (max {} bytes)",
+            file_context::MAX_ATTACH_BYTES
+        )));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| CommandError::internal(format!("failed to read file: {e}")))?;
+    // Re-check against the byte cap after the read: metadata.len() can lag the
+    // actual size on some filesystems, and we never want to return an oversized
+    // payload across IPC.
+    if !file_context::within_text_cap(bytes.len()) {
+        return Err(CommandError::invalid(format!(
+            "file is too large to attach as text (max {} bytes)",
+            file_context::MAX_ATTACH_BYTES
+        )));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| CommandError::invalid("file is not valid UTF-8 text"))?;
+    Ok(FileContentView {
+        path: display_path.to_string(),
+        name: file_context::file_name(display_path),
+        byte_len: text.len(),
+        text,
+    })
+}
+
+/// Read a local IMAGE (binary) file for attachment (FEAT-003), base64-encoded.
+/// Validates the path, enforces the per-file image cap, and returns a
+/// display-safe [`FileBinaryView`] with a MIME type guessed from the extension.
+/// The composer only attaches the result when the selected model advertises the
+/// `vision` capability.
+#[tauri::command]
+pub fn read_file_base64(path: String) -> Result<FileBinaryView, CommandError> {
+    read_file_base64_inner(Path::new(path.trim()), &path)
+}
+
+/// The body of [`read_file_base64`], taking a `&Path` (plus the original display
+/// string) so it is unit-testable with tempfiles.
+fn read_file_base64_inner(path: &Path, display_path: &str) -> Result<FileBinaryView, CommandError> {
+    validate_fs_path(display_path)?;
+    let metadata = std::fs::metadata(path).map_err(|_| {
+        CommandError::not_found(format!("file not found or unreadable: {display_path}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(CommandError::invalid(format!(
+            "not a regular file: {display_path}"
+        )));
+    }
+    if !file_context::within_image_cap(metadata.len() as usize) {
+        return Err(CommandError::invalid(format!(
+            "image is too large to attach (max {} bytes)",
+            file_context::MAX_IMAGE_BYTES
+        )));
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|e| CommandError::internal(format!("failed to read file: {e}")))?;
+    if !file_context::within_image_cap(bytes.len()) {
+        return Err(CommandError::invalid(format!(
+            "image is too large to attach (max {} bytes)",
+            file_context::MAX_IMAGE_BYTES
+        )));
+    }
+    Ok(FileBinaryView {
+        path: display_path.to_string(),
+        name: file_context::file_name(display_path),
+        mime_type: file_context::guess_mime_type(display_path).to_string(),
+        base64: file_context::encode_base64(&bytes),
+        byte_len: bytes.len(),
+    })
+}
+
+/// List a picked repository directory for context selection (FEAT-003). Walks
+/// the tree, skipping version-control / dependency / build-output directories
+/// and binary-by-extension files, capping the number of returned entries at
+/// [`file_context::MAX_REPO_ENTRIES`], and returns relative paths + byte sizes so
+/// the UI can present a checkbox list under a total-size cap. The actual file
+/// contents are fetched per-selected-file via [`read_text_file`].
+#[tauri::command]
+pub fn list_repo_files(dir: String) -> Result<RepoListing, CommandError> {
+    list_repo_files_inner(Path::new(dir.trim()), &dir)
+}
+
+/// The body of [`list_repo_files`], taking a `&Path` (plus the original display
+/// string) so it is unit-testable with a tempdir.
+fn list_repo_files_inner(dir: &Path, display_dir: &str) -> Result<RepoListing, CommandError> {
+    validate_fs_path(display_dir)?;
+    let metadata = std::fs::metadata(dir)
+        .map_err(|_| CommandError::not_found(format!("directory not found: {display_dir}")))?;
+    if !metadata.is_dir() {
+        return Err(CommandError::invalid(format!(
+            "not a directory: {display_dir}"
+        )));
+    }
+
+    let mut files: Vec<RepoFileEntry> = Vec::new();
+    let mut truncated = false;
+    // An explicit work stack rather than recursion so the walk is bounded and
+    // cannot blow the stack on a deep tree. Each frame carries the directory to
+    // read and its path relative to the picked root (empty at the root).
+    let mut stack: Vec<(std::path::PathBuf, String)> = vec![(dir.to_path_buf(), String::new())];
+    while let Some((current, rel_prefix)) = stack.pop() {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(entries) => entries,
+            // A directory we cannot read (permissions) is skipped, not fatal:
+            // the picked root already passed the is_dir check above.
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let child_rel = if rel_prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{rel_prefix}/{name}")
+            };
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if file_type.is_dir() {
+                if file_context::is_skipped_dir(&name) {
+                    continue;
+                }
+                stack.push((entry.path(), child_rel));
+            } else if file_type.is_file() {
+                if file_context::has_binary_extension(&name) {
+                    continue;
+                }
+                if files.len() >= file_context::MAX_REPO_ENTRIES {
+                    truncated = true;
+                    break;
+                }
+                let byte_len = entry.metadata().map(|m| m.len() as usize).unwrap_or(0);
+                files.push(RepoFileEntry {
+                    rel_path: child_rel,
+                    byte_len,
+                });
+            }
+        }
+        if truncated {
+            break;
+        }
+    }
+
+    // Stable, predictable ordering for the UI (and the tests).
+    files.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+    Ok(RepoListing {
+        dir: display_dir.to_string(),
+        files,
+        truncated,
+    })
 }
 
 // --- Embedded local inference engine (Strategy B / FEAT-002) ----------------
@@ -5068,5 +5343,139 @@ mod tests {
             rx.try_recv().is_err(),
             "a rejected embedded mutation must not emit ProvidersChanged"
         );
+    }
+
+    // --- Attach / repository context (FEAT-003) -----------------------------
+
+    #[test]
+    fn read_text_file_inner_happy_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notes.txt");
+        std::fs::write(&path, "hello world").unwrap();
+        let display = path.to_string_lossy().to_string();
+        let view = read_text_file_inner(&path, &display).unwrap();
+        assert_eq!(view.name, "notes.txt");
+        assert_eq!(view.text, "hello world");
+        assert_eq!(view.byte_len, "hello world".len());
+        assert_eq!(view.path, display);
+    }
+
+    #[test]
+    fn read_text_file_inner_rejects_empty_and_missing() {
+        // Empty path -> InvalidArgument.
+        let err = read_text_file_inner(Path::new(""), "").unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+        // Missing file -> NotFound.
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.txt");
+        let display = missing.to_string_lossy().to_string();
+        let err = read_text_file_inner(&missing, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::NotFound));
+    }
+
+    #[test]
+    fn read_text_file_inner_rejects_oversized() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.txt");
+        let big = "a".repeat(file_context::MAX_ATTACH_BYTES + 1);
+        std::fs::write(&path, &big).unwrap();
+        let display = path.to_string_lossy().to_string();
+        let err = read_text_file_inner(&path, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+    }
+
+    #[test]
+    fn read_text_file_inner_rejects_non_utf8() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blob.dat");
+        // Invalid UTF-8 byte sequence.
+        std::fs::write(&path, [0xff, 0xfe, 0x00, 0x80]).unwrap();
+        let display = path.to_string_lossy().to_string();
+        let err = read_text_file_inner(&path, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+    }
+
+    #[test]
+    fn read_text_file_inner_rejects_binary_extension() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logo.png");
+        std::fs::write(&path, "not really a png").unwrap();
+        let display = path.to_string_lossy().to_string();
+        let err = read_text_file_inner(&path, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::InvalidArgument));
+    }
+
+    #[test]
+    fn read_file_base64_inner_happy_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pixel.png");
+        std::fs::write(&path, b"foobar").unwrap();
+        let display = path.to_string_lossy().to_string();
+        let view = read_file_base64_inner(&path, &display).unwrap();
+        assert_eq!(view.name, "pixel.png");
+        assert_eq!(view.mime_type, "image/png");
+        assert_eq!(view.base64, "Zm9vYmFy");
+        assert_eq!(view.byte_len, 6);
+    }
+
+    #[test]
+    fn read_file_base64_inner_rejects_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("gone.png");
+        let display = missing.to_string_lossy().to_string();
+        let err = read_file_base64_inner(&missing, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::NotFound));
+    }
+
+    #[test]
+    fn list_repo_files_inner_filters_and_lists() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("main.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("README.md"), "# hi").unwrap();
+        std::fs::write(root.join("logo.png"), "binary").unwrap();
+        // A skipped dir with a file inside must be excluded wholesale.
+        std::fs::create_dir(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git").join("config"), "x").unwrap();
+        std::fs::create_dir(root.join("node_modules")).unwrap();
+        std::fs::write(root.join("node_modules").join("dep.js"), "x").unwrap();
+        // A nested non-skipped dir contributes a relative path.
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src").join("lib.rs"), "pub fn x() {}").unwrap();
+
+        let display = root.to_string_lossy().to_string();
+        let listing = list_repo_files_inner(root, &display).unwrap();
+        assert!(!listing.truncated);
+        let rels: Vec<&str> = listing.files.iter().map(|f| f.rel_path.as_str()).collect();
+        assert!(rels.contains(&"main.rs"));
+        assert!(rels.contains(&"README.md"));
+        assert!(rels.contains(&"src/lib.rs"));
+        // Binary + skipped-dir files are excluded.
+        assert!(!rels.iter().any(|r| r.ends_with("logo.png")));
+        assert!(!rels.iter().any(|r| r.contains(".git")));
+        assert!(!rels.iter().any(|r| r.contains("node_modules")));
+    }
+
+    #[test]
+    fn list_repo_files_inner_rejects_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-such-dir");
+        let display = missing.to_string_lossy().to_string();
+        let err = list_repo_files_inner(&missing, &display).unwrap_err();
+        assert!(matches!(err.code, ErrorCode::NotFound));
+    }
+
+    #[test]
+    fn list_repo_files_inner_sets_truncated_at_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Create more files than the entry cap so the walk truncates.
+        for i in 0..(file_context::MAX_REPO_ENTRIES + 10) {
+            std::fs::write(root.join(format!("f{i}.txt")), "x").unwrap();
+        }
+        let display = root.to_string_lossy().to_string();
+        let listing = list_repo_files_inner(root, &display).unwrap();
+        assert!(listing.truncated);
+        assert_eq!(listing.files.len(), file_context::MAX_REPO_ENTRIES);
     }
 }

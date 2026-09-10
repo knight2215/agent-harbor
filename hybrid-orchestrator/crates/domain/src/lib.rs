@@ -13,6 +13,7 @@
 //! existing `orchestrator_core::Conversation` (etc.) paths used by `tauri-app`
 //! and the tests keep working unchanged.
 
+pub mod file_context;
 pub mod models;
 
 pub use models::{

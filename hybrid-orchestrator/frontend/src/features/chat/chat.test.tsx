@@ -10,6 +10,15 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => undefined),
 }));
 
+// The Composer's Attach / Repository controls open the native dialog via
+// `@tauri-apps/plugin-dialog`; mock `open()` so tests drive it without a live
+// Tauri runtime (the settings.test.tsx pattern). Each test overrides the return
+// value for the path(s) or folder it exercises.
+const dialogOpen = vi.fn();
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: (...args: unknown[]) => dialogOpen(...args),
+}));
+
 import { useConversationsStore } from "../../state/conversations";
 import { useProvidersStore } from "../../state/providers";
 import { Composer } from "./Composer";
@@ -46,6 +55,12 @@ function model(providerId: string, id: string, local: boolean): AvailableModel {
   };
 }
 
+/** A model with the `vision` capability, for the image-attach vision gate. */
+function visionModel(providerId: string, id: string): AvailableModel {
+  const base = model(providerId, id, false);
+  return { ...base, capabilities: { ...base.capabilities, vision: true } };
+}
+
 // The providers store is a module-level singleton; capture its REAL load() once
 // before any test swaps in a spy so resetStores() can restore it (a leaked spy
 // would otherwise persist across tests, since the Composer now calls load()).
@@ -58,6 +73,7 @@ function resetStores() {
     messages: [],
     pendingOverride: null,
     webSearchEnabled: false,
+    attachments: [],
     pendingPermissions: [],
     sendState: "idle",
     sendError: null,
@@ -75,6 +91,7 @@ describe("chat surface", () => {
   beforeEach(() => {
     invoke.mockReset();
     invoke.mockResolvedValue(undefined);
+    dialogOpen.mockReset();
     resetStores();
   });
 
@@ -405,6 +422,173 @@ describe("chat surface", () => {
     expect(load).toHaveBeenCalled();
     // The next beforeEach -> resetStores() restores the real load(), so the
     // seeded spy does not leak into sibling tests.
+  });
+
+  // --- FEAT-003 attach / repository context --------------------------------
+
+  it("Composer attaches a text file (chip) and prepends its content on send", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    dialogOpen.mockResolvedValue("/tmp/notes.txt");
+    invoke.mockImplementation((command: string) => {
+      if (command === "read_text_file") {
+        return Promise.resolve({
+          path: "/tmp/notes.txt",
+          name: "notes.txt",
+          byteLen: 11,
+          text: "hello world",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Composer />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach file" }));
+    // A removable chip appears once the read resolves.
+    await screen.findByRole("button", { name: "Remove attachment notes.txt" });
+    await waitFor(() => {
+      expect(useConversationsStore.getState().attachments).toHaveLength(1);
+    });
+
+    // Sending prepends the file's content (fenced block) to the trimmed draft.
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "summarize this" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "send_message");
+      expect(call).toBeTruthy();
+      const content = (call?.[1] as { content: string }).content;
+      expect(content).toContain("### Attached file: notes.txt");
+      expect(content).toContain("hello world");
+      expect(content).toContain("summarize this");
+    });
+  });
+
+  it("Composer attaches an image when the selected model supports vision", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    useProvidersStore.setState({ models: [visionModel("openai", "gpt-4o")] });
+    dialogOpen.mockResolvedValue("/tmp/pic.png");
+    invoke.mockImplementation((command: string) => {
+      if (command === "read_file_base64") {
+        return Promise.resolve({
+          path: "/tmp/pic.png",
+          name: "pic.png",
+          mimeType: "image/png",
+          base64: "Zm9v",
+          byteLen: 3,
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Composer />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach file" }));
+    await screen.findByRole("button", { name: "Remove attachment pic.png" });
+    await waitFor(() => {
+      const atts = useConversationsStore.getState().attachments;
+      expect(atts).toHaveLength(1);
+      expect(atts[0].kind).toBe("image");
+    });
+  });
+
+  it("Composer shows a notice and does NOT attach an image for a non-vision model", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    // A model WITHOUT vision (the default `model()` helper sets vision: false).
+    useProvidersStore.setState({ models: [model("openai", "gpt-3.5", false)] });
+    dialogOpen.mockResolvedValue("/tmp/pic.png");
+    const readSpy = vi.fn();
+    invoke.mockImplementation((command: string) => {
+      if (command === "read_file_base64") {
+        readSpy();
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Composer />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Attach file" }));
+    // The visible non-fatal notice appears and no image is attached.
+    const notice = await screen.findByTestId("composer-notice");
+    expect(notice).toHaveTextContent("This model doesn't support images");
+    expect(useConversationsStore.getState().attachments).toHaveLength(0);
+    // The image read command is never even called for a non-vision model.
+    expect(readSpy).not.toHaveBeenCalled();
+  });
+
+  it("Composer removes a chip when its remove button is clicked", async () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      attachments: [{ kind: "text", name: "a.txt", path: "/tmp/a.txt", byteLen: 5, text: "hello" }],
+    });
+    render(<Composer />);
+    const remove = screen.getByRole("button", { name: "Remove attachment a.txt" });
+    fireEvent.click(remove);
+    await waitFor(() => {
+      expect(useConversationsStore.getState().attachments).toHaveLength(0);
+    });
+  });
+
+  it("Composer clears attachments after a successful send", async () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      attachments: [{ kind: "text", name: "a.txt", path: "/tmp/a.txt", byteLen: 5, text: "hello" }],
+    });
+    invoke.mockResolvedValue(undefined);
+    render(<Composer />);
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "go" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      expect(useConversationsStore.getState().attachments).toHaveLength(0);
+    });
+  });
+
+  it("Composer repository picker respects the cap and includes selected content on send", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    dialogOpen.mockResolvedValue("/tmp/repo");
+    invoke.mockImplementation((command: string) => {
+      if (command === "list_repo_files") {
+        return Promise.resolve({
+          dir: "/tmp/repo",
+          files: [
+            { relPath: "src/main.rs", byteLen: 12 },
+            { relPath: "README.md", byteLen: 4 },
+          ],
+          truncated: false,
+        });
+      }
+      if (command === "read_text_file") {
+        return Promise.resolve({
+          path: "/tmp/repo/src/main.rs",
+          name: "src/main.rs",
+          byteLen: 12,
+          text: "fn main() {}",
+        });
+      }
+      return Promise.resolve(undefined);
+    });
+    render(<Composer />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add repository context" }));
+    // The picker lists the files with a running budget signal.
+    await screen.findByTestId("repo-picker-budget");
+    fireEvent.click(screen.getByRole("checkbox", { name: "Include src/main.rs" }));
+    fireEvent.click(screen.getByRole("button", { name: /Include 1 file/ }));
+
+    await waitFor(() => {
+      const atts = useConversationsStore.getState().attachments;
+      expect(atts).toHaveLength(1);
+      expect(atts[0].kind).toBe("repo");
+    });
+
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "review" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() => {
+      const call = invoke.mock.calls.find((c) => c[0] === "send_message");
+      const content = (call?.[1] as { content: string }).content;
+      expect(content).toContain("### Repository file: src/main.rs");
+      expect(content).toContain("fn main() {}");
+      expect(content).toContain("review");
+    });
   });
 
   it("PermissionPrompt renders on permission_requested and resolves via resolvePermission", async () => {
