@@ -225,6 +225,213 @@ body {
   width: 100%;
 }
 
+/* --- Message thread ------------------------------------------------------- */
+
+/*
+ * The conversation reads like a real thread: a scrollable vertical column of
+ * role-styled bubbles. User turns align to the trailing edge in the accent
+ * palette; assistant turns align to the leading edge on a neutral surface. Uses
+ * ONLY design tokens, so both the light and dark harbor-blue palettes flip
+ * automatically. Consistent in voice with the .composer block below.
+ */
+.message-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-3);
+  min-width: 0;
+  /* Grow to fill the chat column and scroll internally so the composer stays
+   * put while older turns scroll away. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--ah-space-2) 0;
+}
+
+.message-list--empty {
+  padding: var(--ah-space-5);
+  color: var(--ah-text-faint);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* Scroll anchor: a zero-height sentinel the auto-scroll effect pins to. */
+.message-list__end {
+  flex: 0 0 auto;
+  height: 0;
+}
+
+.message-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+  /* Constrain so turns read as a thread, not full-width blocks. */
+  max-width: 80%;
+  min-width: 0;
+  padding: var(--ah-space-3) var(--ah-space-4);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-lg);
+  background: var(--ah-surface-2);
+  color: var(--ah-text);
+}
+
+/* Assistant turns: neutral surface, aligned to the leading edge. */
+.message-bubble[data-role="assistant"] {
+  align-self: flex-start;
+  background: var(--ah-surface-2);
+  color: var(--ah-text);
+}
+
+/* User turns: accent palette, aligned to the trailing edge. */
+.message-bubble[data-role="user"] {
+  align-self: flex-end;
+  border-color: transparent;
+  background: var(--ah-accent);
+  color: var(--ah-accent-contrast);
+}
+
+/* System / tool turns read as centered, muted meta rows. */
+.message-bubble[data-role="system"],
+.message-bubble[data-role="tool"] {
+  align-self: center;
+  max-width: 90%;
+  background: var(--ah-accent-soft);
+  color: var(--ah-text-muted);
+}
+
+/* A streaming assistant bubble is visually distinct: dashed border + slightly
+ * dimmed so an in-flight turn reads as not-yet-final. */
+.message-bubble[data-status="streaming"] {
+  border-style: dashed;
+  border-color: var(--ah-accent);
+  opacity: 0.85;
+}
+
+.message-bubble__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--ah-space-3);
+}
+
+.message-bubble__role {
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ah-text-faint);
+}
+
+/* On the accent-filled user bubble the faint token would be illegible, so lift
+ * the role label to the accent-contrast color. */
+.message-bubble[data-role="user"] .message-bubble__role {
+  color: var(--ah-accent-contrast);
+  opacity: 0.75;
+}
+
+.message-bubble__text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.message-bubble__tool-calls,
+.message-bubble__tool-results,
+.message-bubble__attachments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tool-call,
+.tool-result,
+.attachment {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-1);
+}
+
+.tool-call__name,
+.tool-result__status {
+  font-family: var(--ah-font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ah-text-muted);
+}
+
+.tool-result[data-error="true"] .tool-result__status {
+  color: var(--ah-danger);
+}
+
+.tool-call__args,
+.tool-result__content {
+  margin: 0;
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text);
+  font-family: var(--ah-font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.attachment__mime {
+  font-size: 12px;
+  color: var(--ah-text-faint);
+}
+
+/* The stored error reason (FEAT-002) rendered inside a failed bubble. */
+.message-bubble__error {
+  margin: 0;
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-danger);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-danger);
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* --- Streaming indicator -------------------------------------------------- */
+
+.streaming-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ah-space-1);
+}
+
+.streaming-indicator__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ah-accent);
+  opacity: 0.4;
+  animation: streaming-indicator-pulse 1.2s ease-in-out infinite;
+}
+
+.streaming-indicator__dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.streaming-indicator__dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes streaming-indicator-pulse {
+  0%,
+  80%,
+  100% {
+    opacity: 0.3;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+
 /* --- Composer (message input) --------------------------------------------- */
 
 .composer {

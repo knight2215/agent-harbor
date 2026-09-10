@@ -115,6 +115,23 @@ describe("chat surface", () => {
     expect(screen.getByText("image/png")).toBeInTheDocument();
   });
 
+  it("MessageList renders a threaded view with role-styled user and assistant bubbles", async () => {
+    const userMsg: Message = { ...textMessage("m-user", "hello"), role: "user", route: null };
+    const assistantMsg = textMessage("m-asst", "hi there");
+    invoke.mockResolvedValue([userMsg, assistantMsg]);
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<MessageList />);
+
+    // Both turns render inside the role=log thread with their data-role tags.
+    const log = await screen.findByRole("log", { name: "Conversation messages" });
+    await waitFor(() => {
+      expect(log.querySelector('[data-role="user"]')).not.toBeNull();
+    });
+    expect(log.querySelector('[data-role="assistant"]')).not.toBeNull();
+    expect(screen.getByText("hello")).toBeInTheDocument();
+    expect(screen.getByText("hi there")).toBeInTheDocument();
+  });
+
   it("MessageList streams via delta then finalizes on complete, toggling StreamingIndicator", async () => {
     invoke.mockResolvedValue([{ ...textMessage("m-1", ""), status: "streaming", route: null }]);
     useConversationsStore.setState({ activeConversationId: "c-1" });
