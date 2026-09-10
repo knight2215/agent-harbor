@@ -53,6 +53,8 @@ function resetStores() {
     messages: [],
     pendingOverride: null,
     pendingPermissions: [],
+    sendState: "idle",
+    sendError: null,
   });
   useProvidersStore.setState({ models: [] });
 }
@@ -111,6 +113,23 @@ describe("chat surface", () => {
     );
     expect(screen.getByText("shot.png")).toBeInTheDocument();
     expect(screen.getByText("image/png")).toBeInTheDocument();
+  });
+
+  it("MessageList renders a threaded view with role-styled user and assistant bubbles", async () => {
+    const userMsg: Message = { ...textMessage("m-user", "hello"), role: "user", route: null };
+    const assistantMsg = textMessage("m-asst", "hi there");
+    invoke.mockResolvedValue([userMsg, assistantMsg]);
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<MessageList />);
+
+    // Both turns render inside the role=log thread with their data-role tags.
+    const log = await screen.findByRole("log", { name: "Conversation messages" });
+    await waitFor(() => {
+      expect(log.querySelector('[data-role="user"]')).not.toBeNull();
+    });
+    expect(log.querySelector('[data-role="assistant"]')).not.toBeNull();
+    expect(screen.getByText("hello")).toBeInTheDocument();
+    expect(screen.getByText("hi there")).toBeInTheDocument();
   });
 
   it("MessageList streams via delta then finalizes on complete, toggling StreamingIndicator", async () => {
@@ -178,6 +197,140 @@ describe("chat surface", () => {
     });
     // Applied to exactly one message.
     expect(useConversationsStore.getState().pendingOverride).toBeNull();
+  });
+
+  it("Composer sends on plain Enter and clears the draft", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<Composer />);
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("send_message", {
+        conversationId: "c-1",
+        content: "hello",
+        overrideRoute: null,
+      });
+    });
+    // The draft is cleared after a successful send.
+    expect(input.value).toBe("");
+  });
+
+  it("Composer does NOT send on Shift+Enter and preserves the draft", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<Composer />);
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "line one" } });
+    fireEvent.keyDown(input, { key: "Enter", shiftKey: true });
+
+    // Shift+Enter inserts a newline (default) and never sends.
+    expect(invoke).not.toHaveBeenCalledWith(
+      "send_message",
+      expect.objectContaining({ content: "line one" }),
+    );
+    expect(input.value).toBe("line one");
+  });
+
+  it("Composer does NOT send while an IME composition is active", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<Composer />);
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "こんにちは" } });
+
+    // A candidate-commit Enter reports isComposing (modern) ...
+    fireEvent.keyDown(input, { key: "Enter", isComposing: true });
+    // ... or the legacy keyCode 229 on older IME stacks.
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+
+    expect(invoke).not.toHaveBeenCalledWith(
+      "send_message",
+      expect.objectContaining({ content: "こんにちは" }),
+    );
+    // The draft is untouched (no send, no clear).
+    expect(input.value).toBe("こんにちは");
+  });
+
+  it("Composer surfaces a visible failed-to-send affordance when send_message rejects", async () => {
+    invoke.mockImplementation((command: string) =>
+      command === "send_message"
+        ? Promise.reject(new Error("provider build failed"))
+        : Promise.resolve(undefined),
+    );
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<Composer />);
+    const input = screen.getByLabelText("Message") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    // A rejected send emits NO CoreEvents, so this role=alert affordance is the
+    // only visible signal that the send failed.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Failed to send: provider build failed");
+    await waitFor(() => {
+      expect(useConversationsStore.getState().sendState).toBe("failed");
+    });
+    expect(useConversationsStore.getState().sendError).toBe("provider build failed");
+  });
+
+  it("MessageBubble renders the stored error reason, not the generic string", () => {
+    render(
+      <MessageBubble
+        message={{
+          ...textMessage("m-err", "model unavailable: qwen3"),
+          status: "error",
+        }}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent("model unavailable: qwen3");
+    expect(screen.queryByText("This message failed to generate.")).toBeNull();
+  });
+
+  it("MessageBubble falls back to the generic string when the error has no text", () => {
+    render(<MessageBubble message={{ ...textMessage("m-err2", ""), status: "error" }} />);
+    expect(screen.getByRole("alert")).toHaveTextContent("This message failed to generate.");
+  });
+
+  it("MessageBubble keeps a non-text errored message's content visible alongside the alert", () => {
+    // A tool-call message that errors must still show its actual content (the
+    // tool name) rather than hiding it behind the generic string, and it also
+    // renders exactly ONE role=alert announcing the failure.
+    render(
+      <MessageBubble
+        message={{
+          ...textMessage("m-err3", ""),
+          status: "error",
+          content: {
+            type: "toolCalls",
+            calls: [{ id: "t1", name: "read_file", arguments: { path: "/x" } }],
+          },
+        }}
+      />,
+    );
+    // The real content is preserved (ContentBody rendered).
+    expect(screen.getByText("read_file")).toBeInTheDocument();
+    // And a single alert announces the failure (getByRole throws on multiples).
+    expect(screen.getByRole("alert")).toHaveTextContent("This message failed to generate.");
+  });
+
+  it("MessageList appends a visible error bubble for a messageError with no prior placeholder", async () => {
+    invoke.mockResolvedValue([]);
+    useConversationsStore.setState({ activeConversationId: "c-1", messages: [] });
+    render(<MessageList />);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("get_messages", { conversationId: "c-1" });
+    });
+
+    useConversationsStore.getState().applyCoreEvent({
+      type: "messageError",
+      conversationId: "c-1",
+      messageId: "never-seeded",
+      message: "no route available",
+    });
+    // The reason is never dropped: a brand-new error bubble appears.
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("no route available");
   });
 
   it("Composer stop button is disabled unless a turn is streaming", () => {

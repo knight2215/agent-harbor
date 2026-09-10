@@ -1,0 +1,32 @@
+{
+  "project_type": "Tauri desktop app: Rust core crates (hybrid-orchestrator/crates/*) + React/TypeScript webview (hybrid-orchestrator/frontend/)",
+  "language": "Rust (backend) + TypeScript/React (frontend)",
+  "build_system": "Cargo workspace under hybrid-orchestrator/ for Rust; npm + Vite for the frontend. Per-crate formatting only (never cargo fmt --all).",
+  "test_framework": "Rust: cargo test per crate (unit tests inline + tests/*.rs integration, e.g. orchestrator-core/tests/pipeline_e2e.rs). Frontend: vitest + @testing-library/react with jsdom; Tauri IPC mocked via vi.mock('@tauri-apps/api/core') invoke and vi.mock('@tauri-apps/api/event') listen.",
+  "build_command": "Frontend: (cd hybrid-orchestrator/frontend && npm run build) which runs `tsc && vite build`. Rust: (cd hybrid-orchestrator && cargo build). NOTE: INTEGRATIONS_ONLY sandbox cannot install crates/npm packages (crates.io + npm return 403), so build/test likely cannot run here; validate offline with static checks + fmt --check where the toolchain is present.",
+  "test_command": "Frontend: (cd hybrid-orchestrator/frontend && npm test) -> vitest run. Rust per crate: (cd hybrid-orchestrator && cargo test -p orchestrator-core -p tauri-app -p providers).",
+  "verification_instructions": "Frontend: npm run build (tsc strict + vite), npm run lint (eslint), npm test (vitest run), npx prettier --check . Rust: cargo clippy -D warnings and cargo test per changed crate; cargo fmt --check per crate. These require network to install deps and may not run in the sandbox; if so, rely on static review + prettier/fmt --check where possible and mark the rest as CI/user-build verification.",
+  "snapshot_or_generated_files": "none",
+  "setup_instructions": "Frontend deps: (cd hybrid-orchestrator/frontend && npm ci). Rust: cargo fetch under hybrid-orchestrator/. Both require network; unavailable under INTEGRATIONS_ONLY.",
+  "environment_constraints": "INTEGRATIONS_ONLY: no external network. crates.io and npm return 403, so cargo build/clippy/test and npm install/build/test likely cannot run in-sandbox. No live Ollama at http://127.0.0.1:11434, so Issue 2 (silent no-response) CANNOT be reproduced live here; it must be traced in code, fixed at the most likely cause, and made visible so the user's own build reveals anything remaining. Do NOT touch the embedded-engine feature-flagging/release bundle or the embedded folder-scan rework. Do NOT regress Ollama enumeration or provider diagnostics.",
+  "contribution_requirements": "Per-crate cargo fmt (never --all). clippy -D warnings clean (no unused imports; if a variant is newly emitted, drop its #[allow(dead_code)]; no needless_lifetimes). TS: eslint no-unused-vars, tsc strict. Every vitest that mounts <App/> or a chat component that calls invoke MUST mock ALL commands it invokes (send_message, get_messages, list_available_models {models,errors}, provider_diagnostics {configuredCount,totalModelCount,providerCountWithModels,providers}, list_conversations, list_personas, list_mcp_servers, list_cloud_providers, list_local_runtimes, list_embedded_models, embedded_model_status) with well-formed shapes; assert after state changes with await findBy*/waitFor. If a CoreEvent shape changes, update orchestrator-core serde (camelCase) + frontend CoreEvent TS type + every event-handling test. New/changed Tauri command -> generate_handler! in lib.rs + IPC wrapper in commands.ts + TS type. Do NOT push/tag/PR.",
+  "key_patterns": "Backend emits streaming CoreEvents (MessageStarted/MessageDelta/MessageComplete/MessageError, camelCase serde tagged union) over a single event channel; frontend app.tsx opens ONE onCoreEvent subscription and fans out to each store's applyCoreEvent. run_turn (pipeline.rs) already emits MessageError + persists an Error-status message on ANY failure. The prior 'clean-empty picker' bug was fixed in list_available_models_inner by building the registry PER-ROW resiliently (build_from_config in a loop, collecting build_errors) instead of the fail-fast providers::build_registry (which short-circuits on the FIRST build failure via build_all's `?`). The providers store load() captures IPC rejections into loadState/lastError instead of swallowing them.",
+  "relevant_files": [
+    "hybrid-orchestrator/frontend/src/features/chat/Composer.tsx (Issue 1: add onKeyDown Enter/Shift+Enter/IME)",
+    "hybrid-orchestrator/frontend/src/features/chat/MessageList.tsx (Issue 3: threaded view)",
+    "hybrid-orchestrator/frontend/src/features/chat/MessageBubble.tsx (Issue 2/3: show error text; role styling)",
+    "hybrid-orchestrator/frontend/src/features/chat/chat.test.tsx (tests for all three)",
+    "hybrid-orchestrator/frontend/src/state/conversations.ts (Issue 2: sendMessage swallows IPC rejection; messageError drops the message text; no user echo / send state)",
+    "hybrid-orchestrator/frontend/src/state/conversations.test.ts (store tests)",
+    "hybrid-orchestrator/frontend/src/ipc/commands.ts (sendMessage IPC wrapper)",
+    "hybrid-orchestrator/frontend/src/types/index.ts (CoreEvent + Message types)",
+    "hybrid-orchestrator/frontend/src/styles/app.css + tokens.css (var(--ah-*) design tokens; add .message-bubble/.message-list styling)",
+    "hybrid-orchestrator/crates/tauri-app/src/commands.rs (send_message_inner: fail-fast build_registry -> switch to resilient per-row build mirroring list_available_models_inner)",
+    "hybrid-orchestrator/crates/orchestrator-core/src/pipeline.rs (run_turn error path; already emits MessageError)",
+    "hybrid-orchestrator/crates/orchestrator-core/src/events.rs (CoreEvent enum)",
+    "hybrid-orchestrator/crates/providers/src/registry.rs + builtins.rs (build_from_config vs build_all/build_registry)",
+    "hybrid-orchestrator/crates/providers/src/adapters/ollama.rs (Ollama chat path)",
+    ".kiro/specs/hybrid-orchestrator/architecture.md (Section 8.1 to update)"
+  ],
+  "directory_structure": "hybrid-orchestrator/crates/{orchestrator-core,tauri-app,providers,routing,persistence,secrets,domain,engine,mcp-client}. Frontend: hybrid-orchestrator/frontend/src/{app.tsx,features/chat,features/model-selector,state,ipc,types,styles}. Spec: .kiro/specs/hybrid-orchestrator/. Task state: .agents/tasks/ (repo root)."
+}

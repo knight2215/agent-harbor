@@ -64,17 +64,41 @@ export interface MessageBubbleProps {
 
 export function MessageBubble({ message }: MessageBubbleProps) {
   const streaming = message.status === "streaming";
+  const errored = message.status === "error";
+  // On error, a non-empty text message IS its own reason (the messageError
+  // reducer puts the display-safe reason into the text), so it is rendered once
+  // as a role="alert" paragraph. A NON-text errored message (tool calls / tool
+  // results / attachments) keeps its real content visible via ContentBody, and
+  // an ADDITIONAL role="alert" line carries the generic reason so the failure
+  // is announced without hiding the content. An empty text error shows the
+  // generic string. Exactly one role="alert" element is rendered.
+  const isTextError = errored && message.content.type === "text";
+  const errorText =
+    isTextError && message.content.type === "text" && message.content.text.length > 0
+      ? message.content.text
+      : "This message failed to generate.";
   return (
     <article className="message-bubble" data-role={message.role} data-status={message.status}>
       <header className="message-bubble__header">
         <span className="message-bubble__role">{message.role}</span>
         {message.route !== null && <RouteBadge route={message.route} />}
       </header>
-      <ContentBody content={message.content} />
-      {message.status === "error" && (
+      {isTextError ? (
+        // A text error: render the reason (or generic fallback) once, as the alert.
         <p className="message-bubble__error" role="alert">
-          This message failed to generate.
+          {errorText}
         </p>
+      ) : (
+        <>
+          {/* Non-error, or a non-text error: always show the real content ... */}
+          <ContentBody content={message.content} />
+          {/* ... and, for a non-text error, announce the failure alongside it. */}
+          {errored && (
+            <p className="message-bubble__error" role="alert">
+              This message failed to generate.
+            </p>
+          )}
+        </>
       )}
       {streaming && <StreamingIndicator />}
     </article>

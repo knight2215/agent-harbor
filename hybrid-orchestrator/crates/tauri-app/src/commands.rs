@@ -1679,8 +1679,32 @@ async fn send_message_inner(
         .await
         .map_err(|e| CommandError::internal(e.to_string()))?;
     let pricing = pricing_table_from_config(&app_config.pricing);
-    let registry = providers::build_registry(configs.iter(), state.secret_store.as_ref())
-        .map_err(|e| CommandError::internal(e.to_string()))?;
+    // Build the registry RESILIENTLY per-row, mirroring `list_available_models_inner`.
+    // This deliberately does NOT use the fail-fast `providers::build_registry`
+    // (which delegates to `ProviderRegistry::build_all` and short-circuits on the
+    // FIRST un-buildable row via `?`). A single misconfigured provider row (e.g. a
+    // cloud/embedded row whose factory rejects a missing secret) must NOT abort the
+    // whole send: that turned the send into a rejected CommandError the frontend
+    // swallowed, so a working local provider (Ollama qwen3) produced no reply AND no
+    // error. Instead we build per-row and, on a per-row build error, skip that row so
+    // the working provider still routes. run_turn still emits MessageError + persists
+    // an Error-status message for genuine provider/stream failures, so real errors
+    // remain visible.
+    let mut registry = providers::builtin_registry();
+    for cfg in &configs {
+        // On a per-row build error, isolate the failure by leaving the row
+        // un-built (skip it) so the other rows still build and route. The
+        // per-provider build error is surfaced to the user via the
+        // `list_available_models` diagnostics path, not routing.
+        let _ = registry.build_from_config(cfg, state.secret_store.as_ref());
+    }
+    // Bridge the shared embedded-engine seam exactly as `list_available_models_inner`
+    // does: replace the throwaway `EmbeddedEngine` a fresh registry would build for a
+    // persisted `ProviderKind::Embedded` row with an `EmbeddedProvider` wrapping the
+    // SHARED engine, so send routing observes the same models the picker enumerates.
+    registry.insert_instance(std::sync::Arc::new(
+        providers::EmbeddedProvider::from_shared(state.embedded_engine.clone()),
+    ));
     // Routing only needs the successful model candidates; enumeration errors are
     // surfaced through the `list_available_models` command's UI, not routing.
     let available = list_models(&registry, &configs, &pricing)
@@ -2892,6 +2916,48 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err.code, ErrorCode::InvalidArgument));
+    }
+
+    /// FEAT-001 regression: a single un-buildable provider row must NOT abort the
+    /// send. `send_message_inner` builds the registry RESILIENTLY per-row (like
+    /// `list_available_models_inner`) instead of the fail-fast
+    /// `providers::build_registry`, so a misconfigured row (here a GenericOpenAI
+    /// row with no base_url, which the factory rejects) is isolated and the
+    /// command still returns Ok and spawns the turn. Reverting the fix (restoring
+    /// the fail-fast `build_registry`) would make this send REJECT with an
+    /// Internal error, reproducing the reported silent no-op where a working local
+    /// model produced no reply AND no error.
+    #[tokio::test]
+    async fn send_message_inner_tolerates_unbuildable_provider_row() {
+        let state = test_state().await;
+
+        // A valid conversation to send into.
+        let conversation_id = seed_conversation(&state).await.to_string();
+
+        // Persist a provider row that CANNOT build: the GenericOpenAI factory
+        // requires an endpoint, so a row with no base_url fails `build_from_config`.
+        let cfg = ProviderConfig {
+            id: "broken-generic".to_string(),
+            kind: ProviderKind::GenericOpenAI,
+            base_url: None,
+            api_key_ref: None,
+            extra: serde_json::Value::Null,
+        };
+        ProviderRepo::new(state.session_manager.db())
+            .insert(&cfg)
+            .await
+            .unwrap();
+
+        // Despite the un-buildable row, the command isolates that row and returns
+        // Ok (the turn spawns). Generation itself no-ops without a live provider,
+        // which is fine; the assertion is only that the command no longer rejects
+        // because of one bad row.
+        assert!(
+            send_message_inner(&state, &conversation_id, "hello", None)
+                .await
+                .is_ok(),
+            "send_message must tolerate a single un-buildable provider row"
+        );
     }
 
     /// Empty provider id / secret are rejected by validation before the store.

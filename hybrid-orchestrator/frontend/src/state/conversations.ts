@@ -45,6 +45,13 @@ import type {
   RoutingMode,
 } from "../types";
 
+/**
+ * The lifecycle of the most recent {@link ConversationsState.sendMessage}. See
+ * {@link ConversationsState.sendState} for why `failed` matters (a rejected
+ * `send_message` emits no CoreEvents, so the send state is the only signal).
+ */
+export type SendState = "idle" | "sending" | "failed";
+
 /** A pending Ask-mode tool-permission request awaiting the user's decision. */
 export interface PendingPermission {
   requestId: string;
@@ -65,6 +72,22 @@ export interface ConversationsState {
   pendingOverride: ManualRoute | null;
   /** Queue of pending Ask-mode permission requests (Section 9.4). */
   pendingPermissions: PendingPermission[];
+  /**
+   * The lifecycle of the most recent {@link ConversationsState.sendMessage}
+   * attempt: `idle` before/after a settled send, `sending` while the
+   * `send_message` IPC call is in flight, `failed` when that call REJECTED. The
+   * `failed` state exists because a rejected `send_message` produces NO
+   * CoreEvents at all, so without it a failed send would be a silent no-op (the
+   * "said hello, got no reply and no error" bug).
+   */
+  sendState: SendState;
+  /**
+   * The display-safe message of the last send REJECTION (the thrown
+   * CommandError / Error), or `null` when the last send did not reject. Set when
+   * `sendState === "failed"` so the composer can show WHY the send failed.
+   * Never carries secret material.
+   */
+  sendError: string | null;
 
   // --- Loading actions (core authoritative) --------------------------------
   /** Load the conversation index from the core. */
@@ -173,6 +196,8 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
   messages: [],
   pendingOverride: null,
   pendingPermissions: [],
+  sendState: "idle",
+  sendError: null,
 
   loadConversations: async () => {
     const conversations = await listConversations();
@@ -181,7 +206,10 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
 
   openConversation: async (conversationId) => {
     const messages = await getMessages(conversationId);
-    set({ activeConversationId: conversationId, messages });
+    // Reset the global send status on a conversation switch so a stale
+    // "Failed to send" alert from a prior conversation never shows against the
+    // newly opened one (sendState/sendError are store-global, not per-row).
+    set({ activeConversationId: conversationId, messages, sendState: "idle", sendError: null });
   },
 
   resumeConversation: async (conversationId) => {
@@ -197,6 +225,9 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
           : [...state.conversations, conversation],
         activeConversationId: conversation.id,
         messages,
+        // Clear the global send status on the switch (see openConversation).
+        sendState: "idle",
+        sendError: null,
       };
     });
     return conversation;
@@ -224,12 +255,18 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
 
   deleteConversation: async (conversationId) => {
     await deleteConversationCmd(conversationId);
-    set((state) => ({
-      conversations: state.conversations.filter((c) => c.id !== conversationId),
-      activeConversationId:
-        state.activeConversationId === conversationId ? null : state.activeConversationId,
-      messages: state.activeConversationId === conversationId ? [] : state.messages,
-    }));
+    set((state) => {
+      const wasActive = state.activeConversationId === conversationId;
+      return {
+        conversations: state.conversations.filter((c) => c.id !== conversationId),
+        activeConversationId: wasActive ? null : state.activeConversationId,
+        messages: wasActive ? [] : state.messages,
+        // Clearing the active conversation is a switch too: drop any stale send
+        // status so it cannot surface against a different conversation.
+        sendState: wasActive ? "idle" : state.sendState,
+        sendError: wasActive ? null : state.sendError,
+      };
+    });
   },
 
   setConversationRoute: async (conversationId, route) => {
@@ -290,7 +327,19 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
     if (activeConversationId === null) return;
     // Consume-and-clear the transient override so it applies to one message.
     const override = get().consumePendingOverride();
-    await sendMessageCmd(activeConversationId, content, override);
+    // Mark the attempt in flight and clear any prior failure so a retry starts
+    // clean. Capture a REJECTION into `sendState`/`sendError` instead of letting
+    // it escape: the Composer fires this as `void sendMessage(...)`, so a thrown
+    // error would otherwise be swallowed and leave NO signal (the silent no-op
+    // bug). Mirror providers.ts load() error extraction. On success reset to
+    // idle; the assistant reply then arrives via streaming CoreEvents.
+    set({ sendState: "sending", sendError: null });
+    try {
+      await sendMessageCmd(activeConversationId, content, override);
+      set({ sendState: "idle", sendError: null });
+    } catch (e) {
+      set({ sendState: "failed", sendError: e instanceof Error ? e.message : String(e) });
+    }
   },
 
   stopGeneration: async () => {
@@ -352,11 +401,37 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
       case "messageError": {
         const { activeConversationId } = get();
         if (event.conversationId !== activeConversationId) return;
-        set((state) => ({
-          messages: state.messages.map((m) =>
-            m.id === event.messageId ? { ...m, status: "error" } : m,
-          ),
-        }));
+        set((state) => {
+          const index = state.messages.findIndex((m) => m.id === event.messageId);
+          // The errored message was never seeded (no placeholder): append a new
+          // assistant bubble carrying the reason so the failure is never
+          // dropped (a send that fails before any messageStarted arrives).
+          if (index === -1) {
+            const errored: Message = {
+              id: event.messageId,
+              conversationId: event.conversationId,
+              role: "assistant",
+              content: { type: "text", text: event.message },
+              createdAt: new Date().toISOString(),
+              route: null,
+              usage: null,
+              status: "error",
+            };
+            return { messages: [...state.messages, errored] };
+          }
+          const message = state.messages[index];
+          // Preserve a fully streamed reply that then errored on finalize (keep
+          // its text, just flag the error); only surface the reason text when
+          // the content is an empty streaming placeholder that would otherwise
+          // show nothing.
+          const isEmptyText = message.content.type === "text" && message.content.text.length === 0;
+          const content: MessageContent = isEmptyText
+            ? { type: "text", text: event.message }
+            : message.content;
+          const next = state.messages.slice();
+          next[index] = { ...message, content, status: "error" };
+          return { messages: next };
+        });
         return;
       }
       case "conversationCreated":

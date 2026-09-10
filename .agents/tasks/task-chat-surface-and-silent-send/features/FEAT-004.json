@@ -1,0 +1,22 @@
+{
+  "id": "FEAT-004",
+  "type": "docs",
+  "description": "Update the architecture spec Section 8.1 (Chat interface) to document the chat-surface behavior and the send-path visibility guarantee established by FEAT-001/002/003: (1) the composer's Enter-to-send / Shift+Enter-newline behavior with IME-composition guard; (2) the threaded, role-styled conversation view; (3) the diagnostics-first guarantee that a send can never be a silent no-op - a rejected send_message surfaces a visible 'Failed to send' affordance, and a pipeline failure surfaces a messageError bubble carrying the display-safe reason; and (4) the backend resilience fix that send_message builds the provider registry per-row (isolating an un-buildable provider row) exactly like list_available_models, so one bad provider row no longer aborts an otherwise routable turn. Keep the spec's existing voice and cross-references (Sections 6/7/9). This is documentation only.",
+  "status": "completed",
+  "steps": [
+    "Edit .kiro/specs/hybrid-orchestrator/architecture.md Section 8.1 (around line 678): add bullets for the composer key handling (Enter sends, Shift+Enter newline, IME-composition guarded), the threaded role-styled MessageList/MessageBubble presentation (var(--ah-*) tokens), and the 'no silent no-op' guarantee (rejected send affordance + messageError reason rendering).",
+    "In Section 8.1 (or the nearest send-path paragraph), note the backend parity: send_message builds the registry resiliently per-row like list_available_models, so a single un-buildable provider row is isolated instead of aborting the turn; run_turn still emits MessageError + persists an Error-status message on any turn failure so the reason is display-safe and visible.",
+    "Do not alter unrelated spec sections; keep wording consistent with the existing Section 8.2 diagnostics-first prose."
+  ],
+  "acceptance_criteria": [
+    "Section 8.1 documents Enter/Shift+Enter/IME composer behavior, the threaded role-styled view, and the send-path visibility guarantee.",
+    "Section 8.1 documents that send_message builds the registry per-row (isolating an un-buildable row) mirroring list_available_models.",
+    "No unrelated spec sections are changed."
+  ],
+  "verification": [
+    "Re-read the edited Section 8.1 and confirm it accurately describes the shipped Composer/MessageList behavior and the backend resilience + visibility guarantee.",
+    "Confirm no other spec section was modified (git diff of architecture.md scoped to 8.1)."
+  ],
+  "blocked_reason": null,
+  "findings": "Documentation-only change; no build/test required (docs-only per orchestrator brief and context.json). Added four bullets to .kiro/specs/hybrid-orchestrator/architecture.md Section 8.1 (Chat interface), inserted after the 'Events consumed' line and before the '### 8.2' heading: (1) composer key handling documenting Enter-to-send, Shift+Enter-newline, and the IME-composition guard (nativeEvent.isComposing / keyCode 229), noting Send button/form submit still funnel through the same handler and honor the Section 8.2 per-message override; (2) the threaded, role-styled MessageList/MessageBubble presentation using var(--ah-*) tokens (harbor-blue, light+dark), opposite-edge role alignment, distinct streaming bubble, auto-scroll, and that it is presentational over unchanged data model / CoreEvent flow (Section 7.4); (3) the 'no silent no-op' guarantee mirroring 8.2 diagnostics voice - rejected send_message (no CoreEvents) surfaces a role=alert 'Failed to send: <reason>' affordance from store sendState/sendError, and a pipeline failure surfaces a message_error bubble carrying the display-safe reason (previously dropped), with display-safe cross-ref to 9.1/9.2; (4) backend send parity - send_message builds the registry per-row via build_from_config like list_available_models_inner instead of fail-fast providers::build_registry, isolating an un-buildable row so it no longer aborts a routable turn (root cause of the silent no-op), and run_turn still emits MessageError + persists an Error-status message (Sections 6/7/9). Verified via git diff that the edit is scoped to Section 8.1 only (8 insertions, no other section touched); no em dashes used; markdown consistent with surrounding bullets."
+}
