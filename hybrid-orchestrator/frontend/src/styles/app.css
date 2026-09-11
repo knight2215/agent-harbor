@@ -360,6 +360,35 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* Reasoning ("thinking") trace (FEAT-003): a collapsible, visually-distinct
+ * section ABOVE the answer, tinted with the harbor accent so it reads as
+ * meta-commentary separate from the final answer. Uses accent-soft + an accent
+ * left border; both tokens flip per theme so it works in light and dark. */
+.message-bubble__reasoning {
+  border: 1px solid var(--ah-border);
+  border-left: 3px solid var(--ah-accent);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-accent-soft);
+  padding: var(--ah-space-2) var(--ah-space-3);
+}
+
+.message-bubble__reasoning-summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--ah-accent-strong);
+  user-select: none;
+}
+
+.message-bubble__reasoning-text {
+  margin: var(--ah-space-2) 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  color: var(--ah-text-muted);
+}
+
 .message-bubble__tool-calls,
 .message-bubble__tool-results,
 .message-bubble__attachments {

@@ -102,6 +102,14 @@ export interface ConversationsState {
    */
   webSearchEnabled: boolean;
   /**
+   * Whether the composer's "🧠 Thinking" toggle is ON (FEAT-003). OFF by
+   * default. When ON, streamed reasoning ("thinking") is rendered in a
+   * collapsible Reasoning section above the answer; when OFF, the reasoning
+   * section is hidden even if the model emitted reasoning. A real on/off flag,
+   * persisted like {@link webSearchEnabled}.
+   */
+  thinkingEnabled: boolean;
+  /**
    * Files attached to the NEXT chat turn (FEAT-003): text/repo file contents
    * and vision-gated images. Assembled into a bounded, delimited context block
    * that is prepended to the user message `content` on send, then CLEARED after
@@ -176,6 +184,10 @@ export interface ConversationsState {
   /** Set the composer's web-search on/off flag. */
   setWebSearchEnabled: (enabled: boolean) => void;
 
+  // --- Thinking toggle (FEAT-003) ------------------------------------------
+  /** Set the composer's thinking/reasoning-trace on/off flag. */
+  setThinkingEnabled: (enabled: boolean) => void;
+
   // --- Attachments / repository context (FEAT-003) -------------------------
   /** Add an attachment for the next turn (deduped by path + kind). */
   addAttachment: (attachment: Attachment) => void;
@@ -223,6 +235,26 @@ function appendDelta(messages: Message[], messageId: string, delta: string): Mes
 }
 
 /**
+ * Append a reasoning ("thinking") delta to the streaming message identified by
+ * `messageId` (FEAT-003). Accumulates onto the FRONTEND-ONLY `thinking` field,
+ * leaving `content` (the answer) untouched so the answer path is unaffected.
+ */
+function appendThinking(messages: Message[], messageId: string, delta: string): Message[] {
+  const index = messages.findIndex((m) => m.id === messageId);
+  if (index === -1) {
+    return messages;
+  }
+  const message = messages[index];
+  const next = messages.slice();
+  next[index] = {
+    ...message,
+    thinking: (message.thinking ?? "") + delta,
+    status: "streaming",
+  };
+  return next;
+}
+
+/**
  * Build a placeholder [`Message`] for a `messageStarted` event so the chat
  * surface shows the message before any delta arrives (architecture.md Section
  * 7.4). The user message lands `complete`; the assistant reply lands
@@ -258,6 +290,7 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
   messages: [],
   pendingOverride: null,
   webSearchEnabled: false,
+  thinkingEnabled: false,
   attachments: [],
   pendingPermissions: [],
   sendState: "idle",
@@ -406,6 +439,8 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
 
   setWebSearchEnabled: (enabled) => set({ webSearchEnabled: enabled }),
 
+  setThinkingEnabled: (enabled) => set({ thinkingEnabled: enabled }),
+
   addAttachment: (attachment) =>
     set((state) => {
       // Dedupe by path + kind so re-picking the same file is idempotent.
@@ -493,6 +528,14 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
         if (event.conversationId !== activeConversationId) return;
         set((state) => ({
           messages: appendDelta(state.messages, event.messageId, event.delta),
+        }));
+        return;
+      }
+      case "messageThinkingDelta": {
+        const { activeConversationId } = get();
+        if (event.conversationId !== activeConversationId) return;
+        set((state) => ({
+          messages: appendThinking(state.messages, event.messageId, event.delta),
         }));
         return;
       }

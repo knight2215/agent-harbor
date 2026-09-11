@@ -1,0 +1,32 @@
+{
+  "id": "FEAT-004",
+  "type": "feat",
+  "description": "ITEM 3: Chat table-stakes affordances on message bubbles - Copy, Regenerate, Edit-and-resend, and Stop-and-Continue. Copy-to-clipboard on each bubble (assistant + user). Regenerate re-runs the last assistant turn by re-sending the prior user message through the existing send path. Edit lets the user edit the last user message and re-send (regenerating from that point); deeper branching is deferred/noted. Continue: Stop already exists (stopGeneration, a validated no-op today per the composer comment - the pipeline has no cancel/resume seam); implement Continue as sending a follow-up 'continue' turn and NOTE the limitation rather than faking a resume. Display-safe, harbor-blue themed. Tests for copy (clipboard mocked), regenerate (invokes send with right content), edit-resend.",
+  "status": "pending",
+  "steps": [
+    "Study the existing send path: frontend/src/state/conversations.ts sendMessage(content) delegates to send_message IPC and the reply streams via CoreEvents; messages are held in the store's `messages` array with role user/assistant. Regenerate/edit reuse this send path - there is no dedicated regenerate command, so implement them client-side over sendMessage against the existing conversation.",
+    "COPY: In frontend/src/features/chat/MessageBubble.tsx add a copy-to-clipboard button on every bubble (user + assistant) with an explicit aria-label 'Copy message' and harbor-blue themed styling. Copy the message's text content (for text messages; for tool/attachment content copy a sensible textual representation via the existing formatPayload helper). Use navigator.clipboard.writeText. Handle the copied-confirmation state locally (e.g. brief 'Copied' label) without breaking the streaming/error rendering.",
+    "REGENERATE: Add a Regenerate affordance on the LAST assistant message (or expose it via the bubble). Add a store action `regenerateLastTurn()` in conversations.ts that finds the most recent user message preceding the last assistant message and re-invokes sendMessage with that user message's content (re-running the turn). Keep it simple and correct: it appends a new turn via the existing send path (do NOT attempt to mutate/delete the prior assistant row unless the pipeline supports it - note that this produces a fresh turn rather than replacing in place, if that is the chosen mechanism). Document the exact mechanism chosen in findings.",
+    "EDIT: Add an edit affordance on the last USER message. Add a store action `editAndResend(messageId, newContent)` (or scope to the last user message) that re-sends the edited content through sendMessage. High-value case is editing the last user message + resend; note deeper branching (editing an arbitrary earlier message and truncating the tree) as deferred. Provide a small inline edit UI in MessageBubble for user messages (textarea + save/cancel) gated so it only applies where supported; harbor-blue themed with explicit aria-labels.",
+    "CONTINUE: In the composer or on the last assistant bubble, add a 'Continue' affordance. Implement it as sending a follow-up turn with content like 'continue' (or 'Please continue.') through sendMessage, since the Phase-4 pipeline has NO resume seam (the composer already documents stop_generation as a validated no-op). Add a visible note/comment that this is a follow-up turn, not a true resume, matching the honest-affordance convention already used for Stop. Do NOT fake a resume.",
+    "Wire affordances into the UI where they belong: per-message buttons in MessageBubble (copy on all; edit on last user; regenerate on last assistant) and/or a small action row. Ensure they are display-safe and do not appear while a message is streaming where that would be incoherent (e.g. no regenerate mid-stream). Reuse existing streaming/disabled patterns from the composer.",
+    "STYLES: add harbor-blue themed styles for the new bubble action buttons and inline edit UI in frontend/src/styles/app.css using existing tokens (light + dark).",
+    "TESTS (frontend, all invoke mocked with well-formed shapes): (a) Copy - mock navigator.clipboard.writeText and assert clicking Copy calls it with the message text. (b) Regenerate - assert regenerateLastTurn invokes send_message with the correct prior user content. (c) Edit-resend - assert editing the last user message and saving invokes send_message with the edited content. (d) Continue - assert it invokes send_message with the follow-up content. Ensure every test mounting chat/App mocks send_message, get_messages, list_available_models {models,errors}, provider_diagnostics, create_conversation, list/create_persona, and the web-search/network/attach/repo commands with well-formed shapes, and initializes any new store fields in resets.",
+    "Run the offline self-audit: whole-frontend `NODE_OPTIONS= npx prettier --check .`; static review for eslint no-unused-vars / tsc-strict / aria-labels; per-crate cargo fmt --check only if any Rust was touched (this feature is expected to be frontend-only). Record verified-live vs CI-only in findings."
+  ],
+  "acceptance_criteria": [
+    "Every message bubble (user + assistant) has a Copy button (aria-label 'Copy message') that writes the message text to the clipboard.",
+    "A Regenerate affordance on the last assistant turn re-invokes the send path with the prior user message content; the mechanism is documented in findings.",
+    "An Edit affordance on the last user message lets the user edit and re-send via the send path; deeper branching is explicitly noted as deferred.",
+    "A Continue affordance sends a follow-up 'continue' turn and is documented as a follow-up (not a true resume), with the pipeline's no-resume-seam limitation noted.",
+    "Tests cover copy (clipboard mocked), regenerate (send invoked with right content), edit-resend, and continue; all pass under vitest.",
+    "New buttons/inputs are harbor-blue themed with explicit aria-labels and do not regress streaming/error rendering."
+  ],
+  "verification": [
+    "From hybrid-orchestrator/frontend run `npm test` and confirm the copy/regenerate/edit/continue tests pass and no existing chat tests regress (or record CI-only).",
+    "Run `NODE_OPTIONS= npx prettier --check .` clean over the whole frontend dir (or CI-only).",
+    "Static-confirm affordances are display-safe and coherent with streaming state (no regenerate mid-stream, etc.)."
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

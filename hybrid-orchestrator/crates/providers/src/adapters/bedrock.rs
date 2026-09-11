@@ -553,6 +553,7 @@ fn normalize_stream_chunk(model: &str, payload: &Value) -> Option<ChatDelta> {
                 (None, None) => None,
                 (t, f) => Some(ChatDelta {
                     content: t.filter(|s| !s.is_empty()).map(|s| s.to_string()),
+                    thinking: None,
                     tool_calls: vec![],
                     finish_reason: f,
                 }),

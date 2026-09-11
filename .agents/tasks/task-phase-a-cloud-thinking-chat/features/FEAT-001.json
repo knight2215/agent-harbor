@@ -1,0 +1,31 @@
+{
+  "id": "FEAT-001",
+  "type": "docs",
+  "description": "Record the competitive-analysis roadmap in the spec BEFORE any code. Add a 'Competitive analysis & roadmap' section to .kiro/specs/hybrid-orchestrator/tasks.md capturing the 5 phases (A-E) benchmarked against Ollama (engine/API surface), Open WebUI (mature chat platform), and LM Studio Bionic (agentic projects/sessions), plus the two standing user preferences. This is a docs-only commit on the Phase-A branch and must be the FIRST commit after branching. Independent of the code features except that it establishes the branch.",
+  "status": "completed",
+  "steps": [
+    "From /projects/agent-harbor on `main` (clean, v0.8.1), create ONE Phase-A feature branch, e.g. `git checkout -b feat/phase-a-cloud-thinking-chat`.",
+    "In .kiro/specs/hybrid-orchestrator/tasks.md, add a new top-level '## Competitive analysis & roadmap' section (place it after the existing phase list; match the file's existing markdown heading/prose style and its no-em-dash convention).",
+    "State the benchmark framing: Ollama = engine/API surface; Open WebUI = mature chat platform; LM Studio Bionic = agentic projects/sessions.",
+    "Capture Phase A (THIS branch): cloud-key persistence fix; thinking-trace chat-bar ON/OFF toggle; chat table-stakes (regenerate/edit/copy/continue).",
+    "Capture Phase B: tool-calling agent loop (multi-turn + parallel, streaming) audit/completion; structured/JSON output mode surfaced.",
+    "Capture Phase C: knowledge base / local RAG (document ingest + vector store + retrieval into context).",
+    "Capture Phase D: multi-model side-by-side compare; conversation folders/tags/pins; prompt/slash-command templates.",
+    "Capture Phase E: projects with parallel sessions; code/terminal harness with approvals + plan mode.",
+    "Record the two standing user preferences: (1) keep it native Tauri (not a browser app); (2) the embedded engine should eventually be a folder-scan model library (Phase C/E-adjacent, NOT Phase A).",
+    "Commit as a docs commit on the branch (e.g. `docs: record competitive-analysis roadmap (Phases A-E)`). Do NOT push/tag/PR."
+  ],
+  "acceptance_criteria": [
+    "A new '## Competitive analysis & roadmap' section exists in .kiro/specs/hybrid-orchestrator/tasks.md listing all five phases A-E with the described contents.",
+    "The benchmark targets (Ollama / Open WebUI / LM Studio Bionic) and the two standing user preferences are all recorded.",
+    "The addition contains no em dashes and matches the surrounding markdown style.",
+    "The change is committed on a single new Phase-A branch created from main; nothing is pushed."
+  ],
+  "verification": [
+    "Run `git branch --show-current` and confirm it is the new Phase-A branch (not main).",
+    "Run `git log --oneline -1` and confirm the docs roadmap commit is present.",
+    "Read the new section in tasks.md and confirm all five phases + preferences are captured."
+  ],
+  "blocked_reason": null,
+  "findings": "Created branch feat/phase-a-cloud-thinking-chat from main (clean, v0.8.1). Added a new '## Competitive analysis & roadmap' section to .kiro/specs/hybrid-orchestrator/tasks.md, placed AFTER the last build phase (Phase 13) and BEFORE the '## Cross-cutting' section, matching the file's existing heading/prose style. The section records the benchmark framing (Ollama = engine/API surface; Open WebUI = mature chat platform; LM Studio Bionic = agentic projects/sessions), all five phases A-E with their described contents (A: cloud-key persistence fix, thinking-trace chat-bar ON/OFF toggle, chat table-stakes regenerate/edit/copy/continue; B: tool-calling agent loop audit + structured/JSON output; C: knowledge base / local RAG; D: multi-model compare + folders/tags/pins + prompt/slash templates; E: projects with parallel sessions + code/terminal harness with approvals + plan mode), and the two standing user preferences (keep it native Tauri; embedded engine eventually a folder-scan model library, Phase C/E-adjacent NOT Phase A). Docs-only commit 65d1518 'docs: record competitive-analysis roadmap (Phases A-E)' on the branch; NOT pushed/tagged/PRed. Verified no em dashes in added lines (a single pre-existing em dash at line 316 in Phase 9 was left untouched). No build/test run: docs-only change, and sandbox is INTEGRATIONS_ONLY (no crates.io/npm). The .agents/ task-state dir is intentionally left untracked. The user instruction that the think trace be an ON/OFF toggle in the chat bar matches Phase A as recorded."
+}

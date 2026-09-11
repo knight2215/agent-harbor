@@ -46,6 +46,8 @@ describe("conversations store", () => {
       activeConversationId: null,
       messages: [],
       pendingOverride: null,
+      webSearchEnabled: false,
+      thinkingEnabled: false,
       attachments: [],
       pendingPermissions: [],
       sendState: "idle",
@@ -119,6 +121,44 @@ describe("conversations store", () => {
     const message = useConversationsStore.getState().messages[0];
     expect(message.content).toEqual({ type: "text", text: "Hello" });
     expect(message.status).toBe("streaming");
+  });
+
+  it("messageThinkingDelta accumulates reasoning without touching the answer content", () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      messages: [streamingMessage("m-1", "c-1")],
+    });
+    const apply = useConversationsStore.getState().applyCoreEvent;
+    // Interleave reasoning and answer deltas: reasoning accumulates onto the
+    // FRONTEND-ONLY `thinking` field; the answer accumulates onto content.
+    apply({
+      type: "messageThinkingDelta",
+      conversationId: "c-1",
+      messageId: "m-1",
+      delta: "Think",
+    });
+    apply({ type: "messageDelta", conversationId: "c-1", messageId: "m-1", delta: "Ans" });
+    apply({ type: "messageThinkingDelta", conversationId: "c-1", messageId: "m-1", delta: "ing" });
+    const message = useConversationsStore.getState().messages[0];
+    // The answer content carries ONLY the content deltas (reasoning never leaks
+    // into the answer).
+    expect(message.content).toEqual({ type: "text", text: "Ans" });
+    expect(message.thinking).toBe("Thinking");
+    expect(message.status).toBe("streaming");
+  });
+
+  it("messageThinkingDelta for a non-active conversation is ignored", () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      messages: [streamingMessage("m-1", "c-1")],
+    });
+    useConversationsStore.getState().applyCoreEvent({
+      type: "messageThinkingDelta",
+      conversationId: "c-OTHER",
+      messageId: "m-1",
+      delta: "should be dropped",
+    });
+    expect(useConversationsStore.getState().messages[0].thinking).toBeUndefined();
   });
 
   it("messageComplete finalizes route, usage, and status", () => {

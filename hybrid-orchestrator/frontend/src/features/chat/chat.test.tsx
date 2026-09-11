@@ -73,6 +73,7 @@ function resetStores() {
     messages: [],
     pendingOverride: null,
     webSearchEnabled: false,
+    thinkingEnabled: false,
     attachments: [],
     pendingPermissions: [],
     sendState: "idle",
@@ -439,6 +440,67 @@ describe("chat surface", () => {
     // consumes it); aria-pressed reflects the new state.
     expect(useConversationsStore.getState().webSearchEnabled).toBe(true);
     expect(toggle).toHaveAttribute("aria-pressed", "true");
+  });
+
+  // --- FEAT-003 thinking toggle + reasoning render -------------------------
+
+  it("Composer exposes the Thinking toggle, OFF by default (aria-pressed)", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<Composer />);
+    const toggle = screen.getByRole("button", { name: "Toggle reasoning trace" });
+    // OFF by default.
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(toggle).toHaveAttribute("title", "Thinking: off");
+    expect(useConversationsStore.getState().thinkingEnabled).toBe(false);
+  });
+
+  it("Composer thinking toggle flips (and persists) the shared store flag", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1", thinkingEnabled: false });
+    render(<Composer />);
+    const toggle = screen.getByRole("button", { name: "Toggle reasoning trace" });
+    fireEvent.click(toggle);
+    // The real on/off flag in the conversations store is flipped; aria-pressed +
+    // title reflect the new state.
+    expect(useConversationsStore.getState().thinkingEnabled).toBe(true);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(toggle).toHaveAttribute("title", "Thinking: on");
+  });
+
+  it("MessageBubble renders a collapsible Reasoning section only when the toggle is ON and thinking is present", () => {
+    // With the toggle ON and thinking text, a collapsible Reasoning section
+    // renders above the answer.
+    useConversationsStore.setState({ thinkingEnabled: true });
+    const withThinking: Message = {
+      ...textMessage("m-think", "The answer is 42."),
+      thinking: "First I recall the meaning of life.",
+    };
+    const { rerender } = render(<MessageBubble message={withThinking} />);
+    expect(screen.getByTestId("message-reasoning")).toBeInTheDocument();
+    expect(screen.getByText("First I recall the meaning of life.")).toBeInTheDocument();
+    expect(screen.getByText("The answer is 42.")).toBeInTheDocument();
+
+    // With no thinking, no Reasoning section renders and nothing crashes.
+    rerender(<MessageBubble message={textMessage("m-plain", "Just the answer.")} />);
+    expect(screen.queryByTestId("message-reasoning")).toBeNull();
+    expect(screen.getByText("Just the answer.")).toBeInTheDocument();
+
+    // An empty thinking string is treated as absent (no empty section).
+    rerender(<MessageBubble message={{ ...textMessage("m-empty", "Answer."), thinking: "" }} />);
+    expect(screen.queryByTestId("message-reasoning")).toBeNull();
+  });
+
+  it("MessageBubble hides the Reasoning section when the toggle is OFF even if thinking is present", () => {
+    // The toggle is OFF by default (resetStores sets thinkingEnabled: false), so
+    // reasoning is NOT shown even when the message carries thinking text.
+    const withThinking: Message = {
+      ...textMessage("m-off", "Answer only."),
+      thinking: "hidden reasoning",
+    };
+    render(<MessageBubble message={withThinking} />);
+    expect(screen.queryByTestId("message-reasoning")).toBeNull();
+    expect(screen.queryByText("hidden reasoning")).toBeNull();
+    // The answer is still shown.
+    expect(screen.getByText("Answer only.")).toBeInTheDocument();
   });
 
   // --- FEAT-004 web search: inject-on-success / notice-and-still-send -------

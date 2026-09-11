@@ -360,6 +360,7 @@ fn parse_stream_event(data: &str) -> Result<Option<ChatDelta>, ProviderError> {
             content_block: StreamContentBlock::ToolUse { id, name },
         } => Ok(Some(ChatDelta {
             content: None,
+            thinking: None,
             tool_calls: vec![ToolCallDelta {
                 index,
                 id: Some(id),
@@ -380,6 +381,7 @@ fn parse_stream_event(data: &str) -> Result<Option<ChatDelta>, ProviderError> {
             delta: StreamDelta::InputJsonDelta { partial_json },
         } => Ok(Some(ChatDelta {
             content: None,
+            thinking: None,
             tool_calls: vec![ToolCallDelta {
                 index,
                 id: None,

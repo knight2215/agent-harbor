@@ -215,6 +215,7 @@ impl ChatProvider for EmbeddedProvider {
             .map(|t| {
                 Ok(ChatDelta {
                     content: Some(t),
+                    thinking: None,
                     tool_calls: Vec::new(),
                     finish_reason: None,
                 })
@@ -222,6 +223,7 @@ impl ChatProvider for EmbeddedProvider {
             .collect();
         deltas.push(Ok(ChatDelta {
             content: None,
+            thinking: None,
             tool_calls: Vec::new(),
             finish_reason: Some(finish),
         }));

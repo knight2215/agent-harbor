@@ -5,6 +5,7 @@
 // message's RouteMetadata, and a StreamingIndicator while it is streaming.
 
 import type { Message, MessageContent } from "../../types";
+import { useConversationsStore } from "../../state/conversations";
 import { RouteBadge } from "./RouteBadge";
 import { StreamingIndicator } from "./StreamingIndicator";
 
@@ -65,6 +66,14 @@ export interface MessageBubbleProps {
 export function MessageBubble({ message }: MessageBubbleProps) {
   const streaming = message.status === "streaming";
   const errored = message.status === "error";
+  // Reasoning ("thinking") trace (FEAT-003): rendered ABOVE the answer as a
+  // collapsible, visually-distinct section, but ONLY when the "🧠 Thinking"
+  // toggle is ON (OFF by default) AND the model actually emitted reasoning.
+  // When the toggle is off or the reasoning is absent/empty, nothing renders
+  // (no empty section, no crash) and the content path is unchanged.
+  const thinkingEnabled = useConversationsStore((s) => s.thinkingEnabled);
+  const thinking = message.thinking ?? "";
+  const hasThinking = thinkingEnabled && thinking.length > 0;
   // On error, a non-empty text message IS its own reason (the messageError
   // reducer puts the display-safe reason into the text), so it is rendered once
   // as a role="alert" paragraph. A NON-text errored message (tool calls / tool
@@ -83,6 +92,12 @@ export function MessageBubble({ message }: MessageBubbleProps) {
         <span className="message-bubble__role">{message.role}</span>
         {message.route !== null && <RouteBadge route={message.route} />}
       </header>
+      {hasThinking && (
+        <details className="message-bubble__reasoning" data-testid="message-reasoning">
+          <summary className="message-bubble__reasoning-summary">🧠 Reasoning</summary>
+          <p className="message-bubble__reasoning-text">{thinking}</p>
+        </details>
+      )}
       {isTextError ? (
         // A text error: render the reason (or generic fallback) once, as the alert.
         <p className="message-bubble__error" role="alert">

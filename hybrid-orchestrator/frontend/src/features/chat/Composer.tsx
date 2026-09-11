@@ -99,6 +99,11 @@ export function Composer() {
   // store so FEAT-004 can consume it when assembling the send context.
   const webSearchEnabled = useConversationsStore((s) => s.webSearchEnabled);
   const setWebSearchEnabled = useConversationsStore((s) => s.setWebSearchEnabled);
+  // The thinking toggle flips a REAL on/off flag owned by the conversations
+  // store (FEAT-003), OFF by default. When ON, streamed reasoning is rendered in
+  // a collapsible Reasoning section above the answer.
+  const thinkingEnabled = useConversationsStore((s) => s.thinkingEnabled);
+  const setThinkingEnabled = useConversationsStore((s) => s.setThinkingEnabled);
   // One-turn attachments (text / repo files / vision-gated images), held in the
   // store so they clear after a successful send (FEAT-003).
   const attachments = useConversationsStore((s) => s.attachments);
@@ -376,6 +381,17 @@ export function Composer() {
               onClick={() => setWebSearchEnabled(!webSearchEnabled)}
             >
               <span aria-hidden="true">🌐</span>
+            </button>
+            <button
+              type="button"
+              className="composer__icon"
+              aria-label="Toggle reasoning trace"
+              aria-pressed={thinkingEnabled}
+              title={thinkingEnabled ? "Thinking: on" : "Thinking: off"}
+              data-active={thinkingEnabled}
+              onClick={() => setThinkingEnabled(!thinkingEnabled)}
+            >
+              <span aria-hidden="true">🧠</span>
             </button>
             <InlineControls activeConversationId={activeConversationId} loadModels={loadModels} />
           </div>

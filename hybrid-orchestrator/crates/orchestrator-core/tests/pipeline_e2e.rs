@@ -476,3 +476,138 @@ async fn routing_error_emits_message_error_and_persists_error_status() {
     assert_eq!(assistant.status, MessageStatus::Error);
     assert!(assistant.route.is_none());
 }
+
+/// A streaming, tool-incapable provider that replays a fixed sequence of
+/// [`ChatDelta`]s (used to exercise the thinking/reasoning stream path).
+struct StreamingProvider {
+    deltas: Mutex<Option<Vec<ChatDelta>>>,
+}
+
+impl StreamingProvider {
+    fn new(deltas: Vec<ChatDelta>) -> Self {
+        StreamingProvider {
+            deltas: Mutex::new(Some(deltas)),
+        }
+    }
+}
+
+#[async_trait]
+impl ChatProvider for StreamingProvider {
+    fn id(&self) -> &str {
+        PROVIDER_ID
+    }
+
+    fn capabilities(&self, _model: &str) -> Capabilities {
+        Capabilities {
+            streaming: true,
+            ..Capabilities::default()
+        }
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(vec![ModelInfo::new(MODEL)])
+    }
+
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        Ok(ChatResponse {
+            choices: vec![],
+            usage: None,
+            model: Some(MODEL.to_string()),
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        _req: ChatRequest,
+    ) -> Result<BoxStream<'static, Result<ChatDelta, ProviderError>>, ProviderError> {
+        let deltas = self.deltas.lock().unwrap().take().unwrap_or_default();
+        Ok(Box::pin(stream::iter(deltas.into_iter().map(Ok))))
+    }
+}
+
+#[tokio::test]
+async fn streamed_thinking_emits_thinking_delta_and_keeps_answer_only() {
+    // A thinking model streams reasoning on `ChatDelta.thinking` and the answer
+    // on `ChatDelta.content`. The pipeline must emit a MessageThinkingDelta for
+    // the reasoning (LIVE only) and a MessageDelta for the answer, and persist
+    // the assistant message with ONLY the answer text (reasoning is never stored).
+    let session_manager = SessionManager::new(Db::open_in_memory().await.unwrap());
+    let conversation = session_manager
+        .create_conversation(ConversationInit::default())
+        .await
+        .unwrap();
+
+    let (tx, mut rx): (UnboundedSender<CoreEvent>, UnboundedReceiver<CoreEvent>) =
+        unbounded_channel();
+
+    let mut registry = ProviderRegistry::new();
+    registry.insert_instance(Arc::new(StreamingProvider::new(vec![
+        ChatDelta {
+            thinking: Some("Let me reason about this.".to_string()),
+            ..ChatDelta::default()
+        },
+        ChatDelta {
+            content: Some("The answer is 42.".to_string()),
+            ..ChatDelta::default()
+        },
+        ChatDelta {
+            finish_reason: Some(FinishReason::Stop),
+            ..ChatDelta::default()
+        },
+    ])));
+    let policies = routing::PolicyRegistry::new();
+    let gate = PermissionGate::new(tx.clone(), PermissionRegistry::new());
+
+    let ctx = TurnContext {
+        session_manager: &session_manager,
+        policies: &policies,
+        providers: &registry,
+        servers: vec![],
+        gate,
+        events: tx.clone(),
+        available: available_models(),
+        local_provider_ids: [PROVIDER_ID.to_string()].into_iter().collect(),
+    };
+
+    let message = run_turn(
+        &ctx,
+        conversation.id,
+        "what is the answer?".to_string(),
+        None,
+    )
+    .await
+    .expect("pipeline turn succeeds");
+
+    // The persisted assistant message carries ONLY the answer, never the
+    // reasoning: history stays answer-only.
+    match &message.content {
+        MessageContent::Text { text } => assert_eq!(text, "The answer is 42."),
+        other => panic!("unexpected content: {other:?}"),
+    }
+
+    let events = drain(&mut rx);
+    // The reasoning was streamed as a MessageThinkingDelta (live event).
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            CoreEvent::MessageThinkingDelta { delta, .. } if delta == "Let me reason about this."
+        )),
+        "thinking delta emitted: {events:?}"
+    );
+    // The answer was streamed as a normal MessageDelta (content path intact).
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            CoreEvent::MessageDelta { delta, .. } if delta == "The answer is 42."
+        )),
+        "answer delta emitted: {events:?}"
+    );
+    // No thinking text leaked into a content MessageDelta.
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            CoreEvent::MessageDelta { delta, .. } if delta.contains("reason")
+        )),
+        "reasoning must not appear on a content delta: {events:?}"
+    );
+}

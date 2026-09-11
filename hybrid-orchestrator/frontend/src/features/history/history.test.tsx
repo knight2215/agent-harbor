@@ -43,6 +43,8 @@ function resetStore() {
     activeConversationId: null,
     messages: [],
     pendingOverride: null,
+    webSearchEnabled: false,
+    thinkingEnabled: false,
     pendingPermissions: [],
   });
 }
