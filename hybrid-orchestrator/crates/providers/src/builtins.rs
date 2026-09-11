@@ -189,8 +189,9 @@ pub const DEFAULT_QUALITY: f64 = 0.5;
 /// substrings), so they generalize across providers rather than hardcoding one
 /// vendor:
 ///   - `pro` / `opus` / `-4` / `4o` / `ultra` families read as top tier (~0.9);
-///   - `flash-lite` / `mini` / `nano` / `haiku` / `small` / an anchored `8b`
-///     (`:8b` or `-8b`) read as a lean tier (~0.4);
+///   - `flash-lite` / an anchored `mini` (`-mini` or `:mini`) / `nano` /
+///     `haiku` / `small` / an anchored `8b` (`:8b` or `-8b`) read as a lean
+///     tier (~0.4);
 ///   - `flash` / `sonnet` / `turbo` / `medium` read as a mid tier (~0.6);
 ///   - local kinds (LM Studio, Ollama, GenericOpenAI loopback, the embedded
 ///     engine) default to a middle tier (~0.5) because a locally-run model's
@@ -202,12 +203,15 @@ pub const DEFAULT_QUALITY: f64 = 0.5;
 pub fn quality_for(kind: ProviderKind, model: &str) -> f64 {
     let id = model.to_ascii_lowercase();
     // Lean / small families first (most specific), so a `flash-lite` is not
-    // captured by the broader `flash` rule below. The `8b` size marker is
-    // anchored to `:8b` / `-8b` so it matches ids like `qwen3:8b` or
-    // `llama-3.1-8b` without a false positive on an unrelated id such as
-    // `model-128b`.
+    // captured by the broader `flash` rule below. Size/variant markers that are
+    // whole words in an id (`mini`, `8b`) are anchored to their `:`/`-`
+    // separators so they match real ids like `gpt-4o-mini`, `qwen3:8b` or
+    // `llama-3.1-8b` without a false positive when the same letters merely
+    // appear inside a vendor word (e.g. the `mini` inside `gemini`, or the `8b`
+    // inside a `model-128b` id).
     if id.contains("flash-lite")
-        || id.contains("mini")
+        || id.contains("-mini")
+        || id.contains(":mini")
         || id.contains("nano")
         || id.contains("haiku")
         || id.contains("-small")
