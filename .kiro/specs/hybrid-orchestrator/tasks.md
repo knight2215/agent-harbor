@@ -466,6 +466,53 @@ The picker and the Diagnostics panel show the REAL per-row provider build error 
 
 ---
 
+## Competitive analysis & roadmap
+
+Status: Draft v1. This section records the forward-looking roadmap that frames the post-v0.8.1 work into five phases (A through E). The phases here are a product-level roadmap layered on top of the build phases above; they are benchmarked against three reference points so each phase has a concrete bar to clear.
+
+### Benchmark framing
+
+We measure the app against three references, each standing in for a different part of the surface area:
+
+- **Ollama** is the benchmark for the engine and API surface: local model serving, a clean model API, and zero-friction local inference.
+- **Open WebUI** is the benchmark for a mature chat platform: the table-stakes chat experience, knowledge bases, and the breadth of day-to-day chat features users expect.
+- **LM Studio Bionic** is the benchmark for agentic projects and sessions: projects with parallel sessions and a code/terminal harness with approvals and a plan mode.
+
+### Phase A (this branch): cloud keys, thinking trace, and chat table-stakes
+
+- Fix cloud-key persistence so a saved cloud provider key is stored as a real `ProviderConfig` and survives restarts, resolving through the keychain-backed `SecretStore` by reference.
+- Add a thinking-trace toggle to the chat bar as an explicit ON/OFF control, so a user can turn the model's thinking trace on or off per their preference from the composer.
+- Close chat table-stakes: regenerate, edit, copy, and continue on messages, matching the baseline chat experience a mature platform provides.
+
+### Phase B: agentic tool-calling and structured output
+
+- Audit and complete the tool-calling agent loop so multi-turn and parallel tool calls stream correctly end to end through the provider adapters, the MCP client, and the pipeline.
+- Surface a structured / JSON output mode so callers can request and receive schema-shaped responses where the provider supports it.
+
+### Phase C: knowledge base and local RAG
+
+- Build a knowledge base with local retrieval-augmented generation: document ingest, a vector store, and retrieval that feeds relevant context into the conversation.
+
+### Phase D: comparison, organization, and templates
+
+- Multi-model side-by-side compare so a prompt can be run against several models at once and their answers compared.
+- Conversation organization: folders, tags, and pins for browsing and grouping conversations.
+- Prompt and slash-command templates for reusable, parameterized prompts.
+
+### Phase E: projects, parallel sessions, and a code harness
+
+- Projects that hold parallel sessions, so related work is grouped and multiple sessions can run side by side.
+- A code and terminal harness with approvals and a plan mode, so agentic execution is gated by explicit user approval and a reviewable plan.
+
+### Standing user preferences
+
+Two preferences hold across every phase and constrain how the roadmap is built:
+
+1. Keep it native Tauri. The app stays a native Tauri desktop application and is not rewritten as a browser app; the desktop shell, the keychain-backed `SecretStore`, and the in-process embedded engine are core constraints.
+2. The embedded engine should eventually become a folder-scan model library, where the user points the app at a folder and it scans that folder directly for local models. This is Phase C / E-adjacent and is explicitly NOT part of Phase A.
+
+---
+
 ## Cross-cutting: testing strategy and deferred items
 
 ### Testing strategy
