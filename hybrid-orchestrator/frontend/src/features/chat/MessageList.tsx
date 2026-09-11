@@ -71,10 +71,21 @@ export function MessageList() {
     return <div className="message-list message-list--empty">No messages yet.</div>;
   }
 
+  // Index of the last user / assistant message so the bubble can show the
+  // Edit (last user) and Regenerate + Continue (last assistant) affordances
+  // only where they belong (FEAT-004).
+  const lastUserIndex = items.map((m) => m.role).lastIndexOf("user");
+  const lastAssistantIndex = items.map((m) => m.role).lastIndexOf("assistant");
+
   return (
     <div className="message-list" role="log" aria-label="Conversation messages">
-      {items.map((message) => (
-        <MessageBubble key={message.id} message={message} />
+      {items.map((message, index) => (
+        <MessageBubble
+          key={message.id}
+          message={message}
+          isLastUser={index === lastUserIndex}
+          isLastAssistant={index === lastAssistantIndex}
+        />
       ))}
       <div ref={endRef} className="message-list__end" aria-hidden="true" />
     </div>

@@ -718,4 +718,110 @@ describe("conversations store", () => {
     });
     expect(out).toBe("# Alpha\n");
   });
+
+  // --- FEAT-004 regenerate / edit-resend / continue ------------------------
+
+  it("regenerateLastTurn re-sends the prior user message content as a fresh turn", async () => {
+    // The prior user turn ("what is 2+2?") precedes the last assistant reply;
+    // regenerate re-invokes send_message with that user content (a fresh turn -
+    // it does not mutate the prior assistant row).
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      messages: [
+        {
+          id: "u-1",
+          conversationId: "c-1",
+          role: "user",
+          content: { type: "text", text: "what is 2+2?" },
+          createdAt: "2024-01-01T00:00:00Z",
+          route: null,
+          usage: null,
+          status: "complete",
+        },
+        { ...streamingMessage("a-1", "c-1"), status: "complete" },
+      ] satisfies Message[],
+    });
+    await useConversationsStore.getState().regenerateLastTurn();
+    expect(invoke).toHaveBeenCalledWith("send_message", {
+      conversationId: "c-1",
+      content: "what is 2+2?",
+      overrideRoute: null,
+    });
+  });
+
+  it("regenerateLastTurn is a no-op when there is no preceding user message", async () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      messages: [{ ...streamingMessage("a-1", "c-1"), status: "complete" }],
+    });
+    await useConversationsStore.getState().regenerateLastTurn();
+    expect(invoke).not.toHaveBeenCalledWith("send_message", expect.anything());
+  });
+
+  it("editAndResend re-sends the edited content of the last user message", async () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      messages: [
+        {
+          id: "u-1",
+          conversationId: "c-1",
+          role: "user",
+          content: { type: "text", text: "what is 2+2?" },
+          createdAt: "2024-01-01T00:00:00Z",
+          route: null,
+          usage: null,
+          status: "complete",
+        },
+        { ...streamingMessage("a-1", "c-1"), status: "complete" },
+      ] satisfies Message[],
+    });
+    await useConversationsStore.getState().editAndResend("u-1", "what is 3+3?");
+    expect(invoke).toHaveBeenCalledWith("send_message", {
+      conversationId: "c-1",
+      content: "what is 3+3?",
+      overrideRoute: null,
+    });
+  });
+
+  it("editAndResend is a no-op when the id is not the last user message (branching deferred)", async () => {
+    useConversationsStore.setState({
+      activeConversationId: "c-1",
+      messages: [
+        {
+          id: "u-1",
+          conversationId: "c-1",
+          role: "user",
+          content: { type: "text", text: "first" },
+          createdAt: "2024-01-01T00:00:00Z",
+          route: null,
+          usage: null,
+          status: "complete",
+        },
+        {
+          id: "u-2",
+          conversationId: "c-1",
+          role: "user",
+          content: { type: "text", text: "second" },
+          createdAt: "2024-01-01T00:00:00Z",
+          route: null,
+          usage: null,
+          status: "complete",
+        },
+      ] satisfies Message[],
+    });
+    // Editing an EARLIER user message is deferred: only the last user message is
+    // editable in this scope, so this is a no-op.
+    await useConversationsStore.getState().editAndResend("u-1", "rewritten first");
+    expect(invoke).not.toHaveBeenCalledWith("send_message", expect.anything());
+  });
+
+  it("continueTurn sends a follow-up 'continue' turn (not a resume)", async () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    await useConversationsStore.getState().continueTurn();
+    expect(invoke).toHaveBeenCalledWith("send_message", {
+      conversationId: "c-1",
+      content: "Please continue.",
+      overrideRoute: null,
+    });
+  });
 });

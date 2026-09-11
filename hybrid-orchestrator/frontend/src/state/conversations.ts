@@ -206,6 +206,44 @@ export interface ConversationsState {
   sendMessage: (content: string) => Promise<void>;
   /** Request cancellation of the active conversation's in-flight generation. */
   stopGeneration: () => Promise<void>;
+  /**
+   * Regenerate the last assistant turn (FEAT-004). Finds the most recent USER
+   * message preceding the last assistant message and re-invokes
+   * {@link sendMessage} with that user message's content, re-running the turn.
+   *
+   * MECHANISM: this APPENDS A FRESH TURN via the existing send path; it does
+   * NOT mutate or delete the prior assistant row. There is no dedicated
+   * regenerate command and the Phase-4 pipeline offers no in-place replace
+   * seam, so an honest fresh turn is the correct affordance (a faked in-place
+   * replace would misrepresent what the core actually did). A no-op when there
+   * is no active conversation or no preceding user message.
+   */
+  regenerateLastTurn: () => Promise<void>;
+  /**
+   * Edit the last USER message and re-send (FEAT-004). Re-invokes
+   * {@link sendMessage} with `newContent` so the edited prompt runs as a new
+   * turn through the existing send path.
+   *
+   * SCOPE: the high-value case is editing the LAST user message + resend, which
+   * is all this implements. `messageId` identifies which user message is being
+   * edited; if it is not the last user message the call is a no-op. Deeper
+   * branching (editing an arbitrary earlier message and truncating the
+   * conversation tree from that point) is DEFERRED - the pipeline has no
+   * truncate/branch seam, so like {@link regenerateLastTurn} this appends a
+   * fresh turn rather than rewriting history.
+   */
+  editAndResend: (messageId: string, newContent: string) => Promise<void>;
+  /**
+   * Continue the last assistant turn (FEAT-004). Sends a follow-up turn with a
+   * short "continue" prompt through {@link sendMessage}.
+   *
+   * HONESTY NOTE: this is a FOLLOW-UP TURN, not a true resume. The Phase-4
+   * pipeline has NO cancel/resume seam (the same reason {@link stopGeneration}
+   * is a validated no-op), so there is no partial generation to resume; asking
+   * the model to continue in a fresh turn is the honest affordance. A no-op
+   * when there is no active conversation.
+   */
+  continueTurn: () => Promise<void>;
 
   // --- Permission queue ----------------------------------------------------
   /**
@@ -491,6 +529,47 @@ export const useConversationsStore = create<ConversationsState>((set, get) => ({
     const { activeConversationId } = get();
     if (activeConversationId === null) return;
     await stopGenerationCmd(activeConversationId);
+  },
+
+  regenerateLastTurn: async () => {
+    const { activeConversationId, messages } = get();
+    if (activeConversationId === null) return;
+    // Find the last assistant message, then the most recent USER message that
+    // precedes it - that user turn is what we re-run. Reuse its text content
+    // through the ordinary send path so the turn is re-generated as a fresh
+    // turn (see the action doc: this appends, it does not replace in place).
+    const lastAssistantIndex = messages.map((m) => m.role).lastIndexOf("assistant");
+    if (lastAssistantIndex === -1) return;
+    let priorUser: Message | undefined;
+    for (let i = lastAssistantIndex - 1; i >= 0; i -= 1) {
+      if (messages[i].role === "user") {
+        priorUser = messages[i];
+        break;
+      }
+    }
+    if (priorUser === undefined || priorUser.content.type !== "text") return;
+    await get().sendMessage(priorUser.content.text);
+  },
+
+  editAndResend: async (messageId, newContent) => {
+    const { activeConversationId, messages } = get();
+    if (activeConversationId === null) return;
+    // Only the LAST user message is editable in this scope (deeper branching is
+    // deferred - see the action doc). Ignore an edit targeting anything else so
+    // the affordance cannot silently rewrite an arbitrary earlier turn.
+    const lastUserIndex = messages.map((m) => m.role).lastIndexOf("user");
+    if (lastUserIndex === -1 || messages[lastUserIndex].id !== messageId) return;
+    const content = newContent.trim();
+    if (content.length === 0) return;
+    await get().sendMessage(content);
+  },
+
+  continueTurn: async () => {
+    const { activeConversationId } = get();
+    if (activeConversationId === null) return;
+    // Honest follow-up, NOT a resume: the pipeline has no cancel/resume seam, so
+    // ask the model to continue in a fresh turn via the ordinary send path.
+    await get().sendMessage("Please continue.");
   },
 
   resolvePermission: async (requestId, decision) => {

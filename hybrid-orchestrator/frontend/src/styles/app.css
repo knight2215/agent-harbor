@@ -451,6 +451,78 @@ body {
   overflow-wrap: anywhere;
 }
 
+/* --- Per-message affordances (FEAT-004) ----------------------------------- */
+
+/* A compact action row below each bubble hosting Copy (all bubbles), Edit (last
+ * user), and Regenerate + Continue (last assistant). Uses the shared harbor
+ * tokens so it flips per theme; laid out to the trailing edge to read as
+ * secondary controls under the content. */
+.message-bubble__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ah-space-2);
+  margin-top: var(--ah-space-1);
+}
+
+/* On the accent-filled user bubble, align the actions with the trailing edge. */
+.message-bubble[data-role="user"] .message-bubble__actions {
+  justify-content: flex-end;
+}
+
+.message-bubble__action {
+  padding: var(--ah-space-1) var(--ah-space-2);
+  border: 1px solid var(--ah-border);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
+}
+
+.message-bubble__action:hover {
+  background: var(--ah-accent-soft);
+  color: var(--ah-accent-strong);
+  border-color: var(--ah-accent);
+}
+
+/* On the accent-filled user bubble the buttons sit on the accent background, so
+ * give them a contrast-legible surface. */
+.message-bubble[data-role="user"] .message-bubble__action {
+  background: var(--ah-accent-contrast);
+  border-color: transparent;
+}
+
+/* Inline edit UI for the last user message: a textarea plus save/cancel row. */
+.message-bubble__edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ah-space-2);
+}
+
+.message-bubble__edit-input {
+  width: 100%;
+  min-height: 64px;
+  padding: var(--ah-space-2) var(--ah-space-3);
+  border: 1px solid var(--ah-accent);
+  border-radius: var(--ah-radius-sm);
+  background: var(--ah-surface);
+  color: var(--ah-text);
+  font: inherit;
+  resize: vertical;
+}
+
+.message-bubble__edit-actions {
+  display: flex;
+  gap: var(--ah-space-2);
+}
+
 /* --- Streaming indicator -------------------------------------------------- */
 
 .streaming-indicator {
