@@ -44,8 +44,12 @@ function model(providerId: string, id: string, local: boolean): AvailableModel {
  * A Gemini cloud row mirroring the NEW backend reality (FEAT-002): REAL
  * per-model capabilities (not the old uniform streaming/tools/vision/json
  * stamp), a nonzero bundled-default cloud price, and a per-model quality tier.
- * A pro-tier model is multimodal + high quality; a lean flash-lite tier is
- * text-only + lower quality, so the two rows render DIFFERENT capability labels.
+ * The backend derives vision from `is_multimodal_family` (crates/providers
+ * adapters/gemini.rs): every Gemini 1.5 / 2.x / 3.x `pro` or `flash` id is
+ * multimodal, so a `flash-lite` id reports vision TRUE just like a `pro` id.
+ * The two rows therefore differ on the OTHER real per-model axes the backend
+ * emits (context window from `inputTokenLimit`, and the quality tier), which is
+ * enough to prove the picker renders per-model (non-uniform) capability labels.
  */
 function geminiModel(
   id: string,
@@ -159,11 +163,14 @@ describe("model selector", () => {
             maxContext: 1000000,
             quality: 0.9,
           }),
-          // Lean flash-lite tier: text-only, no vision, lower quality.
+          // Lean flash-lite tier: still multimodal per the backend
+          // is_multimodal_family rule (a gemini-2.x flash id), but a smaller
+          // context window and a lower quality tier, so its rendered labels
+          // differ from the pro row on those real axes.
           geminiModel("gemini-2.5-flash-lite", {
-            vision: false,
-            tools: false,
-            jsonMode: false,
+            vision: true,
+            tools: true,
+            jsonMode: true,
             maxContext: 32000,
             quality: 0.4,
           }),
@@ -178,22 +185,24 @@ describe("model selector", () => {
     const local = screen.getByRole("region", { name: "Local" });
 
     // The nonzero-priced Gemini pro model is under Cloud with the REAL price
-    // hint and its REAL (multimodal) capability labels.
+    // hint and its REAL (multimodal) capability labels, including its large
+    // context window.
     const pro = within(cloud).getByRole("button", { name: /gemini-cloud \/ gemini-2\.5-pro/ });
     expect(pro).toHaveTextContent("$1.25/$5 per Mtok");
     expect(pro).toHaveTextContent("vision");
     expect(pro).toHaveTextContent("json");
     expect(pro).toHaveTextContent("1000000 ctx");
 
-    // The lean flash-lite model is also Cloud but has DIFFERENT (narrower)
-    // capabilities: no vision, no json label. This proves capabilities are
-    // per-model, not a uniform stamp.
+    // The lean flash-lite model is also Cloud and, per the backend
+    // is_multimodal_family rule, also multimodal (vision + json), but it renders
+    // a DIFFERENT, smaller context window than the pro row. This proves the
+    // context label is per-model, not a uniform stamp.
     const lite = within(cloud).getByRole("button", {
       name: /gemini-cloud \/ gemini-2\.5-flash-lite/,
     });
     expect(lite).toHaveTextContent("$1.25/$5 per Mtok");
-    expect(lite).not.toHaveTextContent("vision");
-    expect(lite).not.toHaveTextContent("json");
+    expect(lite).toHaveTextContent("32000 ctx");
+    expect(lite).not.toHaveTextContent("1000000 ctx");
 
     // The genuinely-local (zero-price) model stays under Local and reads 'free'.
     const localBtn = within(local).getByRole("button", { name: /ollama-local \/ qwen3:8b/ });

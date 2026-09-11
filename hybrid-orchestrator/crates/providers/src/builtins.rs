@@ -189,8 +189,8 @@ pub const DEFAULT_QUALITY: f64 = 0.5;
 /// substrings), so they generalize across providers rather than hardcoding one
 /// vendor:
 ///   - `pro` / `opus` / `-4` / `4o` / `ultra` families read as top tier (~0.9);
-///   - `flash-lite` / `mini` / `nano` / `haiku` / `small` read as a lean tier
-///     (~0.4);
+///   - `flash-lite` / `mini` / `nano` / `haiku` / `small` / an anchored `8b`
+///     (`:8b` or `-8b`) read as a lean tier (~0.4);
 ///   - `flash` / `sonnet` / `turbo` / `medium` read as a mid tier (~0.6);
 ///   - local kinds (LM Studio, Ollama, GenericOpenAI loopback, the embedded
 ///     engine) default to a middle tier (~0.5) because a locally-run model's
@@ -202,13 +202,17 @@ pub const DEFAULT_QUALITY: f64 = 0.5;
 pub fn quality_for(kind: ProviderKind, model: &str) -> f64 {
     let id = model.to_ascii_lowercase();
     // Lean / small families first (most specific), so a `flash-lite` is not
-    // captured by the broader `flash` rule below.
+    // captured by the broader `flash` rule below. The `8b` size marker is
+    // anchored to `:8b` / `-8b` so it matches ids like `qwen3:8b` or
+    // `llama-3.1-8b` without a false positive on an unrelated id such as
+    // `model-128b`.
     if id.contains("flash-lite")
         || id.contains("mini")
         || id.contains("nano")
         || id.contains("haiku")
         || id.contains("-small")
-        || id.contains("8b")
+        || id.contains(":8b")
+        || id.contains("-8b")
     {
         return 0.4;
     }
@@ -652,13 +656,19 @@ mod tests {
         assert_eq!(quality_for(ProviderKind::OpenAI, "gpt-4o"), 0.9);
         assert_eq!(quality_for(ProviderKind::Anthropic, "claude-3-opus"), 0.9);
         // Lean tier is checked BEFORE the broader flash rule so flash-lite and
-        // mini/nano/8b read lean, not mid.
+        // mini/nano read lean, not mid.
         assert_eq!(
             quality_for(ProviderKind::Gemini, "gemini-2.5-flash-lite"),
             0.4
         );
         assert_eq!(quality_for(ProviderKind::OpenAI, "gpt-4o-mini"), 0.4);
+        // The `8b` size marker is anchored to `:8b` / `-8b`, so the real local
+        // ids the app enumerates read lean...
         assert_eq!(quality_for(ProviderKind::Ollama, "qwen3:8b"), 0.4);
+        assert_eq!(quality_for(ProviderKind::Ollama, "llama-3.1-8b"), 0.4);
+        // ...but an unrelated id that merely CONTAINS `8b` as a bare substring
+        // (e.g. a 128b model) is NOT captured by the lean rule.
+        assert_eq!(quality_for(ProviderKind::Ollama, "model-128b"), 0.5);
         // Mid tier: flash / sonnet / turbo.
         assert_eq!(quality_for(ProviderKind::Gemini, "gemini-2.5-flash"), 0.6);
         assert_eq!(
