@@ -50,9 +50,7 @@ function contentToText(content: MessageContent): string {
         .map((result) => `${result.isError ? "error" : "ok"}: ${formatPayload(result.content)}`)
         .join("\n");
     case "attachments":
-      return content.attachments
-        .map((attachment) => attachment.name ?? attachment.uri)
-        .join("\n");
+      return content.attachments.map((attachment) => attachment.name ?? attachment.uri).join("\n");
   }
 }
 
