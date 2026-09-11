@@ -1,0 +1,7 @@
+{
+  "task_id": "task-real-auto-routing",
+  "task_description": "Make Auto routing real on the v0.9.0 build. Feed the (already sound) routing engine real signal and filter the candidate pool so Auto meaningfully determines what model runs. Fixes the user-observed problems: ~48 Gemini models all falsely labeled 'streaming · tools · vision · json · free' (including non-chat models like embeddings/TTS/image/video/transcription), and routing to a stale model (gemini-2.5-pro) that 404s for new users. Deliverables: (A) filter enumeration to chat-capable models via Gemini's supportedGenerationMethods (+ name backstop); (B) real per-model capability detection replacing uniform stamping; (C) real cost (seed bundled defaults so cloud is not 'free', local stays zero) + a per-model quality tier feeding AutoDefaultPolicy so Auto/Prefer-Quality/Prefer-Local differentiate models; (D) 404/unavailable resilience (rank toward current models + verbatim error, optional fallback hop); (E) picker display shows the real caps/cost and no non-chat models. Update the spec. Provider-general, not Gemini-only. Do NOT push/tag/PR.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003"],
+  "blocked_reason": null
+}

@@ -1,0 +1,30 @@
+{
+  "id": "FEAT-003",
+  "type": "feat",
+  "description": "Make the model picker show the REAL capabilities and cost (no more uniform 'streaming · tools · vision · json · free' on every model), keep non-chat models out of the chat list, mirror the new/changed DTO fields into the TS types + every vitest mock/fixture, and update the architecture spec. Depends on FEAT-002 (the backend now emits real caps/price/quality and a filtered model list). This is the frontend + docs closeout.",
+  "status": "pending",
+  "steps": [
+    "In frontend/src/types/index.ts, mirror any DTO change FEAT-002 made: if `AvailableModel` gained a `quality` field, add `quality: number` (camelCase, matching the Rust serde key) to the `AvailableModel` interface with a doc comment; if `ModelInfo`/`Capabilities` gained fields that cross IPC, mirror those too. Keep every field camelCase to match #[serde(rename_all = \"camelCase\")]. Do NOT invent fields the backend does not emit - confirm against FEAT-002's findings.",
+    "In frontend/src/features/model-selector/ProviderModelPicker.tsx: the display functions `capabilityLabels` and `priceHint` already read from `model.capabilities`/`model.price`, so once the backend sends real values they render truthfully - VERIFY they need no change beyond correctness. The chat list already excludes non-chat models because FEAT-002 filters them out of enumeration; confirm no frontend filter needs relaxing. Optionally surface the quality tier as a small hint label if a `quality` field was added (keep it compact, e.g. a tier word), but do NOT over-scope.",
+    "Because `isLocal` defaults to the zero-price heuristic (isFreeModel), verify that FEAT-002's nonzero cloud pricing now correctly routes cloud models into the 'Cloud' group and keeps genuinely-local (zero-price) models in 'Local'. Add/adjust a picker test asserting a nonzero-priced Gemini model renders under Cloud with a real '$in/$out per Mtok' price hint and its real capability labels (not the uniform set), and a zero-price local model renders under Local as 'free'.",
+    "AUDIT EVERY vitest test that mocks `invoke` for `list_available_models` (and any command returning AvailableModel/Capabilities/TokenPrice shapes): update the mock return fixtures to the NEW shape - real per-model capabilities (varied, not all-true), nonzero cloud price, zero local price, and the new `quality` field if added. Search frontend/src for mocks of list_available_models, get_route_explanation, and any AvailableModel fixtures. Every test mounting <App/>/chat/Settings must mock invoke for ALL commands with well-formed shapes; a missing/legacy field will break tsc or the assertions.",
+    "Ensure assertions after state changes use `await findBy*`/`waitFor` (existing pattern in the suite); do not introduce sync getBy after an async store update.",
+    "Update .kiro/specs/hybrid-orchestrator/architecture.md Section 6 (Routing Policy Engine): document (a) that enumeration filters the chat candidate pool to chat-capable models via the provider's real capability signal (Gemini's supportedGenerationMethods, with a name-family backstop) so non-chat model families are excluded from routing/picker; (b) the real per-model capability detection replacing uniform stamping; (c) the cost model - bundled representative defaults per ProviderKind seeded then overlaid by user-editable AppConfig rates, local = zero/'free' and cloud = nonzero-by-default; (d) the per-model quality tier feeding quality-for-complexity so Auto/Prefer-Quality differentiate models; (e) the 404/unavailable handling (ranking toward current models + verbatim error surface, and the fallback hop if implemented). Keep the prose consistent with Section 6.2's existing pricing paragraph.",
+    "From hybrid-orchestrator/frontend run the REAL prettier over the WHOLE dir: `NODE_OPTIONS= npx prettier --check .` and fix any formatting so it is clean (do not eyeball). If node_modules is present, also run `npm run test`, `npm run lint`, and `npm run build` (tsc) and make them green; if offline prevents npm, hand-audit tsc-visible type sync and record it.",
+    "Prettier-check the edited Markdown spec too (it is under the repo, but the whole-frontend prettier only covers frontend/; verify the spec edit does not break any repo-wide format gate - if CI prettier covers .md, keep it tidy)."
+  ],
+  "acceptance_criteria": [
+    "frontend/src/types/index.ts mirrors every FEAT-002 DTO change (e.g. AvailableModel.quality) in camelCase, with no invented fields.",
+    "The picker renders REAL per-model capability labels and a truthful price hint (nonzero '$in/$out per Mtok' for cloud, 'free' for local), proven by an updated picker test; non-chat models never appear in the chat list.",
+    "Every vitest mock/fixture returning AvailableModel/Capabilities/TokenPrice is updated to the new shape (varied caps, nonzero cloud price, zero local price, quality field if added) and the suite is consistent.",
+    "architecture.md Section 6 documents the enumeration filtering, real capability detection, cost + quality model, and 404 handling.",
+    "`NODE_OPTIONS= npx prettier --check .` is clean over the whole frontend dir; if runnable, `npm run test`/`npm run lint`/`npm run build` are green."
+  ],
+  "verification": [
+    "From hybrid-orchestrator/frontend run `NODE_OPTIONS= npx prettier --check .` and confirm exit 0.",
+    "If node_modules is available, run `npm run test` and `npm run build` (tsc) and confirm the picker test + full suite pass and types compile; otherwise document the hand-audit of type/fixture sync in findings.",
+    "Re-read the architecture.md Section 6 edits and confirm they describe the filtering, capability detection, cost, quality, and 404 behavior actually implemented in FEAT-002."
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}
