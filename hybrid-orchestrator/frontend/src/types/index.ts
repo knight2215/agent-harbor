@@ -440,6 +440,22 @@ export interface ProviderDiagnosticsReport {
 }
 
 /**
+ * The display-safe result of the keychain self-test surfaced by the
+ * `test_key_storage` command. Mirrors Rust `commands::KeyStorageTestView`
+ * (`#[serde(rename_all = "camelCase")]`).
+ *
+ * `ok` reports whether a sentinel round-tripped through the OS credential store
+ * (store -> resolve -> delete); `detail` is a human-readable explanation. This
+ * is the affordance that lets a real build (notably Windows) confirm the
+ * v0.8.1 keychain bug is fixed. DISPLAY-SAFE: it never carries secret material
+ * (the round-tripped sentinel is not returned).
+ */
+export interface KeyStorageTestResult {
+  ok: boolean;
+  detail: string;
+}
+
+/**
  * A display-safe view of one imported embedded (local `.gguf`) model (Strategy
  * B / FEAT-002). Mirrors Rust `commands::EmbeddedModelView`. Carries only the
  * model id and its on-disk path; never secret material (the embedded engine

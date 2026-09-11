@@ -3836,6 +3836,52 @@ pub fn app_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
 
+/// Display-safe result of a keychain self-test. Carries only a boolean health
+/// flag and a human-readable detail string; it NEVER contains secret material
+/// (the sentinel round-tripped by [`SecretStore::self_test`] is not returned).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeyStorageTestView {
+    /// Whether the OS keychain round-trip (store -> resolve -> delete) succeeded.
+    pub ok: bool,
+    /// Display-safe explanation of the outcome. On success it confirms the
+    /// keychain persisted the sentinel; on failure it carries the backend's
+    /// error text (which is display-safe and never a secret).
+    pub detail: String,
+}
+
+/// Round-trip a sentinel through the OS keychain and report whether the backing
+/// credential store actually persists secrets.
+///
+/// This is the affordance that lets a user's real build (notably Windows, which
+/// the sandbox cannot exercise) definitively confirm the v0.8.1 keychain bug is
+/// fixed: if the platform backend is the mock/no-op store (or otherwise broken),
+/// the round-trip mismatches and `ok` is `false`. It calls
+/// [`SecretStore::self_test`], so no secret material crosses the IPC boundary -
+/// only `{ ok, detail }`. Tauri maps the result to camelCase over the wire.
+#[tauri::command]
+pub fn test_key_storage(state: tauri::State<'_, AppState>) -> KeyStorageTestView {
+    test_key_storage_inner(&state)
+}
+
+/// The body of [`test_key_storage`], factored out so it can be driven directly
+/// in tests without a live Tauri `State`. Any [`SecretError`] is folded into a
+/// display-safe `{ ok: false, detail }` view rather than propagated, so the
+/// Diagnostics panel always renders a result instead of surfacing a raw IPC
+/// error.
+fn test_key_storage_inner(state: &AppState) -> KeyStorageTestView {
+    match state.secret_store.self_test() {
+        Ok(()) => KeyStorageTestView {
+            ok: true,
+            detail: "Keychain round-trip succeeded: secrets persist on this system.".to_string(),
+        },
+        Err(e) => KeyStorageTestView {
+            ok: false,
+            detail: format!("Keychain self-test failed: {e}"),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5263,6 +5309,110 @@ mod tests {
         assert!(!json.contains("AIza-test-key-do-not-leak"));
         assert!(!json.to_lowercase().contains("apikey"));
         assert!(!json.to_lowercase().contains("secretref"));
+    }
+
+    /// A [`SecretStore`] whose `store` always fails, used to prove the
+    /// config-write paths abort BEFORE persisting a `ProviderConfig` row when
+    /// the keychain rejects the write. This models the failure mode the fixed
+    /// keyring backend now surfaces (a broken/mock store that errors instead of
+    /// silently accepting the write).
+    #[derive(Debug, Default)]
+    struct FailingSecretStore;
+
+    impl secrets::SecretStore for FailingSecretStore {
+        fn store(&self, _handle: &str, _secret: &str) -> Result<SecretRef, SecretError> {
+            Err(SecretError::Backend(
+                "simulated keychain write failure".to_string(),
+            ))
+        }
+
+        fn resolve(&self, secret_ref: &SecretRef) -> Result<String, SecretError> {
+            Err(SecretError::NotFound(secret_ref.handle().to_string()))
+        }
+
+        fn delete(&self, _secret_ref: &SecretRef) -> Result<(), SecretError> {
+            Ok(())
+        }
+    }
+
+    async fn test_state_with_failing_store() -> AppState {
+        let db = Db::open_in_memory().await.unwrap();
+        let (state, _rx) = AppState::new(SessionManager::new(db), Arc::new(FailingSecretStore));
+        state
+    }
+
+    /// A `store()` failure in `set_cloud_provider_inner` must surface as a
+    /// `CommandError` AND leave NO `ProviderConfig` row behind. A row pointing
+    /// at a secret that was never stored is exactly the 'no secret found for
+    /// handle' symptom, so the store must succeed before the config is written.
+    #[tokio::test]
+    async fn set_cloud_provider_inner_store_failure_persists_no_row() {
+        let state = test_state_with_failing_store().await;
+
+        let err =
+            set_cloud_provider_inner(&state, ProviderKind::Gemini, "AIza-would-be-stored", None)
+                .await
+                .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::Internal));
+
+        // No ProviderConfig row must have been written for the cloud id.
+        let row = ProviderRepo::new(state.session_manager.db())
+            .get("gemini-cloud")
+            .await
+            .unwrap();
+        assert!(
+            row.is_none(),
+            "a store() failure must abort before any ProviderConfig row is persisted"
+        );
+    }
+
+    /// The same invariant for the local-runtime path: a keyed
+    /// `set_local_runtime_inner` whose `store()` fails must error and persist
+    /// no `ProviderConfig` row.
+    #[tokio::test]
+    async fn set_local_runtime_inner_store_failure_persists_no_row() {
+        let state = test_state_with_failing_store().await;
+
+        let err = set_local_runtime_inner(
+            &state,
+            ProviderKind::GenericOpenAI,
+            "http://127.0.0.1:1234/v1",
+            Some("sk-would-be-stored"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err.code, ErrorCode::Internal));
+
+        let row = ProviderRepo::new(state.session_manager.db())
+            .get("generic-openai-local")
+            .await
+            .unwrap();
+        assert!(
+            row.is_none(),
+            "a store() failure must abort before any ProviderConfig row is persisted"
+        );
+    }
+
+    /// `test_key_storage_inner` reports `ok: true` with a display-safe detail
+    /// over a working (InMemory) store, and never leaks the sentinel.
+    #[tokio::test]
+    async fn test_key_storage_inner_ok_on_working_store() {
+        let state = test_state().await;
+        let view = test_key_storage_inner(&state);
+        assert!(view.ok);
+        let json = serde_json::to_string(&view).unwrap();
+        assert!(json.contains("\"ok\":true"));
+        assert!(!json.contains("harbor-selftest-sentinel"));
+    }
+
+    /// `test_key_storage_inner` folds a broken keychain into `ok: false` with a
+    /// display-safe detail rather than propagating an IPC error.
+    #[tokio::test]
+    async fn test_key_storage_inner_reports_failure() {
+        let state = test_state_with_failing_store().await;
+        let view = test_key_storage_inner(&state);
+        assert!(!view.ok);
+        assert!(view.detail.contains("failed"));
     }
 
     /// The embedded-model DTOs are display-safe camelCase and carry no secret

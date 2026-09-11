@@ -12,10 +12,17 @@
 // error messages, never secret material (Section 9.1 / 9.2). It also catches an
 // IPC throw from `provider_diagnostics` itself and shows `failed: <error>`
 // rather than leaving a blank panel.
+//
+// It also hosts the keychain self-test (FEAT-002): a "Test key storage" button
+// round-trips a sentinel through the OS keychain via `test_key_storage` and
+// renders the display-safe `{ ok, detail }` result. This is the affordance that
+// lets a real build (notably Windows, which the sandbox cannot exercise) confirm
+// the v0.8.1 keychain-persistence bug is fixed. It likewise catches an IPC throw
+// so the panel never blanks, and never surfaces secret material.
 
 import { useEffect, useState } from "react";
-import { providerDiagnostics } from "../../ipc/commands";
-import type { ProviderDiagnosticsReport } from "../../types";
+import { providerDiagnostics, testKeyStorage } from "../../ipc/commands";
+import type { KeyStorageTestResult, ProviderDiagnosticsReport } from "../../types";
 
 export function DiagnosticsSection() {
   // `report` is the last successful readout; `loading` guards the summary line
@@ -24,6 +31,13 @@ export function DiagnosticsSection() {
   const [report, setReport] = useState<ProviderDiagnosticsReport | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Keychain self-test state. `keyStorage` is the last `{ ok, detail }` result;
+  // `keyStorageLoading` guards the button while the round-trip is in flight;
+  // `keyStorageError` captures an IPC throw so the panel never renders blank.
+  const [keyStorage, setKeyStorage] = useState<KeyStorageTestResult | null>(null);
+  const [keyStorageLoading, setKeyStorageLoading] = useState(false);
+  const [keyStorageError, setKeyStorageError] = useState<string | null>(null);
 
   const run = () => {
     setLoading(true);
@@ -38,6 +52,33 @@ export function DiagnosticsSection() {
         setLoading(false);
       });
   };
+
+  // Round-trip a sentinel through the OS keychain so a real build (notably
+  // Windows) can confirm secrets actually persist. Catches an IPC throw so the
+  // panel never blanks.
+  const runKeyStorageTest = () => {
+    setKeyStorageLoading(true);
+    setKeyStorageError(null);
+    testKeyStorage()
+      .then((next) => {
+        setKeyStorage(next);
+        setKeyStorageLoading(false);
+      })
+      .catch((err: unknown) => {
+        setKeyStorageError(err instanceof Error ? err.message : String(err));
+        setKeyStorageLoading(false);
+      });
+  };
+
+  // The display-safe key-storage status line, guarding every read of the
+  // possibly-null result behind the loading/error/loaded state.
+  const keyStorageSummary = keyStorageLoading
+    ? "testing…"
+    : keyStorageError !== null
+      ? `failed: ${keyStorageError}`
+      : keyStorage !== null
+        ? `${keyStorage.ok ? "ok" : "failed"}: ${keyStorage.detail}`
+        : "not tested yet";
 
   // Run once on mount so the section is populated as soon as it is opened.
   useEffect(() => {
@@ -74,6 +115,26 @@ export function DiagnosticsSection() {
       >
         Run diagnostics
       </button>
+      <div className="settings-form">
+        <p className="settings__section-desc">
+          Confirm this system&apos;s OS keychain (macOS Keychain, Windows Credential Manager, Linux
+          Secret Service) actually persists secrets by round-tripping a sentinel value. Use this if
+          a saved provider key later reports &quot;no secret found&quot;. It never shows keys or
+          secrets.
+        </p>
+        <p className="settings__section-desc" data-testid="key-storage-summary">
+          {keyStorageSummary}
+        </p>
+        <button
+          type="button"
+          onClick={runKeyStorageTest}
+          disabled={keyStorageLoading}
+          aria-label="Test key storage"
+          data-testid="key-storage-test"
+        >
+          Test key storage
+        </button>
+      </div>
       {providers.length > 0 && (
         <ul
           className="settings__list"

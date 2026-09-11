@@ -99,6 +99,39 @@ pub trait SecretStore {
     fn rotate(&self, secret_ref: &SecretRef, new_secret: &str) -> Result<SecretRef, SecretError> {
         self.store(secret_ref.handle(), new_secret)
     }
+
+    /// Round-trip a sentinel value through the store to verify the backing
+    /// keychain actually persists and returns secrets.
+    ///
+    /// This is the health check that exposes the v0.8.1 keychain bug from the
+    /// user's own build: a mock/no-op credential store (or any broken backend)
+    /// accepts a `store()` yet fails or mismatches on the following `resolve()`.
+    /// The check stores a fixed sentinel under a dedicated temp handle,
+    /// resolves it, asserts round-trip equality, then deletes the temp entry.
+    ///
+    /// It returns `Result<(), SecretError>` and NEVER returns the sentinel
+    /// across its signature, so it does not add a plaintext accessor and the
+    /// "resolve is the only plaintext seam" invariant is preserved. On any
+    /// mismatch it returns a display-safe [`SecretError`] that carries no
+    /// secret material.
+    fn self_test(&self) -> Result<(), SecretError> {
+        const SELF_TEST_HANDLE: &str = "harbor-selftest";
+        const SELF_TEST_SENTINEL: &str = "harbor-selftest-sentinel";
+
+        let secret_ref = self.store(SELF_TEST_HANDLE, SELF_TEST_SENTINEL)?;
+        let resolved = self.resolve(&secret_ref);
+        // Always attempt to clean up the temp entry, even if the resolve
+        // mismatched, so a self-test never leaves a lingering sentinel.
+        let _ = self.delete(&secret_ref);
+        match resolved {
+            Ok(value) if value == SELF_TEST_SENTINEL => Ok(()),
+            Ok(_) => Err(SecretError::Backend(
+                "keychain self-test round-trip mismatch: stored and resolved values differ"
+                    .to_string(),
+            )),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// Production [`SecretStore`] backed by the OS keychain via the `keyring` crate
@@ -305,6 +338,78 @@ mod tests {
         // `delete` returns `Result<(), _>`, carrying nothing on success (the
         // `()` payload type itself is the proof that no material is returned).
         store.delete(&secret_ref).unwrap();
+    }
+
+    /// `self_test()` round-trips a sentinel through a working store and
+    /// returns Ok, leaving no lingering temp entry behind.
+    #[test]
+    fn self_test_ok_on_working_store() {
+        let store = InMemorySecretStore::new();
+        assert!(store.self_test().is_ok());
+        // The temp sentinel must be cleaned up after a successful self-test.
+        match store.resolve(&SecretRef::new("harbor-selftest")) {
+            Err(SecretError::NotFound(_)) => {}
+            other => panic!("self-test must delete its temp entry, got {other:?}"),
+        }
+    }
+
+    /// A store whose `resolve` cannot return what `store` accepted is exactly
+    /// the v0.8.1 mock-store failure mode: `store()` succeeds but the value
+    /// does not persist. `self_test()` must surface that as an `Err`, never a
+    /// false Ok.
+    #[derive(Default)]
+    struct NoPersistStore;
+
+    impl SecretStore for NoPersistStore {
+        fn store(&self, handle: &str, _secret: &str) -> Result<SecretRef, SecretError> {
+            // Accepts the write (like the mock/no-op store) but persists nothing.
+            Ok(SecretRef::new(handle))
+        }
+
+        fn resolve(&self, secret_ref: &SecretRef) -> Result<String, SecretError> {
+            Err(SecretError::NotFound(secret_ref.handle().to_string()))
+        }
+
+        fn delete(&self, _secret_ref: &SecretRef) -> Result<(), SecretError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn self_test_err_when_round_trip_fails() {
+        let store = NoPersistStore;
+        match store.self_test() {
+            Err(SecretError::NotFound(h)) => assert_eq!(h, "harbor-selftest"),
+            other => panic!("self-test over a non-persisting store must Err, got {other:?}"),
+        }
+    }
+
+    /// A store that persists but returns a DIFFERENT value must also fail the
+    /// self-test (the mismatch branch), never returning Ok.
+    #[derive(Default)]
+    struct MismatchStore;
+
+    impl SecretStore for MismatchStore {
+        fn store(&self, handle: &str, _secret: &str) -> Result<SecretRef, SecretError> {
+            Ok(SecretRef::new(handle))
+        }
+
+        fn resolve(&self, _secret_ref: &SecretRef) -> Result<String, SecretError> {
+            Ok("a-different-value".to_string())
+        }
+
+        fn delete(&self, _secret_ref: &SecretRef) -> Result<(), SecretError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn self_test_err_on_value_mismatch() {
+        let store = MismatchStore;
+        match store.self_test() {
+            Err(SecretError::Backend(msg)) => assert!(msg.contains("mismatch")),
+            other => panic!("self-test over a mismatching store must Err, got {other:?}"),
+        }
     }
 
     /// Keyring-backed round-trip. IGNORED by default because headless Linux CI
