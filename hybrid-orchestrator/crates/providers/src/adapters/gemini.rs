@@ -235,18 +235,82 @@ impl GeminiAdapter {
         body
     }
 
-    fn caps_for(model: &str) -> Capabilities {
+    /// Per-model capabilities grounded in the `/v1beta/models` metadata.
+    ///
+    /// `max_context` comes from the entry's `inputTokenLimit` (the real context
+    /// window) when known. Vision is claimed ONLY for the documented multimodal
+    /// families (Gemini 1.5 / 2.x pro and flash accept image inputs); a model
+    /// outside those families is treated as text-only rather than over-claiming.
+    /// Tools (function calling), streaming, and JSON mode are supported by the
+    /// `generateContent` chat models this shim surfaces, so they are set for the
+    /// kept candidates. Callers that lack metadata fall back to
+    /// [`caps_for`](Self::caps_for), which applies the same per-family truth
+    /// without a context window.
+    fn caps_from_metadata(model: &str, input_token_limit: Option<u32>) -> Capabilities {
         Capabilities {
             streaming: true,
             tools: true,
-            vision: model.contains("gemini-1.5")
-                || model.contains("gemini-2")
-                || model.contains("pro")
-                || model.contains("flash"),
+            vision: is_multimodal_family(model),
             json_mode: true,
-            max_context: None,
+            max_context: input_token_limit,
         }
     }
+
+    /// Capabilities for a model when no `/v1beta/models` metadata is available
+    /// (the `ChatProvider::capabilities(model)` string-lookup path). Applies the
+    /// same documented per-family vision truth as
+    /// [`caps_from_metadata`](Self::caps_from_metadata) but cannot know the
+    /// context window, so `max_context` is `None`.
+    fn caps_for(model: &str) -> Capabilities {
+        Self::caps_from_metadata(model, None)
+    }
+}
+
+/// The documented multimodal Gemini families that accept image inputs: the
+/// Gemini 1.5 and 2.x `pro` / `flash` lines. A model outside these families is
+/// treated as text-only rather than over-claiming vision (architecture.md
+/// Section 4.4). Matched on lowercased id substrings so it generalizes across
+/// point releases.
+fn is_multimodal_family(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    (id.contains("gemini-1.5") || id.contains("gemini-2") || id.contains("gemini-3"))
+        && (id.contains("pro") || id.contains("flash"))
+}
+
+/// Backstop non-chat name filter, used ONLY when a `/v1beta/models` entry omits
+/// `supportedGenerationMethods` (the primary, reliable signal). It matches the
+/// obvious non-chat Gemini families by lowercased id substring so they never
+/// reach the model picker:
+///   - `embedding` - text embeddings (`gemini-embedding-*`);
+///   - `-tts` / `native-audio` - text-to-speech / audio-out;
+///   - `-transcribe` - speech transcription;
+///   - `-image` / `imagen` / `nano-banana` - image generation;
+///   - `veo-` - video generation;
+///   - `lyria-` - music generation;
+///   - `robotics` - the Gemini Robotics control models;
+///   - `computer-use` - the computer-use agent model;
+///   - `aqa` - the attributed-question-answering model;
+///   - `deep-research` / `antigravity` - non-chat research/agent surfaces.
+///
+/// Any unrecognized name is deliberately NOT matched (returns `false`) so a new
+/// chat model is never dropped by the backstop; the primary methods-list signal
+/// remains authoritative whenever the API provides it.
+fn is_non_chat_model_name(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    id.contains("embedding")
+        || id.contains("-tts")
+        || id.contains("native-audio")
+        || id.contains("-transcribe")
+        || id.contains("-image")
+        || id.contains("imagen")
+        || id.contains("nano-banana")
+        || id.contains("veo-")
+        || id.contains("lyria-")
+        || id.contains("robotics")
+        || id.contains("computer-use")
+        || id.contains("aqa")
+        || id.contains("deep-research")
+        || id.contains("antigravity")
 }
 
 /// Map a Gemini `finishReason` onto the internal [`FinishReason`].
@@ -458,21 +522,34 @@ impl ChatProvider for GeminiAdapter {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
-        // The Gemini `/v1beta/models` listing needs the key on the query string.
+        // The `/v1beta/models` listing carries the key in the `x-goog-api-key`
+        // header (see `request_headers`), not the query string.
         #[derive(Deserialize)]
         struct ModelsResponse {
             #[serde(default)]
             models: Vec<ModelEntry>,
         }
+        // The real fields Gemini's `/v1beta/models` entries expose. All
+        // `#[serde(default)]` so an entry omitting any of them still decodes.
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct ModelEntry {
             name: String,
             #[serde(default)]
             display_name: Option<String>,
+            /// The generation methods the model supports, e.g.
+            /// `["generateContent", "streamGenerateContent"]` for chat models,
+            /// `["embedContent"]` for embeddings, `["predict"]` for image/video.
+            /// This is the RELIABLE chat-capability signal.
+            #[serde(default)]
+            supported_generation_methods: Vec<String>,
+            /// The model's input (context) token limit, used as `max_context`.
+            #[serde(default)]
+            input_token_limit: Option<u32>,
+            /// The model's output token limit (retained for completeness).
+            #[serde(default)]
+            output_token_limit: Option<u32>,
         }
-        // Key travels in the `x-goog-api-key` header (see `request_headers`),
-        // not the query string.
         let resp: ModelsResponse = self
             .client
             .get_json("/v1beta/models", &self.request_headers())
@@ -480,7 +557,7 @@ impl ChatProvider for GeminiAdapter {
         Ok(resp
             .models
             .into_iter()
-            .map(|m| {
+            .filter_map(|m| {
                 // Gemini returns fully-qualified names like `models/gemini-pro`;
                 // strip the prefix for the internal id.
                 let id = m
@@ -488,11 +565,38 @@ impl ChatProvider for GeminiAdapter {
                     .strip_prefix("models/")
                     .unwrap_or(&m.name)
                     .to_string();
-                ModelInfo {
+
+                // PRIMARY chat-capability signal: keep only models that can do
+                // `generateContent` (or `streamGenerateContent`). This reliably
+                // drops non-chat families the picker must never list:
+                // embeddings (`embedContent`), TTS/audio-out, transcription,
+                // image-gen, video, music, robotics, computer-use, aqa, etc.
+                // When the methods list is present but lacks generateContent,
+                // the model is excluded outright.
+                if !m.supported_generation_methods.is_empty() {
+                    let can_chat = m
+                        .supported_generation_methods
+                        .iter()
+                        .any(|meth| meth == "generateContent" || meth == "streamGenerateContent");
+                    if !can_chat {
+                        return None;
+                    }
+                } else if is_non_chat_model_name(&id) {
+                    // BACKSTOP: the API omitted the methods list for this entry,
+                    // so fall back to a name-family match rather than dropping
+                    // silently. Only obvious non-chat families are excluded; any
+                    // unrecognized name is kept so a new chat model is never
+                    // dropped by the backstop.
+                    return None;
+                }
+
+                let caps = Self::caps_from_metadata(&id, m.input_token_limit);
+                Some(ModelInfo {
                     id,
                     display_name: m.display_name,
-                    context_length: None,
-                }
+                    context_length: m.input_token_limit.or(m.output_token_limit),
+                    capabilities: Some(caps),
+                })
             })
             .collect())
     }
@@ -963,6 +1067,139 @@ mod tests {
         match build_gemini(&cfg, &store) {
             Err(ProviderError::Auth(_)) => {}
             other => panic!("expected Auth error, got {other:?}"),
+        }
+    }
+
+    /// `list_models` uses `supportedGenerationMethods` as the primary signal:
+    /// non-chat entries (embeddings, TTS) are DROPPED while a `generateContent`
+    /// model is kept, and the kept model's capabilities are grounded in its
+    /// `inputTokenLimit` and per-family vision truth (not a uniform stamp).
+    #[tokio::test]
+    async fn list_models_filters_non_chat_and_grounds_capabilities() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(header("x-goog-api-key", "AIza-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "models": [
+                    {
+                        "name": "models/gemini-2.5-pro",
+                        "displayName": "Gemini 2.5 Pro",
+                        "supportedGenerationMethods": ["generateContent", "streamGenerateContent"],
+                        "inputTokenLimit": 1_048_576,
+                        "outputTokenLimit": 65_536
+                    },
+                    {
+                        "name": "models/gemini-2.5-flash-lite",
+                        "displayName": "Gemini 2.5 Flash-Lite",
+                        "supportedGenerationMethods": ["generateContent"],
+                        "inputTokenLimit": 32_768,
+                        "outputTokenLimit": 8_192
+                    },
+                    {
+                        "name": "models/gemini-embedding-001",
+                        "displayName": "Gemini Embedding",
+                        "supportedGenerationMethods": ["embedContent"],
+                        "inputTokenLimit": 2_048
+                    },
+                    {
+                        "name": "models/gemini-2.5-flash-preview-tts",
+                        "displayName": "Gemini TTS",
+                        "supportedGenerationMethods": ["countTokens"]
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = GeminiAdapter::new("gemini", server.uri(), "AIza-test", None);
+        let models = adapter.list_models().await.unwrap();
+
+        // The embeddings and TTS entries are excluded; the two chat models stay.
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"gemini-2.5-pro"));
+        assert!(ids.contains(&"gemini-2.5-flash-lite"));
+        assert!(!ids.iter().any(|id| id.contains("embedding")));
+        assert!(!ids.iter().any(|id| id.contains("tts")));
+        assert_eq!(models.len(), 2);
+
+        // Two kept models get DIFFERENT capabilities/context grounded in
+        // metadata, not a uniform stamp: the pro model's context window comes
+        // from its (larger) inputTokenLimit and it is multimodal (vision); the
+        // flash-lite has a smaller context window.
+        let pro = models.iter().find(|m| m.id == "gemini-2.5-pro").unwrap();
+        let lite = models
+            .iter()
+            .find(|m| m.id == "gemini-2.5-flash-lite")
+            .unwrap();
+        let pro_caps = pro.capabilities.unwrap();
+        let lite_caps = lite.capabilities.unwrap();
+        assert_eq!(pro_caps.max_context, Some(1_048_576));
+        assert_eq!(lite_caps.max_context, Some(32_768));
+        assert_ne!(pro_caps.max_context, lite_caps.max_context);
+        assert!(pro_caps.vision, "gemini-2.5-pro is multimodal");
+        assert!(lite_caps.vision, "gemini-2.5-flash is multimodal");
+        assert!(pro_caps.tools && pro_caps.streaming && pro_caps.json_mode);
+    }
+
+    /// When an entry omits `supportedGenerationMethods` entirely, the name-family
+    /// backstop applies: an embeddings-named entry is dropped while a chat-named
+    /// entry with no methods list is kept (and gets fallback capabilities).
+    #[tokio::test]
+    async fn list_models_name_backstop_when_methods_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(header("x-goog-api-key", "AIza-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "models": [
+                    { "name": "models/gemini-2.0-flash" },
+                    { "name": "models/text-embedding-004" },
+                    { "name": "models/veo-3.0-generate" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let adapter = GeminiAdapter::new("gemini", server.uri(), "AIza-test", None);
+        let models = adapter.list_models().await.unwrap();
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        // The chat-named model with no methods list is KEPT via the backstop.
+        assert!(ids.contains(&"gemini-2.0-flash"));
+        // The embeddings- and video-named entries are dropped by the backstop.
+        assert!(!ids.iter().any(|id| id.contains("embedding")));
+        assert!(!ids.iter().any(|id| id.contains("veo")));
+        assert_eq!(models.len(), 1);
+    }
+
+    #[test]
+    fn non_chat_name_backstop_matches_known_families_only() {
+        // Non-chat families match.
+        for id in [
+            "gemini-embedding-001",
+            "gemini-2.5-flash-preview-tts",
+            "gemini-2.5-flash-native-audio",
+            "gemini-transcribe-001",
+            "imagen-3.0-generate",
+            "gemini-2.5-flash-image",
+            "nano-banana",
+            "veo-3.0-generate",
+            "lyria-realtime",
+            "gemini-robotics-er",
+            "gemini-2.5-computer-use",
+            "aqa",
+            "gemini-deep-research",
+            "antigravity-1",
+        ] {
+            assert!(is_non_chat_model_name(id), "{id} should be non-chat");
+        }
+        // Real chat models do NOT match the backstop.
+        for id in [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.5-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-1.5-pro",
+        ] {
+            assert!(!is_non_chat_model_name(id), "{id} should be chat");
         }
     }
 }

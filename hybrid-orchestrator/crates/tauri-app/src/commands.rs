@@ -555,11 +555,20 @@ async fn list_available_models_inner(
 }
 
 /// Convert the persisted [`PricingConfig`] (the single source of truth, Section
-/// 6.2) into the in-memory [`PricingTable`] `list_available_models` reads. The
-/// persisted rates seed the table; kinds/models the user did not price resolve
-/// to zero (local providers included).
+/// 6.2) into the in-memory [`PricingTable`] `list_available_models` reads.
+///
+/// The table STARTS from [`PricingTable::bundled_defaults`], which seeds
+/// representative, user-overridable nonzero rates for cloud kinds (Gemini,
+/// OpenAI, Anthropic, ...) and zero for genuinely-local kinds (LM Studio,
+/// Ollama, GenericOpenAI, the embedded engine). The persisted per-kind/per-model
+/// user rates are then overlaid ON TOP, so user overrides win. This is the fix
+/// for "everything shows as free": previously the table started EMPTY
+/// ([`PricingTable::new`]) so a fresh install with no user rates priced every
+/// model at zero, making the picker label paid cloud models "free". With the
+/// bundled defaults seeded first, an unpriced cloud model gets a nonzero default
+/// while local kinds stay zero.
 fn pricing_table_from_config(config: &PricingConfig) -> PricingTable {
-    let mut table = PricingTable::new();
+    let mut table = PricingTable::bundled_defaults();
     for (kind, rate) in &config.per_kind {
         table.set_kind(
             *kind,
@@ -4166,6 +4175,38 @@ mod tests {
         );
     }
 
+    /// The root-cause "everything free" fix: with an EMPTY user `PricingConfig`,
+    /// `pricing_table_from_config` seeds `PricingTable::bundled_defaults()` so a
+    /// cloud kind (Gemini) gets a nonzero default while genuinely-local kinds
+    /// (Ollama, LM Studio) stay `TokenPrice::ZERO`. Previously the table started
+    /// EMPTY and every model priced to zero.
+    #[test]
+    fn pricing_table_seeds_bundled_defaults_so_cloud_is_not_free() {
+        use orchestrator_core::ProviderKind;
+
+        // A user who has never entered any rate.
+        let empty = PricingConfig::default();
+        let table = pricing_table_from_config(&empty);
+
+        // A cloud kind (Gemini) is nonzero-priced from the bundled defaults even
+        // with no user rates: the picker no longer labels it "free".
+        let gemini = table.price_for(ProviderKind::Gemini, "gemini-2.5-flash");
+        assert!(
+            gemini.input_per_mtok > 0.0 && gemini.output_per_mtok > 0.0,
+            "an unpriced Gemini model must get a nonzero bundled default, got {gemini:?}"
+        );
+
+        // Genuinely-local kinds stay zero.
+        assert_eq!(
+            table.price_for(ProviderKind::Ollama, "qwen3:8b"),
+            TokenPrice::ZERO
+        );
+        assert_eq!(
+            table.price_for(ProviderKind::LmStudio, "any-local"),
+            TokenPrice::ZERO
+        );
+    }
+
     /// `local_provider_ids` classifies locality from the concrete
     /// [`ProviderKind`] (Section 6.2 fail-closed), NOT from price: LM Studio is
     /// always local, a loopback GenericOpenAI endpoint is local, a remote
@@ -4328,12 +4369,15 @@ mod tests {
             model: "gpt-4o".to_string(),
             capabilities: providers::Capabilities::default(),
             price: TokenPrice::new(2.5, 10.0),
+            quality: 0.9,
         };
         let json = serde_json::to_string(&row).unwrap();
         assert!(json.contains("\"providerId\":\"openai\""));
         assert!(json.contains("\"model\":\"gpt-4o\""));
         assert!(json.contains("\"capabilities\""));
         assert!(json.contains("\"price\""));
+        // The quality tier crosses IPC under the camelCase JSON key `quality`.
+        assert!(json.contains("\"quality\""));
         // No secret material of any kind is present.
         assert!(!json.to_lowercase().contains("secret"));
         assert!(!json.to_lowercase().contains("apikey"));
@@ -4489,12 +4533,14 @@ mod tests {
             model: "gpt-4o".to_string(),
             capabilities: caps(),
             price: TokenPrice::new(2.5, 10.0),
+            quality: 0.9,
         };
         let local = AvailableModel {
             provider_id: "lmstudio".to_string(),
             model: "llama".to_string(),
             capabilities: caps(),
             price: TokenPrice::ZERO,
+            quality: 0.5,
         };
 
         // Base request: LocalOnly tag, only the lmstudio row is provably local,

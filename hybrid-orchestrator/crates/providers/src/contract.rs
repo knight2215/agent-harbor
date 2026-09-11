@@ -272,6 +272,15 @@ pub struct ChatDelta {
 }
 
 /// Metadata about a model a provider offers (architecture.md Section 4.1).
+///
+/// An adapter's [`ChatProvider::list_models`] may attach a per-model
+/// [`Capabilities`] hint derived from the provider's own model-listing metadata
+/// (for example Gemini's `supportedGenerationMethods` + `inputTokenLimit`). When
+/// present, enumeration ([`crate::list_available_models`]) prefers this hint over
+/// the coarse, model-string-based [`ChatProvider::capabilities`] lookup, so a
+/// model's advertised capabilities reflect its ACTUAL metadata rather than a
+/// uniform per-provider stamp. `ModelInfo` does NOT cross the Tauri IPC boundary
+/// (only [`crate::AvailableModel`] does), so this field is internal-only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
     /// Provider-scoped model id, e.g. `gpt-4o`.
@@ -282,15 +291,21 @@ pub struct ModelInfo {
     /// Context window in tokens, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_length: Option<u32>,
+    /// Optional per-model capability hint derived at list-time from the
+    /// provider's model metadata. Prefer this over
+    /// [`ChatProvider::capabilities`] when present (see the type docs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<Capabilities>,
 }
 
 impl ModelInfo {
-    /// Construct a minimal `ModelInfo` from just an id.
+    /// Construct a minimal `ModelInfo` from just an id (no capability hint).
     pub fn new(id: impl Into<String>) -> Self {
         ModelInfo {
             id: id.into(),
             display_name: None,
             context_length: None,
+            capabilities: None,
         }
     }
 }

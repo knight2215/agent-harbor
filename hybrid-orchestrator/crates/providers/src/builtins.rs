@@ -163,6 +163,89 @@ pub struct AvailableModel {
     pub capabilities: Capabilities,
     /// Resolved per-model token price; zero for local providers (Section 6.2).
     pub price: TokenPrice,
+    /// A coarse per-model quality tier in `0.0..=1.0` resolved from a generic,
+    /// user-overridable per-kind/per-family map ([`quality_for`]). Routing's
+    /// `AutoDefaultPolicy` blends it with the capability/context proxy so
+    /// Auto / Prefer-Quality can pick a stronger model for hard tasks and a
+    /// cheaper/faster one for simple tasks (Section 6.2). Serialized as the
+    /// camelCase JSON key `quality`.
+    #[serde(default)]
+    pub quality: f64,
+}
+
+/// The neutral default quality tier for a model with no matching family/kind
+/// rule. A middle value so an unknown model neither out-ranks a known pro-tier
+/// model nor is dismissed below a known low tier (architecture.md Section 6.2).
+pub const DEFAULT_QUALITY: f64 = 0.5;
+
+/// Resolve a coarse per-model quality tier in `0.0..=1.0` from a small, generic,
+/// provider-agnostic map keyed by [`ProviderKind`] + model-id substrings
+/// (architecture.md Section 6.2 quality signal). This is a REPRESENTATIVE,
+/// user-overridable default, NOT an authoritative vendor ranking; it exists so
+/// routing can differentiate otherwise identically-capable models when picking
+/// for task complexity or a Prefer-Quality hint.
+///
+/// The tiers are intentionally family-based (matched on lowercased id
+/// substrings), so they generalize across providers rather than hardcoding one
+/// vendor:
+///   - `pro` / `opus` / `-4` / `4o` / `ultra` families read as top tier (~0.9);
+///   - `flash-lite` / an anchored `mini` (`-mini` or `:mini`) / `nano` /
+///     `haiku` / `small` / an anchored `8b` (`:8b` or `-8b`) read as a lean
+///     tier (~0.4);
+///   - `flash` / `sonnet` / `turbo` / `medium` read as a mid tier (~0.6);
+///   - local kinds (LM Studio, Ollama, GenericOpenAI loopback, the embedded
+///     engine) default to a middle tier (~0.5) because a locally-run model's
+///     strength varies with the user's hardware and chosen weights;
+///   - everything else falls back to [`DEFAULT_QUALITY`].
+///
+/// Order matters: the more specific `flash-lite` / `mini` rule is checked before
+/// the broader `flash` rule so a `*-flash-lite` model does not read as mid tier.
+pub fn quality_for(kind: ProviderKind, model: &str) -> f64 {
+    let id = model.to_ascii_lowercase();
+    // Lean / small families first (most specific), so a `flash-lite` is not
+    // captured by the broader `flash` rule below. Size/variant markers that are
+    // whole words in an id (`mini`, `8b`) are anchored to their `:`/`-`
+    // separators so they match real ids like `gpt-4o-mini`, `qwen3:8b` or
+    // `llama-3.1-8b` without a false positive when the same letters merely
+    // appear inside a vendor word (e.g. the `mini` inside `gemini`, or the `8b`
+    // inside a `model-128b` id).
+    if id.contains("flash-lite")
+        || id.contains("-mini")
+        || id.contains(":mini")
+        || id.contains("nano")
+        || id.contains("haiku")
+        || id.contains("-small")
+        || id.contains(":8b")
+        || id.contains("-8b")
+    {
+        return 0.4;
+    }
+    // Top-tier families.
+    if id.contains("pro")
+        || id.contains("opus")
+        || id.contains("ultra")
+        || id.contains("4o")
+        || id.contains("gpt-4")
+    {
+        return 0.9;
+    }
+    // Mid-tier families.
+    if id.contains("flash")
+        || id.contains("sonnet")
+        || id.contains("turbo")
+        || id.contains("medium")
+    {
+        return 0.6;
+    }
+    // Local kinds default to a middle tier; their strength depends on the
+    // user's hardware and chosen weights rather than a fixed vendor tier.
+    match kind {
+        ProviderKind::LmStudio
+        | ProviderKind::Ollama
+        | ProviderKind::GenericOpenAI
+        | ProviderKind::Embedded => 0.5,
+        _ => DEFAULT_QUALITY,
+    }
 }
 
 /// A single provider instance that could not be enumerated, surfaced to the UI
@@ -348,13 +431,22 @@ pub async fn list_available_models_with_build_errors(
             }
         };
         for model in models {
-            let capabilities = instance.capabilities(&model.id);
+            // Prefer the per-model capability hint the adapter derived from the
+            // provider's own model-listing metadata (e.g. Gemini's
+            // supportedGenerationMethods + inputTokenLimit) over the coarse,
+            // model-string-based `capabilities()` stamp, so a model's advertised
+            // capabilities reflect its ACTUAL metadata (Section 4.4 / 6.1).
+            let capabilities = model
+                .capabilities
+                .unwrap_or_else(|| instance.capabilities(&model.id));
             let price = pricing.price_for(cfg.kind, &model.id);
+            let quality = quality_for(cfg.kind, &model.id);
             models_out.push(AvailableModel {
                 provider_id: cfg.id.clone(),
                 model: model.id,
                 capabilities,
                 price,
+                quality,
             });
         }
     }
@@ -537,14 +629,63 @@ mod tests {
         assert!(cloud[0].capabilities.tools);
         assert!(cloud[0].price.input_per_mtok > 0.0);
 
-        // DISPLAY-SAFE: the serialized rows carry only provider/model/caps/price
-        // labels, never secret material.
+        // Every row carries a resolved quality tier in 0.0..=1.0 (the generic
+        // per-kind/per-family map). The cloud gpt-4o row reads as top tier; the
+        // local llama-3.1-8b reads as the lean 8b tier.
+        for m in &models {
+            assert!((0.0..=1.0).contains(&m.quality));
+        }
+        assert_eq!(quality_for(ProviderKind::OpenAI, "gpt-4o"), 0.9);
+        assert_eq!(
+            local.quality,
+            quality_for(ProviderKind::LmStudio, "llama-3.1-8b")
+        );
+
+        // DISPLAY-SAFE: the serialized rows carry only provider/model/caps/price/
+        // quality labels, never secret material. The quality tier serializes
+        // under the camelCase JSON key `quality`.
         let json = serde_json::to_string(&models).unwrap();
         assert!(json.contains("\"providerId\""));
         assert!(json.contains("\"capabilities\""));
         assert!(json.contains("\"price\""));
+        assert!(json.contains("\"quality\""));
         assert!(!json.contains("apiKey"));
         assert!(!json.contains("secret"));
+    }
+
+    #[test]
+    fn quality_for_resolves_generic_family_tiers() {
+        // Top tier: pro / opus / 4o / gpt-4 / ultra families.
+        assert_eq!(quality_for(ProviderKind::Gemini, "gemini-2.5-pro"), 0.9);
+        assert_eq!(quality_for(ProviderKind::OpenAI, "gpt-4o"), 0.9);
+        assert_eq!(quality_for(ProviderKind::Anthropic, "claude-3-opus"), 0.9);
+        // Lean tier is checked BEFORE the broader flash rule so flash-lite and
+        // mini/nano read lean, not mid.
+        assert_eq!(
+            quality_for(ProviderKind::Gemini, "gemini-2.5-flash-lite"),
+            0.4
+        );
+        assert_eq!(quality_for(ProviderKind::OpenAI, "gpt-4o-mini"), 0.4);
+        // The `8b` size marker is anchored to `:8b` / `-8b`, so the real local
+        // ids the app enumerates read lean...
+        assert_eq!(quality_for(ProviderKind::Ollama, "qwen3:8b"), 0.4);
+        assert_eq!(quality_for(ProviderKind::Ollama, "llama-3.1-8b"), 0.4);
+        // ...but an unrelated id that merely CONTAINS `8b` as a bare substring
+        // (e.g. a 128b model) is NOT captured by the lean rule.
+        assert_eq!(quality_for(ProviderKind::Ollama, "model-128b"), 0.5);
+        // Mid tier: flash / sonnet / turbo.
+        assert_eq!(quality_for(ProviderKind::Gemini, "gemini-2.5-flash"), 0.6);
+        assert_eq!(
+            quality_for(ProviderKind::Anthropic, "claude-3-5-sonnet"),
+            0.6
+        );
+        // Local kind with no family match falls to the middle local tier.
+        assert_eq!(quality_for(ProviderKind::LmStudio, "some-local-model"), 0.5);
+        // Unknown cloud kind/model falls to the neutral default.
+        assert_eq!(
+            quality_for(ProviderKind::Bedrock, "mystery"),
+            DEFAULT_QUALITY
+        );
     }
 
     #[tokio::test]

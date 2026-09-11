@@ -49,6 +49,7 @@ function model(providerId: string, id: string): AvailableModel {
       maxContext: 8000,
     },
     price: { inputPerMtok: 5, outputPerMtok: 15 },
+    quality: 0.9,
   };
 }
 

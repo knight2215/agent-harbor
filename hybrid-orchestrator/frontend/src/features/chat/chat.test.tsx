@@ -52,6 +52,7 @@ function model(providerId: string, id: string, local: boolean): AvailableModel {
       maxContext: 8000,
     },
     price: local ? { inputPerMtok: 0, outputPerMtok: 0 } : { inputPerMtok: 5, outputPerMtok: 15 },
+    quality: local ? 0.5 : 0.9,
   };
 }
 

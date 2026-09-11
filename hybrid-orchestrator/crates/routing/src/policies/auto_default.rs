@@ -79,9 +79,21 @@ struct Ranked<'a> {
     score: f64,
 }
 
-/// A 0.0..=1.0 quality proxy for a candidate at a given complexity. Larger
-/// context windows and richer capabilities read as higher quality; when the
-/// task is complex, capability weight matters more.
+/// A 0.0..=1.0 quality proxy for a candidate at a given complexity.
+///
+/// Two independent strength signals are BLENDED (architecture.md Section 6.2):
+///   1. a capability/context proxy - larger context windows and richer
+///      capabilities read as higher quality; and
+///   2. the explicit per-model quality tier ([`AvailableModel::quality`]),
+///      resolved at enumeration time from a generic per-family/per-kind map.
+///
+/// Blending (rather than replacing) keeps the caps/context contribution that
+/// already distinguished, say, a small-context tool-less model from a
+/// large-context tool-capable one, while letting the explicit tier separate
+/// models that are otherwise identically capable (the ~48 Gemini models that all
+/// shared a uniform capability stamp). When the task is complex, this quality
+/// signal (both parts) is weighted more heavily; for a simple task a modest
+/// model already suffices, so the spread is compressed.
 fn quality_for_complexity(model: &AvailableModel, complexity: TaskComplexity) -> f64 {
     let caps = &model.capabilities;
     // Capability breadth as a coarse strength proxy.
@@ -103,8 +115,15 @@ fn quality_for_complexity(model: &AvailableModel, complexity: TaskComplexity) ->
         Some(ctx) => (ctx as f64 / 128_000.0).min(1.0) * 0.45,
         None => 0.1,
     };
-    let base = (cap_score + ctx_score).min(1.0);
-    // For higher complexity, weight capability strength more heavily; for low
+    let caps_proxy = (cap_score + ctx_score).min(1.0);
+    // Blend the caps/context proxy with the explicit per-model quality tier.
+    // The tier is clamped defensively in case a fixture supplies an
+    // out-of-range value. Equal weight keeps neither signal able to dominate:
+    // two identically-capable models still separate on their tier, while the
+    // caps/context proxy still separates models of different capability.
+    let tier = model.quality.clamp(0.0, 1.0);
+    let base = (0.5 * caps_proxy + 0.5 * tier).min(1.0);
+    // For higher complexity, weight the blended strength more heavily; for low
     // complexity, a modest model already suffices, so compress the spread.
     match complexity {
         TaskComplexity::Low => 0.5 + base * 0.5,
@@ -385,11 +404,25 @@ mod tests {
         price: TokenPrice,
         capabilities: Capabilities,
     ) -> AvailableModel {
+        // A neutral mid quality tier keeps the pre-quality-signal fixtures
+        // behaving as before (the caps/context proxy still drives their
+        // ranking); tests that exercise the tier explicitly use `model_q`.
+        model_q(provider_id, model, price, capabilities, 0.5)
+    }
+
+    fn model_q(
+        provider_id: &str,
+        model: &str,
+        price: TokenPrice,
+        capabilities: Capabilities,
+        quality: f64,
+    ) -> AvailableModel {
         AvailableModel {
             provider_id: provider_id.to_string(),
             model: model.to_string(),
             capabilities,
             price,
+            quality,
         }
     }
 
@@ -755,5 +788,130 @@ mod tests {
         let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
         assert_eq!(decision.provider_id, "lmstudio");
         assert!(decision.rationale.contains("local"));
+    }
+
+    // --- FEAT-002: per-model quality tier blended into ranking --------------
+
+    /// At HIGH complexity a higher-quality model wins over a lower-quality model
+    /// with IDENTICAL capabilities and IDENTICAL price. Under the old
+    /// caps-only proxy the two were indistinguishable; the blended explicit
+    /// quality tier now breaks the tie toward the stronger model.
+    #[tokio::test]
+    async fn high_complexity_prefers_higher_quality_same_caps() {
+        // Force HIGH complexity with a long, code-y, multi-turn prompt.
+        let big = "refactor this ```rust\nfn f(){}\n``` ".repeat(200);
+        let mut msgs = vec![ChatMessage::text(MessageRole::User, big)];
+        for _ in 0..6 {
+            msgs.push(ChatMessage::text(MessageRole::Assistant, "ok"));
+            msgs.push(ChatMessage::text(MessageRole::User, "keep going"));
+        }
+        // Same caps, same (nonzero, equal) price: only the quality tier differs.
+        let strong = model_q(
+            "cloud-pro",
+            "pro",
+            TokenPrice::new(2.5, 10.0),
+            caps(true, true, Some(128_000)),
+            0.9,
+        );
+        let weak = model_q(
+            "cloud-lite",
+            "lite",
+            TokenPrice::new(2.5, 10.0),
+            caps(true, true, Some(128_000)),
+            0.4,
+        );
+        let req = request(msgs, vec![weak, strong]);
+        assert_eq!(estimate_complexity(&req), TaskComplexity::High);
+        let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
+        assert_eq!(decision.provider_id, "cloud-pro");
+    }
+
+    /// A PreferQuality hint picks the stronger (higher-tier) model even at a low
+    /// base complexity where the cost blend would otherwise favor the cheaper
+    /// one. Here the stronger model is also slightly pricier, so only the hint +
+    /// quality tier tips the balance toward it.
+    #[tokio::test]
+    async fn prefer_quality_hint_picks_stronger_model() {
+        // The stronger model is only marginally pricier, so the cost blend on
+        // its own would not flip the choice; the PreferQuality hint plus the
+        // higher quality tier tips it to the stronger model.
+        let strong = model_q(
+            "pro",
+            "max",
+            TokenPrice::new(2.6, 10.4),
+            caps(true, true, Some(128_000)),
+            0.9,
+        );
+        let weak = model_q(
+            "lite",
+            "mini",
+            TokenPrice::new(2.5, 10.0),
+            caps(true, true, Some(128_000)),
+            0.4,
+        );
+        let mut req = request(
+            vec![ChatMessage::text(MessageRole::User, "hi")],
+            vec![weak, strong],
+        );
+        req.routing_hint = Some(RoutingHint::PreferQuality);
+        let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
+        assert_eq!(decision.provider_id, "pro");
+    }
+
+    /// PreferLocal still stays local even when a higher-quality cloud model
+    /// exists: the quality tier informs ranking but never relaxes the locality
+    /// preference nudge (and, under a privacy tag, the hard filter).
+    #[tokio::test]
+    async fn prefer_local_stays_local_despite_higher_quality_cloud() {
+        let cloud_strong = model_q(
+            "openai",
+            "gpt-4o",
+            TokenPrice::new(2.5, 10.0),
+            caps(true, true, Some(128_000)),
+            0.9,
+        );
+        let local_weak = model_q(
+            "lmstudio",
+            "llama-3.1-8b",
+            TokenPrice::ZERO,
+            caps(true, false, Some(8_000)),
+            0.4,
+        );
+        let mut req = request(
+            vec![ChatMessage::text(MessageRole::User, "hi")],
+            vec![cloud_strong, local_weak],
+        );
+        req.routing_hint = Some(RoutingHint::PreferLocal);
+        let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
+        assert_eq!(decision.provider_id, "lmstudio");
+    }
+
+    /// Low complexity with a cheaper adequate model still prefers the cheaper
+    /// one: the quality blend does not override the cost bias when the task is
+    /// simple and both models are adequate. Even giving the pricier model a
+    /// higher quality tier, the cheaper adequate model wins at low complexity.
+    #[tokio::test]
+    async fn low_complexity_prefers_cheaper_adequate_despite_quality() {
+        let cheap = model_q(
+            "cheap",
+            "mini",
+            TokenPrice::new(0.5, 1.5),
+            caps(true, true, Some(128_000)),
+            0.6,
+        );
+        let pricey = model_q(
+            "pricey",
+            "max",
+            TokenPrice::new(5.0, 20.0),
+            caps(true, true, Some(128_000)),
+            0.9,
+        );
+        let req = request(
+            vec![ChatMessage::text(MessageRole::User, "hi")],
+            vec![pricey, cheap],
+        );
+        assert_eq!(estimate_complexity(&req), TaskComplexity::Low);
+        let decision = AutoDefaultPolicy::new().decide(&req).await.unwrap();
+        assert_eq!(decision.provider_id, "cheap");
     }
 }

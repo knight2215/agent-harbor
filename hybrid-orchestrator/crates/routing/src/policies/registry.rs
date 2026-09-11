@@ -116,6 +116,7 @@ mod tests {
                 max_context: Some(128_000),
             },
             price,
+            quality: 0.5,
         }
     }
 
