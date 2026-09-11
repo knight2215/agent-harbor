@@ -20,6 +20,7 @@ function model(providerId: string, id: string): AvailableModel {
       maxContext: null,
     },
     price: { inputPerMtok: 0, outputPerMtok: 0 },
+    quality: 0.6,
   };
 }
 

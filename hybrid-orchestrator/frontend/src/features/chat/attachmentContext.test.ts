@@ -15,6 +15,7 @@ function model(providerId: string, id: string, vision: boolean): AvailableModel 
     model: id,
     capabilities: { streaming: true, tools: true, vision, jsonMode: false, maxContext: 8000 },
     price: { inputPerMtok: 1, outputPerMtok: 2 },
+    quality: 0.6,
   };
 }
 

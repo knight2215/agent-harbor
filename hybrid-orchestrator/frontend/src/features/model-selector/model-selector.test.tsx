@@ -36,6 +36,34 @@ function model(providerId: string, id: string, local: boolean): AvailableModel {
       maxContext: 8000,
     },
     price: local ? { inputPerMtok: 0, outputPerMtok: 0 } : { inputPerMtok: 5, outputPerMtok: 15 },
+    quality: local ? 0.5 : 0.9,
+  };
+}
+
+/**
+ * A Gemini cloud row mirroring the NEW backend reality (FEAT-002): REAL
+ * per-model capabilities (not the old uniform streaming/tools/vision/json
+ * stamp), a nonzero bundled-default cloud price, and a per-model quality tier.
+ * A pro-tier model is multimodal + high quality; a lean flash-lite tier is
+ * text-only + lower quality, so the two rows render DIFFERENT capability labels.
+ */
+function geminiModel(
+  id: string,
+  opts: { vision: boolean; tools: boolean; jsonMode: boolean; maxContext: number; quality: number },
+): AvailableModel {
+  return {
+    providerId: "gemini-cloud",
+    model: id,
+    capabilities: {
+      streaming: true,
+      tools: opts.tools,
+      vision: opts.vision,
+      jsonMode: opts.jsonMode,
+      maxContext: opts.maxContext,
+    },
+    // Gemini's representative bundled-default rate (crates/providers builtins).
+    price: { inputPerMtok: 1.25, outputPerMtok: 5 },
+    quality: opts.quality,
   };
 }
 
@@ -111,6 +139,67 @@ describe("model selector", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /openai \/ gpt-4o/ }));
     expect(onChange).toHaveBeenCalledWith({ providerId: "openai", model: "gpt-4o" });
+  });
+
+  it("ProviderModelPicker renders REAL per-model caps + a nonzero cloud price for a Gemini model, and 'free' for a local one", () => {
+    // FEAT-002 now emits REAL per-model capabilities (not the old uniform
+    // 'streaming · tools · vision · json' on every row), a nonzero bundled-default
+    // cloud price (Gemini ~1.25/5.0 per Mtok), and zero price for a genuinely
+    // local model. The picker's zero-price `isLocal` heuristic therefore files
+    // the nonzero-priced Gemini row under Cloud and the zero-priced local one
+    // under Local, and the display functions render the truthful labels.
+    render(
+      <ProviderModelPicker
+        models={[
+          // Pro-tier: multimodal, tools + json, large context, high quality.
+          geminiModel("gemini-2.5-pro", {
+            vision: true,
+            tools: true,
+            jsonMode: true,
+            maxContext: 1000000,
+            quality: 0.9,
+          }),
+          // Lean flash-lite tier: text-only, no vision, lower quality.
+          geminiModel("gemini-2.5-flash-lite", {
+            vision: false,
+            tools: false,
+            jsonMode: false,
+            maxContext: 32000,
+            quality: 0.4,
+          }),
+          model("ollama-local", "qwen3:8b", true),
+        ]}
+        value={null}
+        onChange={vi.fn()}
+      />,
+    );
+
+    const cloud = screen.getByRole("region", { name: "Cloud" });
+    const local = screen.getByRole("region", { name: "Local" });
+
+    // The nonzero-priced Gemini pro model is under Cloud with the REAL price
+    // hint and its REAL (multimodal) capability labels.
+    const pro = within(cloud).getByRole("button", { name: /gemini-cloud \/ gemini-2\.5-pro/ });
+    expect(pro).toHaveTextContent("$1.25/$5 per Mtok");
+    expect(pro).toHaveTextContent("vision");
+    expect(pro).toHaveTextContent("json");
+    expect(pro).toHaveTextContent("1000000 ctx");
+
+    // The lean flash-lite model is also Cloud but has DIFFERENT (narrower)
+    // capabilities: no vision, no json label. This proves capabilities are
+    // per-model, not a uniform stamp.
+    const lite = within(cloud).getByRole("button", {
+      name: /gemini-cloud \/ gemini-2\.5-flash-lite/,
+    });
+    expect(lite).toHaveTextContent("$1.25/$5 per Mtok");
+    expect(lite).not.toHaveTextContent("vision");
+    expect(lite).not.toHaveTextContent("json");
+
+    // The genuinely-local (zero-price) model stays under Local and reads 'free'.
+    const localBtn = within(local).getByRole("button", { name: /ollama-local \/ qwen3:8b/ });
+    expect(localBtn).toHaveTextContent("free");
+    // ...and never appears under Cloud.
+    expect(within(cloud).queryByRole("button", { name: /ollama-local \/ qwen3:8b/ })).toBeNull();
   });
 
   it("ProviderModelPicker groups a zero-priced Ollama model under Local", () => {

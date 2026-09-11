@@ -383,6 +383,16 @@ export interface AvailableModel {
   model: string;
   capabilities: Capabilities;
   price: TokenPrice;
+  /**
+   * Per-model quality tier in the range 0.0..=1.0, resolved by the backend from
+   * a generic, user-overridable per-family/per-kind map (pro/opus-tier high,
+   * flash/sonnet-tier mid, flash-lite/mini/nano-tier lean, local a middle
+   * value). Fed into `AutoDefaultPolicy`'s quality-for-complexity ranking so
+   * Auto and Prefer-Quality differentiate models. Mirrors the Rust
+   * `AvailableModel.quality` field (JSON key `quality`, `#[serde(default)]`, so
+   * an older payload without it decodes to `0`).
+   */
+  quality: number;
 }
 
 /**
