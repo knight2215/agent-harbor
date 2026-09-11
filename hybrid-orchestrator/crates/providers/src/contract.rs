@@ -256,6 +256,13 @@ pub struct ChatDelta {
     /// Incremental assistant text, if any in this chunk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Incremental reasoning / "thinking" text, if any in this chunk. Thinking
+    /// models (via Ollama's OpenAI-compat `/v1` path) surface their chain of
+    /// thought on a separate `reasoning_content` delta key, distinct from the
+    /// final answer `content`. Mirrors the `content` field's attributes so a
+    /// chunk carrying no thinking is byte-identical on the wire to today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     /// Incremental tool-call fragments, if any in this chunk.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallDelta>,
@@ -445,6 +452,7 @@ mod tests {
     fn chat_delta_round_trips_and_defaults() {
         let delta = ChatDelta {
             content: Some("partial".to_string()),
+            thinking: Some("let me think".to_string()),
             tool_calls: vec![ToolCallDelta {
                 index: 0,
                 id: Some("call_1".to_string()),
@@ -454,12 +462,23 @@ mod tests {
             finish_reason: None,
         };
         let s = serde_json::to_string(&delta).unwrap();
+        assert!(s.contains("\"thinking\":\"let me think\""));
         let back: ChatDelta = serde_json::from_str(&s).unwrap();
         assert_eq!(back, delta);
 
-        // An empty delta decodes from `{}` with all-empty fields.
+        // A delta with no thinking omits the field entirely, keeping the wire
+        // shape byte-identical to before the field existed (no regression).
+        let no_thinking = ChatDelta {
+            content: Some("answer".to_string()),
+            ..ChatDelta::default()
+        };
+        let s = serde_json::to_string(&no_thinking).unwrap();
+        assert!(!s.contains("thinking"));
+
+        // An empty delta decodes from `{}` with all-empty fields (thinking None).
         let empty: ChatDelta = serde_json::from_str("{}").unwrap();
         assert_eq!(empty, ChatDelta::default());
+        assert_eq!(empty.thinking, None);
     }
 
     #[test]

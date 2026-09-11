@@ -254,6 +254,7 @@ fn parse_stream_chunk(data: &str) -> Result<Option<ChatDelta>, ProviderError> {
 
     let delta = ChatDelta {
         content: choice.delta.content,
+        thinking: choice.delta.reasoning,
         tool_calls: choice
             .delta
             .tool_calls
@@ -269,8 +270,13 @@ fn parse_stream_chunk(data: &str) -> Result<Option<ChatDelta>, ProviderError> {
     };
 
     // Skip fully-empty deltas (e.g. the opening role-only chunk) so callers see
-    // only meaningful increments.
-    if delta.content.is_none() && delta.tool_calls.is_empty() && delta.finish_reason.is_none() {
+    // only meaningful increments. A delta carrying ONLY thinking is meaningful
+    // and must still be yielded, so `thinking` participates in the skip check.
+    if delta.content.is_none()
+        && delta.thinking.is_none()
+        && delta.tool_calls.is_empty()
+        && delta.finish_reason.is_none()
+    {
         return Ok(None);
     }
     Ok(Some(delta))
@@ -294,6 +300,16 @@ struct StreamChoice {
 struct StreamDelta {
     #[serde(default)]
     content: Option<String>,
+    /// Incremental reasoning text. Ollama's OpenAI-compat `/v1` path surfaces it
+    /// as `reasoning_content` when thinking is requested; other servers may use
+    /// `reasoning` or `thinking`, so all three keys map here.
+    #[serde(
+        default,
+        alias = "reasoning_content",
+        alias = "thinking",
+        alias = "reasoning"
+    )]
+    reasoning: Option<String>,
     #[serde(default)]
     tool_calls: Vec<StreamToolCall>,
 }
@@ -396,6 +412,31 @@ mod tests {
         let delta = parse_stream_chunk(&data).unwrap().unwrap();
         assert_eq!(delta.content.as_deref(), Some("Hel"));
         assert!(delta.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn parse_stream_chunk_captures_reasoning_content_as_thinking() {
+        // Ollama's OpenAI-compat delta surfaces reasoning on `reasoning_content`.
+        // A chunk carrying ONLY reasoning must still be yielded (not skipped as
+        // empty) with the text mapped onto ChatDelta.thinking and content unset.
+        let data = json!({
+            "choices": [{"delta": {"reasoning_content": "Let me think..."}}]
+        })
+        .to_string();
+        let delta = parse_stream_chunk(&data).unwrap().unwrap();
+        assert_eq!(delta.thinking.as_deref(), Some("Let me think..."));
+        assert_eq!(delta.content, None);
+        assert!(delta.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn parse_stream_chunk_content_delta_carries_no_thinking() {
+        // A plain content delta (no reasoning key) leaves thinking None, so the
+        // content path is byte-identical to before the field existed.
+        let data = json!({"choices": [{"delta": {"content": "Hel"}}]}).to_string();
+        let delta = parse_stream_chunk(&data).unwrap().unwrap();
+        assert_eq!(delta.content.as_deref(), Some("Hel"));
+        assert_eq!(delta.thinking, None);
     }
 
     #[test]

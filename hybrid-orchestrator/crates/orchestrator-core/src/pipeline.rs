@@ -461,6 +461,20 @@ async fn stream_turn(
 
     while let Some(item) = stream.next().await {
         let delta = item.map_err(|e| e.to_string())?;
+        // Reasoning ("thinking") is streamed as a LIVE event only; it is NOT
+        // accumulated into `outcome.content`, so the persisted assistant message
+        // stays answer-only and reloaded history never shows the chain of
+        // thought. The content path below is byte-identical to before thinking
+        // existed (a delta with no thinking emits no thinking event).
+        if let Some(thinking) = delta.thinking {
+            if !thinking.is_empty() {
+                let _ = events.send(CoreEvent::MessageThinkingDelta {
+                    conversation_id,
+                    message_id: assistant_id,
+                    delta: thinking,
+                });
+            }
+        }
         if let Some(text) = delta.content {
             if !text.is_empty() {
                 outcome.content.push_str(&text);

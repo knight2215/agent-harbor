@@ -76,6 +76,10 @@ function routeInvoke(command: string): unknown {
       return { loadedModelId: null, registeredCount: 0 };
     case "provider_diagnostics":
       return { configuredCount: 0, totalModelCount: 0, providerCountWithModels: 0, providers: [] };
+    case "test_key_storage":
+      // FEAT-002: the Diagnostics section's "Test key storage" button invokes
+      // this; a well-formed { ok, detail } view keeps the panel from blanking.
+      return { ok: true, detail: "Keychain round-trip succeeded." };
     case "get_messages":
       return [];
     case "read_text_file":
@@ -159,6 +163,7 @@ describe("<App />", () => {
       messages: [],
       pendingOverride: null,
       webSearchEnabled: false,
+      thinkingEnabled: false,
       attachments: [],
       pendingPermissions: [],
       sendState: "idle",
@@ -314,6 +319,7 @@ describe("<App />", () => {
       messages: [],
       pendingOverride: null,
       webSearchEnabled: false,
+      thinkingEnabled: false,
       attachments: [],
       pendingPermissions: [],
       sendState: "idle",
@@ -344,6 +350,7 @@ describe("<App />", () => {
       messages: [],
       pendingOverride: null,
       webSearchEnabled: false,
+      thinkingEnabled: false,
       attachments: [],
       pendingPermissions: [],
       sendState: "idle",

@@ -58,6 +58,11 @@ describe("Settings", () => {
       if (cmd === "list_network_peers") {
         return Promise.resolve([]);
       }
+      // FEAT-002: the Diagnostics section's "Test key storage" button invokes
+      // this; return a well-formed { ok, detail } view.
+      if (cmd === "test_key_storage") {
+        return Promise.resolve({ ok: true, detail: "Keychain round-trip succeeded." });
+      }
       return Promise.resolve([]);
     });
     render(<Settings />);
@@ -143,6 +148,9 @@ describe("Settings", () => {
           ],
         });
       }
+      if (cmd === "test_key_storage") {
+        return Promise.resolve({ ok: true, detail: "Keychain round-trip succeeded." });
+      }
       return Promise.resolve([]);
     });
     render(<Settings />);
@@ -183,6 +191,67 @@ describe("Settings", () => {
     expect(await screen.findByRole("region", { name: "Diagnostics" })).toBeInTheDocument();
     expect(await screen.findByTestId("diagnostics-summary")).toHaveTextContent(
       "failed: provider registry build failed",
+    );
+  });
+
+  it("runs the keychain self-test and renders the ok/detail result", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "provider_diagnostics") {
+        return Promise.resolve({
+          configuredCount: 0,
+          totalModelCount: 0,
+          providerCountWithModels: 0,
+          providers: [],
+        });
+      }
+      if (cmd === "test_key_storage") {
+        return Promise.resolve({
+          ok: true,
+          detail: "Keychain round-trip succeeded: secrets persist on this system.",
+        });
+      }
+      return Promise.resolve([]);
+    });
+    render(<Settings />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
+    expect(await screen.findByRole("region", { name: "Diagnostics" })).toBeInTheDocument();
+
+    // Before clicking, the self-test has not run.
+    expect(screen.getByTestId("key-storage-summary")).toHaveTextContent("not tested yet");
+
+    // Clicking "Test key storage" invokes the command and renders the result.
+    fireEvent.click(screen.getByRole("button", { name: "Test key storage" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("test_key_storage");
+    });
+    expect(await screen.findByTestId("key-storage-summary")).toHaveTextContent(
+      "ok: Keychain round-trip succeeded: secrets persist on this system.",
+    );
+  });
+
+  it("shows 'failed: <error>' rather than a blank panel when test_key_storage throws", async () => {
+    invoke.mockImplementation((cmd: string) => {
+      if (cmd === "provider_diagnostics") {
+        return Promise.resolve({
+          configuredCount: 0,
+          totalModelCount: 0,
+          providerCountWithModels: 0,
+          providers: [],
+        });
+      }
+      if (cmd === "test_key_storage") {
+        return Promise.reject(new Error("keychain unavailable"));
+      }
+      return Promise.resolve([]);
+    });
+    render(<Settings />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Diagnostics" }));
+    expect(await screen.findByRole("region", { name: "Diagnostics" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Test key storage" }));
+    expect(await screen.findByTestId("key-storage-summary")).toHaveTextContent(
+      "failed: keychain unavailable",
     );
   });
 

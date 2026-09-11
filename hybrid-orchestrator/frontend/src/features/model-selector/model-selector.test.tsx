@@ -72,6 +72,7 @@ function resetStores() {
     messages: [],
     pendingOverride: null,
     webSearchEnabled: false,
+    thinkingEnabled: false,
     attachments: [],
     pendingPermissions: [],
   });

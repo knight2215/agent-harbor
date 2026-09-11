@@ -10,6 +10,7 @@ import type {
   ExportFormat,
   FileBinaryView,
   FileContentView,
+  KeyStorageTestResult,
   LocalRuntimeConfig,
   ManualRoute,
   McpServerConfig,
@@ -156,6 +157,20 @@ export function listAvailableModels(): Promise<AvailableModelsResult> {
  */
 export function providerDiagnostics(): Promise<ProviderDiagnosticsReport> {
   return invoke<ProviderDiagnosticsReport>("provider_diagnostics");
+}
+
+/**
+ * Round-trip a sentinel through the OS keychain and report whether the backing
+ * credential store actually persists secrets. Backed by `test_key_storage`.
+ *
+ * This is the affordance that lets a real build (notably Windows, which the
+ * sandbox cannot exercise) confirm the v0.8.1 keychain bug is fixed: if the
+ * platform backend is the mock/no-op store, the round-trip mismatches and `ok`
+ * is `false`. DISPLAY-SAFE: the result carries only `{ ok, detail }` and never
+ * secret material.
+ */
+export function testKeyStorage(): Promise<KeyStorageTestResult> {
+  return invoke<KeyStorageTestResult>("test_key_storage");
 }
 
 /**

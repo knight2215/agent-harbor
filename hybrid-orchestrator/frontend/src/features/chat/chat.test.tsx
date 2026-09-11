@@ -73,6 +73,7 @@ function resetStores() {
     messages: [],
     pendingOverride: null,
     webSearchEnabled: false,
+    thinkingEnabled: false,
     attachments: [],
     pendingPermissions: [],
     sendState: "idle",
@@ -441,6 +442,67 @@ describe("chat surface", () => {
     expect(toggle).toHaveAttribute("aria-pressed", "true");
   });
 
+  // --- FEAT-003 thinking toggle + reasoning render -------------------------
+
+  it("Composer exposes the Thinking toggle, OFF by default (aria-pressed)", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<Composer />);
+    const toggle = screen.getByRole("button", { name: "Toggle reasoning trace" });
+    // OFF by default.
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(toggle).toHaveAttribute("title", "Thinking: off");
+    expect(useConversationsStore.getState().thinkingEnabled).toBe(false);
+  });
+
+  it("Composer thinking toggle flips (and persists) the shared store flag", () => {
+    useConversationsStore.setState({ activeConversationId: "c-1", thinkingEnabled: false });
+    render(<Composer />);
+    const toggle = screen.getByRole("button", { name: "Toggle reasoning trace" });
+    fireEvent.click(toggle);
+    // The real on/off flag in the conversations store is flipped; aria-pressed +
+    // title reflect the new state.
+    expect(useConversationsStore.getState().thinkingEnabled).toBe(true);
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(toggle).toHaveAttribute("title", "Thinking: on");
+  });
+
+  it("MessageBubble renders a collapsible Reasoning section only when the toggle is ON and thinking is present", () => {
+    // With the toggle ON and thinking text, a collapsible Reasoning section
+    // renders above the answer.
+    useConversationsStore.setState({ thinkingEnabled: true });
+    const withThinking: Message = {
+      ...textMessage("m-think", "The answer is 42."),
+      thinking: "First I recall the meaning of life.",
+    };
+    const { rerender } = render(<MessageBubble message={withThinking} />);
+    expect(screen.getByTestId("message-reasoning")).toBeInTheDocument();
+    expect(screen.getByText("First I recall the meaning of life.")).toBeInTheDocument();
+    expect(screen.getByText("The answer is 42.")).toBeInTheDocument();
+
+    // With no thinking, no Reasoning section renders and nothing crashes.
+    rerender(<MessageBubble message={textMessage("m-plain", "Just the answer.")} />);
+    expect(screen.queryByTestId("message-reasoning")).toBeNull();
+    expect(screen.getByText("Just the answer.")).toBeInTheDocument();
+
+    // An empty thinking string is treated as absent (no empty section).
+    rerender(<MessageBubble message={{ ...textMessage("m-empty", "Answer."), thinking: "" }} />);
+    expect(screen.queryByTestId("message-reasoning")).toBeNull();
+  });
+
+  it("MessageBubble hides the Reasoning section when the toggle is OFF even if thinking is present", () => {
+    // The toggle is OFF by default (resetStores sets thinkingEnabled: false), so
+    // reasoning is NOT shown even when the message carries thinking text.
+    const withThinking: Message = {
+      ...textMessage("m-off", "Answer only."),
+      thinking: "hidden reasoning",
+    };
+    render(<MessageBubble message={withThinking} />);
+    expect(screen.queryByTestId("message-reasoning")).toBeNull();
+    expect(screen.queryByText("hidden reasoning")).toBeNull();
+    // The answer is still shown.
+    expect(screen.getByText("Answer only.")).toBeInTheDocument();
+  });
+
   // --- FEAT-004 web search: inject-on-success / notice-and-still-send -------
 
   it("Composer with the web-search toggle ON injects results as context before sending", async () => {
@@ -713,5 +775,100 @@ describe("chat surface", () => {
     await waitFor(() => {
       expect(useConversationsStore.getState().pendingPermissions).toHaveLength(0);
     });
+  });
+
+  // --- FEAT-004 message-bubble affordances ---------------------------------
+
+  it("MessageBubble Copy writes the message text to the clipboard (clipboard mocked)", async () => {
+    // Mock navigator.clipboard.writeText; jsdom does not implement it.
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<MessageBubble message={textMessage("m-1", "Hello world")} />);
+    fireEvent.click(screen.getByRole("button", { name: "Copy message" }));
+    await waitFor(() => {
+      expect(writeText).toHaveBeenCalledWith("Hello world");
+    });
+    // A brief "Copied" confirmation replaces the label.
+    expect(await screen.findByText("Copied")).toBeInTheDocument();
+  });
+
+  it("MessageList Regenerate on the last assistant turn re-sends the prior user content", async () => {
+    const userMsg: Message = { ...textMessage("u-1", "what is 2+2?"), role: "user", route: null };
+    const assistantMsg = textMessage("a-1", "4");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_messages") return Promise.resolve([userMsg, assistantMsg]);
+      return Promise.resolve(undefined);
+    });
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<MessageList />);
+
+    const regenerate = await screen.findByRole("button", { name: "Regenerate response" });
+    fireEvent.click(regenerate);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("send_message", {
+        conversationId: "c-1",
+        content: "what is 2+2?",
+        overrideRoute: null,
+      });
+    });
+  });
+
+  it("MessageList Edit on the last user message re-sends the edited content", async () => {
+    const userMsg: Message = { ...textMessage("u-1", "what is 2+2?"), role: "user", route: null };
+    const assistantMsg = textMessage("a-1", "4");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_messages") return Promise.resolve([userMsg, assistantMsg]);
+      return Promise.resolve(undefined);
+    });
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<MessageList />);
+
+    // Open the inline edit UI on the last user message.
+    const edit = await screen.findByRole("button", { name: "Edit message" });
+    fireEvent.click(edit);
+    const input = (await screen.findByLabelText("Edit message")) as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "what is 3+3?" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save edited message" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("send_message", {
+        conversationId: "c-1",
+        content: "what is 3+3?",
+        overrideRoute: null,
+      });
+    });
+  });
+
+  it("MessageList Continue sends a follow-up 'continue' turn (not a resume)", async () => {
+    const userMsg: Message = { ...textMessage("u-1", "explain"), role: "user", route: null };
+    const assistantMsg = textMessage("a-1", "partial answer");
+    invoke.mockImplementation((command: string) => {
+      if (command === "get_messages") return Promise.resolve([userMsg, assistantMsg]);
+      return Promise.resolve(undefined);
+    });
+    useConversationsStore.setState({ activeConversationId: "c-1" });
+    render(<MessageList />);
+
+    const cont = await screen.findByRole("button", { name: "Continue response" });
+    fireEvent.click(cont);
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("send_message", {
+        conversationId: "c-1",
+        content: "Please continue.",
+        overrideRoute: null,
+      });
+    });
+  });
+
+  it("MessageBubble hides Regenerate/Continue while a message is streaming", () => {
+    render(
+      <MessageBubble
+        message={{ ...textMessage("a-1", "streaming..."), status: "streaming" }}
+        isLastAssistant
+      />,
+    );
+    // Copy is always present; the turn-affecting actions are not shown mid-stream.
+    expect(screen.getByRole("button", { name: "Copy message" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Regenerate response" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Continue response" })).toBeNull();
   });
 });

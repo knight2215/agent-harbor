@@ -1,0 +1,7 @@
+{
+  "task_id": "task-phase-a-cloud-thinking-chat",
+  "task_description": "Phase A of the competitive-analysis roadmap for agent-harbor (Tauri, Rust + React/TS). Record the full 5-phase roadmap in the spec, then implement Phase A on ONE branch: (1) fix cloud/local API-key persistence - root cause is keyring v3 with no platform-store feature falling back to a no-op mock store on Windows - plus a keychain self-test; (2) a thinking/reasoning-trace ON/OFF toggle in the chat bar with a collapsible Reasoning section; (3) chat table-stakes affordances (copy, regenerate, edit-resend, continue). INTEGRATIONS_ONLY sandbox: real gates run in GitHub CI after push; do NOT push/tag/PR.",
+  "status": "in_progress",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null
+}

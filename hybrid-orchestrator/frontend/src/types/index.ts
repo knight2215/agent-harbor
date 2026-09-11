@@ -157,7 +157,10 @@ export interface Conversation {
   enabledToolServers: string[];
 }
 
-/** A single message within a conversation. Mirrors Rust `Message`. */
+/**
+ * A single message within a conversation. Mirrors Rust `Message`, plus one
+ * FRONTEND-ONLY accumulator: `thinking`.
+ */
 export interface Message {
   id: string;
   conversationId: string;
@@ -167,6 +170,15 @@ export interface Message {
   route: RouteMetadata | null;
   usage: TokenUsage | null;
   status: MessageStatus;
+  /**
+   * FRONTEND-ONLY: accumulated reasoning ("thinking") text streamed via
+   * `messageThinkingDelta` (FEAT-003). It is NOT part of the Rust `Message` DTO
+   * and never persisted into history; it exists only so the chat surface can
+   * render a live, collapsible "Reasoning" section above the answer. Absent /
+   * empty when the model emitted no reasoning or the toggle was off, in which
+   * case no Reasoning section renders.
+   */
+  thinking?: string;
 }
 
 /** A saved agent persona. Mirrors Rust `AgentPersona`. */
@@ -440,6 +452,22 @@ export interface ProviderDiagnosticsReport {
 }
 
 /**
+ * The display-safe result of the keychain self-test surfaced by the
+ * `test_key_storage` command. Mirrors Rust `commands::KeyStorageTestView`
+ * (`#[serde(rename_all = "camelCase")]`).
+ *
+ * `ok` reports whether a sentinel round-tripped through the OS credential store
+ * (store -> resolve -> delete); `detail` is a human-readable explanation. This
+ * is the affordance that lets a real build (notably Windows) confirm the
+ * v0.8.1 keychain bug is fixed. DISPLAY-SAFE: it never carries secret material
+ * (the round-tripped sentinel is not returned).
+ */
+export interface KeyStorageTestResult {
+  ok: boolean;
+  detail: string;
+}
+
+/**
  * A display-safe view of one imported embedded (local `.gguf`) model (Strategy
  * B / FEAT-002). Mirrors Rust `commands::EmbeddedModelView`. Carries only the
  * model id and its on-disk path; never secret material (the embedded engine
@@ -602,6 +630,20 @@ export type CoreEvent =
       text?: string;
     }
   | { type: "messageDelta"; conversationId: string; messageId: string; delta: string }
+  | {
+      /**
+       * A chunk of streamed assistant REASONING ("thinking"), kept on a separate
+       * event from `messageDelta` so the content path is byte-identical and the
+       * chat surface can render the chain of thought in a distinct, collapsible
+       * "Reasoning" section above the answer. Thinking is a LIVE event only: it
+       * is never persisted into the assistant message content, so reloaded
+       * history stays answer-only. `delta` is display-safe model output.
+       */
+      type: "messageThinkingDelta";
+      conversationId: string;
+      messageId: string;
+      delta: string;
+    }
   | {
       type: "messageComplete";
       conversationId: string;

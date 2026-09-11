@@ -436,6 +436,7 @@ fn parse_stream_chunk_with(
         } else {
             Some(content)
         },
+        thinking: None,
         tool_calls,
         finish_reason,
     };

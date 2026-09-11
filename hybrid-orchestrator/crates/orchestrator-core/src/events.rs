@@ -11,7 +11,7 @@
 //! secret material, `SecretRef` handles, raw provider responses, or credentials.
 //!
 //! The variants map to the surfaces in Section 8:
-//!   - chat:        messageStarted, messageDelta, messageComplete, messageError, permissionRequested
+//!   - chat:        messageStarted, messageDelta, messageThinkingDelta, messageComplete, messageError, permissionRequested
 //!   - history:     conversationUpdated, conversationCreated, conversationDeleted
 //!   - MCP manager: mcpStateChanged, mcpError
 //!   - selectors:   providersChanged, personasChanged
@@ -42,7 +42,7 @@ pub enum McpConnectionState {
 
 /// Events emitted by the core to the frontend (architecture.md Section 8).
 ///
-/// Exactly twelve variants, serialized as a `type`-tagged camelCase union.
+/// Exactly thirteen variants, serialized as a `type`-tagged camelCase union.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum CoreEvent {
@@ -72,6 +72,20 @@ pub enum CoreEvent {
     /// text appended to the message identified by `messageId`.
     #[serde(rename_all = "camelCase")]
     MessageDelta {
+        conversation_id: Uuid,
+        message_id: Uuid,
+        delta: String,
+    },
+    /// A chunk of streamed assistant REASONING ("thinking") output. `delta` is
+    /// the new reasoning text for the message identified by `messageId`, kept on
+    /// a separate variant from [`CoreEvent::MessageDelta`] so the content path
+    /// stays byte-identical and the frontend can render the chain of thought in
+    /// a distinct, collapsible "Reasoning" section above the answer. Thinking is
+    /// streamed as a LIVE event only; it is NOT persisted into the assistant
+    /// message content, so reloaded history stays answer-only. `delta` is
+    /// display-safe model output (never secrets), like [`CoreEvent::MessageDelta`].
+    #[serde(rename_all = "camelCase")]
+    MessageThinkingDelta {
         conversation_id: Uuid,
         message_id: Uuid,
         delta: String,
@@ -155,6 +169,25 @@ mod tests {
         // Unit-like variant still tags on `type`.
         let json = serde_json::to_string(&CoreEvent::ProvidersChanged).unwrap();
         assert_eq!(json, "{\"type\":\"providersChanged\"}");
+    }
+
+    #[test]
+    fn message_thinking_delta_round_trips_camel_case() {
+        let ev = CoreEvent::MessageThinkingDelta {
+            conversation_id: Uuid::nil(),
+            message_id: Uuid::nil(),
+            delta: "let me reason".to_string(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        assert!(json.contains("\"type\":\"messageThinkingDelta\""));
+        assert!(json.contains("\"conversationId\""));
+        assert!(json.contains("\"messageId\""));
+        assert!(json.contains("\"delta\":\"let me reason\""));
+        let back: CoreEvent = serde_json::from_str(&json).unwrap();
+        assert!(matches!(
+            back,
+            CoreEvent::MessageThinkingDelta { delta, .. } if delta == "let me reason"
+        ));
     }
 
     #[test]
@@ -256,6 +289,11 @@ mod tests {
                 message_id: Uuid::nil(),
                 delta: "display-safe text".to_string(),
             },
+            CoreEvent::MessageThinkingDelta {
+                conversation_id: Uuid::nil(),
+                message_id: Uuid::nil(),
+                delta: "display-safe reasoning".to_string(),
+            },
             CoreEvent::MessageComplete {
                 conversation_id: Uuid::nil(),
                 message_id: Uuid::nil(),
@@ -305,6 +343,7 @@ mod tests {
             match ev {
                 CoreEvent::MessageStarted { .. }
                 | CoreEvent::MessageDelta { .. }
+                | CoreEvent::MessageThinkingDelta { .. }
                 | CoreEvent::MessageComplete { .. }
                 | CoreEvent::MessageError { .. }
                 | CoreEvent::ConversationUpdated { .. }

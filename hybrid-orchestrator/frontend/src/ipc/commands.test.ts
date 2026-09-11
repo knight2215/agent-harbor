@@ -22,6 +22,7 @@ import {
   sendMessage,
   listAvailableModels,
   providerDiagnostics,
+  testKeyStorage,
   getMessages,
   setConversationRoute,
   assignPersona,
@@ -191,6 +192,14 @@ describe("ipc/commands wrappers", () => {
     expect(report.providers).toHaveLength(1);
     expect(report.providers[0].id).toBe("ollama-local");
     expect(report.providers[0].instanceBuilt).toBe(true);
+  });
+
+  it("testKeyStorage invokes test_key_storage and returns the { ok, detail } view", async () => {
+    invoke.mockResolvedValue({ ok: true, detail: "Keychain round-trip succeeded." });
+    const result = await testKeyStorage();
+    expect(invoke).toHaveBeenCalledWith("test_key_storage");
+    expect(result.ok).toBe(true);
+    expect(result.detail).toBe("Keychain round-trip succeeded.");
   });
 
   it("getMessages forwards conversationId", async () => {

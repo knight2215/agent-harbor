@@ -55,6 +55,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app_version,
+            commands::test_key_storage,
             commands::list_conversations,
             commands::create_conversation,
             commands::rename_conversation,
