@@ -162,6 +162,7 @@ mod tests {
             model: model.to_string(),
             capabilities: caps(),
             price,
+            quality: 0.5,
         }
     }
 

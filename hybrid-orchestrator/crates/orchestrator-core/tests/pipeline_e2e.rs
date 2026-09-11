@@ -103,6 +103,48 @@ impl ChatProvider for ScriptedProvider {
     }
 }
 
+/// A mock `ChatProvider` whose `chat` always fails with a fixed
+/// [`ProviderError`], used to prove a provider error (e.g. an HTTP 404 for a
+/// no-longer-available model) propagates verbatim to a visible `MessageError`.
+struct ErroringProvider {
+    status: u16,
+    body: String,
+}
+
+#[async_trait]
+impl ChatProvider for ErroringProvider {
+    fn id(&self) -> &str {
+        PROVIDER_ID
+    }
+
+    fn capabilities(&self, _model: &str) -> Capabilities {
+        // Non-streaming so the pipeline uses the `chat` path.
+        Capabilities {
+            tools: false,
+            streaming: false,
+            ..Capabilities::default()
+        }
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(vec![ModelInfo::new(MODEL)])
+    }
+
+    async fn chat(&self, _req: ChatRequest) -> Result<ChatResponse, ProviderError> {
+        Err(ProviderError::HttpStatus {
+            status: self.status,
+            body: self.body.clone(),
+        })
+    }
+
+    async fn chat_stream(
+        &self,
+        _req: ChatRequest,
+    ) -> Result<BoxStream<'static, Result<ChatDelta, ProviderError>>, ProviderError> {
+        Ok(Box::pin(stream::empty()))
+    }
+}
+
 /// Assistant response requesting a single tool call for `tool_name`.
 fn tool_call_response(call_id: &str, tool_name: &str, arguments: &str) -> ChatResponse {
     ChatResponse {
@@ -172,6 +214,7 @@ fn available_models() -> Vec<AvailableModel> {
             ..Capabilities::default()
         },
         price: TokenPrice::ZERO,
+        quality: 0.5,
     }]
 }
 
@@ -437,6 +480,7 @@ async fn routing_error_emits_message_error_and_persists_error_status() {
             ..Capabilities::default()
         },
         price: TokenPrice::new(2.5, 10.0),
+        quality: 0.5,
     }];
 
     let ctx = TurnContext {
@@ -610,4 +654,99 @@ async fn streamed_thinking_emits_thinking_delta_and_keeps_answer_only() {
         )),
         "reasoning must not appear on a content delta: {events:?}"
     );
+}
+
+/// A mid-turn provider HTTP 404 (the model is no longer available to new users)
+/// must NOT be swallowed: it propagates verbatim to a visible `MessageError` and
+/// a persisted Error-status message, with Google's replacement-suggestion body
+/// text intact. This pins Part D of FEAT-002: the routing -> provider -> stream
+/// path surfaces the provider error (status + body) through
+/// `PipelineError::Provider` so the user sees WHY the model failed and which
+/// model to use instead.
+#[tokio::test]
+async fn provider_404_propagates_verbatim_to_message_error() {
+    let session_manager = SessionManager::new(Db::open_in_memory().await.unwrap());
+    let conversation = session_manager
+        .create_conversation(ConversationInit::default())
+        .await
+        .unwrap();
+
+    let (tx, mut rx): (UnboundedSender<CoreEvent>, UnboundedReceiver<CoreEvent>) =
+        unbounded_channel();
+
+    // The exact shape Google returns for a retired model: a 404 whose body names
+    // the replacement model.
+    let body = "This model models/gemini-2.5-pro is no longer available to new \
+                users. Please update to use models/gemini-3.1-pro-preview.";
+
+    let mut providers = ProviderRegistry::new();
+    providers.insert_instance(Arc::new(ErroringProvider {
+        status: 404,
+        body: body.to_string(),
+    }));
+    let policies = routing::PolicyRegistry::new();
+    let gate = PermissionGate::new(tx.clone(), PermissionRegistry::new());
+
+    let ctx = TurnContext {
+        session_manager: &session_manager,
+        policies: &policies,
+        providers: &providers,
+        servers: Vec::new(),
+        gate,
+        events: tx.clone(),
+        available: available_models(),
+        local_provider_ids: [PROVIDER_ID.to_string()].into_iter().collect(),
+    };
+
+    let err = run_turn(&ctx, conversation.id, "hello".to_string(), None)
+        .await
+        .expect_err("a provider 404 must surface as an error");
+
+    // The error is a provider error carrying the status and the body verbatim.
+    match &err {
+        PipelineError::Provider(msg) => {
+            assert!(msg.contains("404"), "status preserved: {msg}");
+            assert!(
+                msg.contains("gemini-3.1-pro-preview"),
+                "replacement suggestion preserved verbatim: {msg}"
+            );
+        }
+        other => panic!("expected PipelineError::Provider, got {other:?}"),
+    }
+
+    // A MessageError was emitted carrying the SAME verbatim body (not swallowed
+    // or replaced with a generic message).
+    let events = drain(&mut rx);
+    let message_error = events
+        .iter()
+        .find_map(|e| match e {
+            CoreEvent::MessageError { message, .. } => Some(message.clone()),
+            _ => None,
+        })
+        .expect("a MessageError was emitted");
+    assert!(message_error.contains("404"));
+    assert!(
+        message_error.contains("gemini-3.1-pro-preview"),
+        "MessageError surfaces Google's replacement suggestion verbatim: {message_error}"
+    );
+
+    // The persisted Error-status assistant message carries the same body text.
+    let persisted = session_manager
+        .list_messages(conversation.id)
+        .await
+        .unwrap();
+    let assistant = persisted
+        .iter()
+        .find(|m| m.role == Role::Assistant)
+        .expect("error-status assistant message persisted");
+    assert_eq!(assistant.status, MessageStatus::Error);
+    match &assistant.content {
+        MessageContent::Text { text } => {
+            assert!(
+                text.contains("gemini-3.1-pro-preview"),
+                "persisted error message keeps the replacement suggestion: {text}"
+            );
+        }
+        other => panic!("unexpected content: {other:?}"),
+    }
 }

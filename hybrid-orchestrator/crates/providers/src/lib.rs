@@ -66,8 +66,8 @@ pub use registry::{ProviderFactory, ProviderRegistry};
 // provider/model/capabilities/price (Section 4.5 / 6.1 / 8.2).
 pub use builtins::{
     build_registry, builtin_registry, list_available_models,
-    list_available_models_with_build_errors, AvailableModel, AvailableModelsResult, PricingTable,
-    ProviderEnumerationError, TokenPrice,
+    list_available_models_with_build_errors, quality_for, AvailableModel, AvailableModelsResult,
+    PricingTable, ProviderEnumerationError, TokenPrice, DEFAULT_QUALITY,
 };
 
 // Native OpenAI-compatible adapter factories (FEAT-002). Registering these on a

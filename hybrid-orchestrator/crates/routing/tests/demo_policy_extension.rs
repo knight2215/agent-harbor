@@ -77,6 +77,7 @@ fn model(provider_id: &str, model: &str, price: TokenPrice) -> AvailableModel {
             max_context: Some(128_000),
         },
         price,
+        quality: 0.5,
     }
 }
 

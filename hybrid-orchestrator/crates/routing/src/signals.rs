@@ -313,6 +313,7 @@ mod tests {
             model: "m".to_string(),
             capabilities: caps,
             price,
+            quality: 0.5,
         }
     }
 
